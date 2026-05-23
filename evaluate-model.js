@@ -67,6 +67,15 @@ const GRIDS = {
 // Grid generation
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Generator that yields every hyperparameter configuration in the grid.
+ * Seeds are derived from `baseSeed + offset` to ensure reproducibility across
+ * different grid sizes and orderings.
+ *
+ * @param {{ numTrees: number[], maxDepth: number[], minSamplesLeaf: number[], maxFeatures: string[] }} grid
+ * @param {number} baseSeed
+ * @yields {{ numTrees: number, maxDepth: number, minSamplesLeaf: number, maxFeatures: string, seed: number }}
+ */
 function* generateConfigs(grid, baseSeed) {
   for (const numTrees of grid.numTrees) {
     for (const maxDepth of grid.maxDepth) {
@@ -79,6 +88,12 @@ function* generateConfigs(grid, baseSeed) {
   }
 }
 
+/**
+ * Count the total number of configurations in a hyperparameter grid object.
+ *
+ * @param {{ numTrees: number[], maxDepth: number[], minSamplesLeaf: number[], maxFeatures: string[] }} grid
+ * @returns {number}
+ */
 function countConfigs(grid) {
   return grid.numTrees.length * grid.maxDepth.length *
          grid.minSamplesLeaf.length * grid.maxFeatures.length;
@@ -112,16 +127,35 @@ function compositeScore(metrics) {
 // Formatting helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Format a number to 4 decimal places, or a dash if non-finite. @param {number} n @returns {string} */
 function fmt4(n) { return Number.isFinite(n) ? n.toFixed(4) : "  —   "; }
+/**
+ * Format a millisecond duration as "Xms" or "X.Xs".
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
 function fmtMs(ms) {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
+/**
+ * Format a signed numeric delta with leading sign.
+ *
+ * @param {number} delta
+ * @returns {string} e.g. "+0.0123" or "-0.0456".
+ */
 function fmtDelta(delta) {
   const sign = delta >= 0 ? "+" : "";
   return `${sign}${delta.toFixed(4)}`;
 }
 
+/**
+ * Print a single row in the hyperparameter sweep results table.
+ *
+ * @param {number} rank   - 1-based rank position.
+ * @param {Object} entry  - { config, metrics, score, elapsedMs }.
+ */
 function printRow(rank, entry) {
   const { config, metrics, score, elapsedMs } = entry;
   const c = config;
@@ -139,6 +173,13 @@ function printRow(rank, entry) {
   );
 }
 
+/**
+ * Print a baseline (mean predictor or heuristic) row in the results table.
+ *
+ * @param {string} label   - Short label shown in the row.
+ * @param {Object} metrics - Metrics object from `computeMetrics`.
+ * @param {number} score   - Composite score.
+ */
 function printBaselineRow(label, metrics, score) {
   process.stdout.write(
     `  ───  BASELINE ${label.toUpperCase().padEnd(10)}           ` +
@@ -153,6 +194,13 @@ function printBaselineRow(label, metrics, score) {
 // CLI argument parsing
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Parse CLI flags into a configuration object.
+ *
+ * @param {string[]} argv - Raw argument list (e.g. `process.argv.slice(2)`).
+ * @returns {{ data: string, output: string, results: string, testSplit: number,
+ *             limit: number, grid: string, seed: number, verbose: boolean }}
+ */
 function parseArgs(argv) {
   const args = {
     data:      "training-data.current.jsonl",
@@ -193,6 +241,7 @@ function parseArgs(argv) {
   return args;
 }
 
+/** Print CLI usage and option descriptions to stdout. */
 function printHelp() {
   process.stdout.write([
     "Usage: node evaluate-model.js [options]",
@@ -222,6 +271,13 @@ function printHelp() {
 // Main
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Entry point.  Loads training data, computes baseline metrics, runs the
+ * hyperparameter sweep, saves the best model, and writes all results to disk.
+ *
+ * The sweep always starts by printing baseline rows (mean predictor and
+ * heuristic predictor) so every run shows how much RF improves over them.
+ */
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 

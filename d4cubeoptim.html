@@ -777,6 +777,7 @@
 		let worker = null;
 		let activeRunId = 0;
 		let treeCache = null;
+		let rfModel = null;
 		let runInProgress = false;
 		let currentBestAction = null;
 		let lastDiagnostics = null;
@@ -827,6 +828,11 @@
 			bindEvents();
 			renderAll();
 			ensureWorker();
+			// Load the RF model for the scorer; optimizer works without it if fetch fails.
+			fetch("./model.json")
+				.then((r) => (r.ok ? r.json() : null))
+				.then((m) => { if (m) rfModel = m; })
+				.catch(() => {});
 		}
 
 		function populateStaticLists() {
@@ -1034,6 +1040,7 @@
 				timeMs,
 				stopBuffer,
 				tree: treeCache,
+				scorerModel: rfModel,
 			});
 		}
 

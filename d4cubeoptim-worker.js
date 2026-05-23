@@ -1,15 +1,91 @@
-/* d4cubeoptim-worker.js
- * Monte Carlo optimizer for Horadric Cube affix planning.
+/**
+ * d4cubeoptim-worker.js
+ *
+ * Monte Carlo Tree Search (MCTS) optimizer for Horadric Cube affix planning
+ * in Diablo 4.  Runs as both a Web Worker (browser) and a synchronous
+ * Node.js module.
+ *
+ * Architecture
+ * ────────────
+ * - MCTS with UCB1 exploration drives the search loop.
+ * - Short random rollouts bootstrap nodes before sufficient visit data
+ *   accumulates; once a node has ≥2 visits it is expanded recursively.
+ * - Rule-based shortcuts (`resolveRuleAction`) fire for provably-optimal
+ *   moves, bypassing MCTS entirely for those decisions.
+ * - A pluggable `scorer` (e.g. a trained Random Forest from random-forest.js)
+ *   can replace the built-in heuristics at depth-limit leaves and rollout
+ *   terminals.  Pass it via `options.scorer` in the Node.js API.
+ *
+ * Worker message protocol (browser)
+ * ──────────────────────────────────
+ * Incoming:
+ *   { type: "run",  ...payload }  — begin optimization
+ *   { type: "stop" }              — request early termination
+ *
+ * Outgoing:
+ *   { type: "progress", runId, ...snapshot }  — throttled progress events
+ *   { type: "done",     runId, ...result  }   — final answer
+ *   { type: "error",    runId, message    }   — unhandled exception
+ *
+ * Node.js API
+ * ───────────
+ * ```js
+ * const worker = require('./d4cubeoptim-worker.js');
+ * const rf     = require('./random-forest.js');
+ * const model  = rf.loadModel('./model.json');
+ *
+ * const result = worker.optimizeScenario(payload, {
+ *   scorer: (state, target) => rf.scoreState(model, state, target),
+ * });
+ * ```
  */
 
+// Load the RF scoring module when running as a browser Web Worker.
+// Functions become worker-scope globals; gracefully degrades if unavailable.
+if (typeof importScripts !== "undefined") {
+  try { importScripts("./random-forest.js"); } catch (_) { /* scorer unavailable */ }
+}
+
+/** Global stop flag set by worker "stop" messages. */
 let stopRequested = false;
+
+/**
+ * Fraction of root-level decisions taken randomly (ε-greedy).
+ * Keeps low-visit actions alive so the root does not over-commit early.
+ */
 const ROOT_EXPLORE_EPSILON = 0.14;
+
+/** Minimum visit count every root action must receive before UCB takes over. */
 const ROOT_MIN_VISITS_BASE = 6;
+
+/**
+ * Scales the minimum-visit threshold at the root with log(totalVisits).
+ * Higher values force more exhaustive early exploration.
+ */
 const ROOT_MIN_VISITS_LOG_SCALE = 2;
+
+/**
+ * Probability of choosing a random action during rollouts.
+ * 0 = fully greedy rollouts (recommended for this domain).
+ */
 const ROLLOUT_EPSILON = 0;
+
+/**
+ * Probability floor for treating a rule-selected action as "guaranteed".
+ * Set just below 1.0 to tolerate floating-point rounding.
+ */
 const RULE_SUCCESS_THRESHOLD = 1 - 1e-9;
+
+/** Affix-family tag for elemental damage subtypes. */
 const ELEMENTAL_DAMAGE_FAMILY = "elemental-damage";
+
+/** Affix-family tag for specific resistance subtypes. */
 const SPECIFIC_RESISTANCE_FAMILY = "specific-resistance";
+
+/**
+ * Canonical placeholder IDs used to represent "any member of a family"
+ * when the specific subtype is not wanted by the target.
+ */
 const FAMILY_OTHER_IDS = {
   [ELEMENTAL_DAMAGE_FAMILY]: `${ELEMENTAL_DAMAGE_FAMILY}-other`,
   [SPECIFIC_RESISTANCE_FAMILY]: `${SPECIFIC_RESISTANCE_FAMILY}-other`,
@@ -40,11 +116,27 @@ if (typeof self !== "undefined") {
   };
 }
 
+/**
+ * Internal entry point for the Web Worker "run" message.
+ * Wraps `optimizePayload`, posts progress/done messages, and surfaces errors.
+ *
+ * @param {Object} payload - Deserialized worker message payload.
+ * @param {number} runId   - Monotonic run identifier echoed in all messages.
+ */
 function runOptimization(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
+
+  // Reconstruct RF scorer from the serialised model passed in the payload.
+  // scoreState is available as a global after importScripts('./random-forest.js').
+  let scorer = null;
+  if (payload.scorerModel && typeof scoreState === "function") {
+    scorer = (state, target) => scoreState(payload.scorerModel, state, target);
+  }
+
   const result = optimizePayload(payload, {
     stopView,
+    scorer,
     onProgress: (snapshot) => {
       self.postMessage({
         type: "progress",
@@ -61,6 +153,31 @@ function runOptimization(payload, runId) {
   });
 }
 
+/**
+ * Core optimization driver.  Builds the environment, initialises the MCTS
+ * tree, and runs the search loop until the time budget is exhausted or a
+ * stop signal is received.
+ *
+ * @param {Object}   payload                         - Scenario description.
+ * @param {Object}   payload.state                   - Starting item state.
+ * @param {Object}   payload.target                  - Target affix requirements.
+ * @param {Object}   payload.data                    - Affix/category catalogue.
+ * @param {number}   [payload.timeMs]                - Wall-clock budget (ms). Unlimited if ≤0.
+ * @param {Object}   [payload.tree]                  - Warm-start MCTS tree from a prior run.
+ * @param {number}   [payload.depthLimit=26]         - Maximum recursive expansion depth.
+ * @param {number}   [payload.rolloutDepthLimit=26]  - Maximum rollout simulation depth.
+ * @param {number}   [payload.rolloutCount=5]        - Rollout episodes per node visit.
+ * @param {Object}   [payload.gaConfig]              - GA sacrifice / required-GA configuration.
+ * @param {boolean}  [payload.includeTree=true]      - Whether to include the tree in the result.
+ * @param {Object}   options
+ * @param {Int32Array|null} [options.stopView]       - Atomics-backed stop flag (browser).
+ * @param {Function|null}   [options.onProgress]     - Called with progress snapshots every ~500 ms.
+ * @param {Function|null}   [options.scorer]         - Optional `(state, target) => {successProb, expectedSteps}`
+ *   scoring function.  When provided, replaces heuristic estimates at depth-limit
+ *   leaves and rollout terminals.  Typically `rf.scoreState.bind(null, model)`
+ *   from random-forest.js.
+ * @returns {Object} Optimization result — action, successProb, expectedSteps, diagnostics, tree, …
+ */
 function optimizePayload(payload, options = {}) {
   const {
     state,
@@ -85,6 +202,13 @@ function optimizePayload(payload, options = {}) {
   }
 
   const env = buildEnv(data, gaConfig, target);
+
+  // Attach the optional scorer so heuristic call-sites throughout the MCTS
+  // can delegate to it.  Binding `target` here keeps call-sites clean.
+  if (typeof options.scorer === "function") {
+    env.scorer = (state) => options.scorer(state, target);
+  }
+
   const maxTime = Number(timeMs);
   const unlimited = !Number.isFinite(maxTime) || maxTime <= 0;
   const startedAt = Date.now();
@@ -158,14 +282,34 @@ function optimizePayload(payload, options = {}) {
   };
 }
 
-function optimizeScenario(payload) {
+/**
+ * Convenience wrapper for Node.js callers.
+ * Runs the optimization synchronously (no Web Worker) and returns the result.
+ *
+ * @param {Object}   payload          - Same shape as `optimizePayload` payload.
+ * @param {Object}   [options={}]
+ * @param {Function} [options.scorer] - Optional `(state, target) => {successProb, expectedSteps}`
+ *   scorer.  Pass a bound `rf.scoreState` to enable Random Forest guidance.
+ * @returns {Object} Optimization result.
+ */
+function optimizeScenario(payload, options = {}) {
   stopRequested = false;
   return optimizePayload(payload, {
     stopView: null,
     onProgress: null,
+    scorer: options.scorer || null,
   });
 }
 
+/**
+ * Returns true if the search loop should terminate.
+ * Checks both the module-level `stopRequested` flag (set by worker "stop"
+ * messages) and the Atomics-backed shared-memory flag for low-latency
+ * cross-thread signalling.
+ *
+ * @param {Int32Array|null} stopView - Shared memory view, or null.
+ * @returns {boolean}
+ */
 function shouldStop(stopView) {
   if (stopRequested) {
     return true;
@@ -176,6 +320,14 @@ function shouldStop(stopView) {
   return false;
 }
 
+/**
+ * Infer the family tag ("elemental-damage" | "specific-resistance" | "")
+ * for an affix ID by prefix-matching.  Used when the affix is not in the
+ * catalogue (e.g. synthetic placeholder IDs).
+ *
+ * @param {string} affixId
+ * @returns {string} Family tag, or "" if none.
+ */
 function inferAffixFamily(affixId) {
   if (!affixId) {
     return "";
@@ -192,6 +344,14 @@ function inferAffixFamily(affixId) {
   return "";
 }
 
+/**
+ * Return the family tag for an affix, preferring the catalogue entry's
+ * `family` field and falling back to `inferAffixFamily`.
+ *
+ * @param {string} affixId
+ * @param {Object} affixMap - Map of affixId → affix object.
+ * @returns {string}
+ */
 function getAffixFamily(affixId, affixMap) {
   const affix = affixMap[affixId];
   if (affix && affix.family) {
@@ -200,6 +360,15 @@ function getAffixFamily(affixId, affixMap) {
   return inferAffixFamily(affixId);
 }
 
+/**
+ * Collapse unwanted family subtypes to a shared placeholder ID so that
+ * distinct subtypes of the same family (e.g. fire vs. cold elemental damage)
+ * are treated as the same state when neither matches the target.
+ *
+ * @param {string} affixId
+ * @param {Object} env - Built environment (needs `affixMap`, `wantedByFamily`, `familyOtherId`).
+ * @returns {string} Canonical affix ID.
+ */
 function canonicalizeAffixIdForState(affixId, env) {
   if (!affixId) {
     return affixId;
@@ -218,6 +387,14 @@ function canonicalizeAffixIdForState(affixId, env) {
   return env.familyOtherId[family] || affixId;
 }
 
+/**
+ * Apply `canonicalizeAffixIdForState` to every affix in `state.affixes`
+ * and return a new state object.
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @returns {Object} Canonicalized state.
+ */
 function canonicalizeStateForEnv(state, env) {
   const next = cloneState(state);
   next.affixes = next.affixes.map((entry) => ({
@@ -228,6 +405,16 @@ function canonicalizeStateForEnv(state, env) {
   return next;
 }
 
+/**
+ * Returns true if `state` already has more than one affix from the same
+ * family (elemental-damage or specific-resistance).
+ * Illegal states of this kind are prevented by the action model but this
+ * guard is retained as a safety check.
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @returns {boolean}
+ */
 function violatesFamilyUniqueness(state, env) {
   const counts = Object.create(null);
   for (const entry of state.affixes) {
@@ -245,6 +432,14 @@ function violatesFamilyUniqueness(state, env) {
   return false;
 }
 
+/**
+ * Check whether the target specification is structurally impossible due to
+ * family-uniqueness constraints (e.g. two elemental-damage subtypes).
+ *
+ * @param {Object} targetCounts - Map of affixId → required count.
+ * @param {Object} affixMap
+ * @returns {string} Non-empty reason string if impossible, otherwise "".
+ */
 function getImpossibleTargetFamilyReason(targetCounts, affixMap) {
   const familyCounts = Object.create(null);
 
@@ -268,6 +463,20 @@ function getImpossibleTargetFamilyReason(targetCounts, affixMap) {
   return "";
 }
 
+/**
+ * Build the immutable runtime environment for one optimization run.
+ * Pre-computes all derived data (affix maps, category lists, GA constraints,
+ * target counts, family placeholder IDs, impossibility checks) so that the
+ * hot MCTS loop never has to repeat this work.
+ *
+ * Also serves as the carrier for the optional `scorer` function — see
+ * `optimizePayload` for how it is attached after `buildEnv` returns.
+ *
+ * @param {Object}      data      - Affix/category catalogue from the UI payload.
+ * @param {Object|null} gaConfig  - { sacrificeAffixId, currentGAAffixes, strictMode, rulesEnabled }
+ * @param {Object}      target    - Target spec { affixes: [{affixId, requireGA}] }.
+ * @returns {Object} env
+ */
 function buildEnv(data, gaConfig, target) {
   const categories = data.categories || {};
   const categoryNames = Object.keys(categories);
@@ -371,6 +580,15 @@ function buildEnv(data, gaConfig, target) {
   };
 }
 
+/**
+ * Check whether a GA requirement can be met by the source item.
+ * Impossible when the source never had the affix as GA.
+ *
+ * @param {Object} sourceGACounts   - Map of affixId → GA count on source.
+ * @param {Object} targetGARequired - Map of affixId → required GA count.
+ * @param {Object} affixMap
+ * @returns {string} Non-empty reason string if impossible, otherwise "".
+ */
 function getImpossibleTargetGAReason(sourceGACounts, targetGARequired, affixMap) {
   for (const [affixId, requiredCount] of Object.entries(targetGARequired)) {
     if ((sourceGACounts[affixId] || 0) >= requiredCount) {
@@ -385,6 +603,14 @@ function getImpossibleTargetGAReason(sourceGACounts, targetGARequired, affixMap)
   return "";
 }
 
+/**
+ * Deserialize and normalise a previously-serialized MCTS tree (e.g. from a
+ * prior run's `result.tree`).  All numeric fields are coerced; missing fields
+ * are filled with defaults.  Returns an empty tree if input is falsy.
+ *
+ * @param {Object|null} tree - Serialized tree, or null.
+ * @returns {{ rootKey: string|null, nodes: Object }}
+ */
 function normalizeTree(tree) {
   if (!tree || typeof tree !== "object") {
     return { rootKey: null, nodes: Object.create(null) };
@@ -410,6 +636,13 @@ function normalizeTree(tree) {
   };
 }
 
+/**
+ * Normalise a single action-stats object, handling both the current schema
+ * and the legacy schema (pre-`successMass`/`weightedSteps` fields).
+ *
+ * @param {Object} stats - Raw action stats from a serialized tree.
+ * @returns {Object} Normalised stats.
+ */
 function normalizeActionStats(stats) {
   const legacySuccesses = Number(stats.successes) || 0;
   return {
@@ -432,6 +665,12 @@ function normalizeActionStats(stats) {
   };
 }
 
+/**
+ * Allocate a fresh MCTS tree node for the given state.
+ *
+ * @param {Object} state - Item state.
+ * @returns {{ state: Object, visits: number, actions: Object }}
+ */
 function createNode(state) {
   return {
     state: cloneState(state),
@@ -440,6 +679,13 @@ function createNode(state) {
   };
 }
 
+/**
+ * Compute a canonical string key for a state, used as the MCTS node ID.
+ * Two states that are equivalent in every meaningful way produce the same key.
+ *
+ * @param {Object} state
+ * @returns {string}
+ */
 function stateKey(state) {
   const tokens = state.affixes
     .map((entry) => `${entry.affixId}|${entry.isGA ? 1 : 0}|${entry.isEnchanted ? 1 : 0}`);
@@ -451,6 +697,12 @@ function stateKey(state) {
   ].join("#");
 }
 
+/**
+ * Deep-clone a state object (shallow-clone the affixes array entries).
+ *
+ * @param {Object} state
+ * @returns {Object} Cloned state.
+ */
 function cloneState(state) {
   return {
     isLegendary: !!state.isLegendary,
@@ -464,6 +716,14 @@ function cloneState(state) {
   };
 }
 
+/**
+ * Count occurrences of each affixId in an affixes array, with an optional
+ * predicate filter.
+ *
+ * @param {Array}    affixes
+ * @param {Function} [filterFn] - If provided, only matching entries are counted.
+ * @returns {Object} Map of affixId → count.
+ */
 function getAffixCounts(affixes, filterFn) {
   const counts = Object.create(null);
   for (const affix of affixes) {
@@ -475,6 +735,14 @@ function getAffixCounts(affixes, filterFn) {
   return counts;
 }
 
+/**
+ * Returns true if `entry` is a GA slot that the target explicitly requires.
+ * Protected GAs must never be removed or rerolled.
+ *
+ * @param {Object} entry - Affix entry { affixId, isGA, isEnchanted }.
+ * @param {Object} env
+ * @returns {boolean}
+ */
 function isProtectedGA(entry, env) {
   if (!entry || !entry.isGA) {
     return false;
@@ -482,6 +750,16 @@ function isProtectedGA(entry, env) {
   return (env.gaRequiredCounts[entry.affixId] || 0) > 0;
 }
 
+/**
+ * Determine whether the search has reached a terminal state.
+ * A state is terminal if all target affixes are present (and GA-satisfied)
+ * **or** if it has permanently broken a required GA constraint.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {{ terminal: boolean, success: boolean }}
+ */
 function isTerminal(state, target, env) {
   if (breaksRequiredGA(state, env)) {
     return { terminal: true, success: false };
@@ -504,6 +782,15 @@ function isTerminal(state, target, env) {
   return { terminal: true, success: true };
 }
 
+/**
+ * Returns true if `state` has lost a GA that was required by the target.
+ * This is a permanent failure condition — once a required GA is gone, the
+ * scenario is unsolvable (without sacrificing a new item).
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @returns {boolean}
+ */
 function breaksRequiredGA(state, env) {
   if (!env.gaRequiredCounts || Object.keys(env.gaRequiredCounts).length === 0) {
     return false;
@@ -520,6 +807,13 @@ function breaksRequiredGA(state, env) {
   return false;
 }
 
+/**
+ * Produce a deterministic string key for an action object.
+ * Used as a map key for per-action MCTS statistics.
+ *
+ * @param {{ type: string, prism?: string, sourceIndex?: number, targetAffixId?: string }} action
+ * @returns {string}
+ */
 function actionKey(action) {
   const source = Number.isInteger(action.sourceIndex) ? action.sourceIndex : "_";
   const target = action.targetAffixId || "_";
@@ -527,6 +821,17 @@ function actionKey(action) {
   return `${action.type}|${prism}|${source}|${target}`;
 }
 
+/**
+ * Return all legal Horadric Cube actions from `state` toward `target`.
+ * The list is pruned to exclude dominated moves (e.g. re-adding an affix
+ * that is already present at the required count) to keep the branching
+ * factor tractable.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {Array<Object>} Array of action objects.
+ */
 function getValidActions(state, target, env) {
   const actions = [];
 
@@ -573,6 +878,15 @@ function getValidActions(state, target, env) {
   return actions;
 }
 
+/**
+ * Return an array of affix IDs that appear in `targetCounts` but are missing
+ * (or under-counted) in `state`.  Duplicates are included — one entry per
+ * missing instance.
+ *
+ * @param {Object} state
+ * @param {Object} targetCounts - Map of affixId → required count.
+ * @returns {string[]}
+ */
 function getMissingTargetAffixIds(state, targetCounts) {
   const stateCounts = getAffixCounts(state.affixes);
   const missing = [];
@@ -588,6 +902,17 @@ function getMissingTargetAffixIds(state, targetCounts) {
   return missing;
 }
 
+/**
+ * Find the best action in `validActions` that can add `affixId` to `state`.
+ * "Best" means highest direct hit probability; ties broken alphabetically by
+ * action key to ensure determinism.
+ *
+ * @param {Object}        state
+ * @param {Array<Object>} validActions
+ * @param {Object}        env
+ * @param {string}        affixId - Target affix to add.
+ * @returns {{ action: Object, hitProbability: number }|null}
+ */
 function getBestAddActionForAffix(state, validActions, env, affixId) {
   let best = null;
 
@@ -629,6 +954,19 @@ function getBestAddActionForAffix(state, validActions, env, affixId) {
   return best;
 }
 
+/**
+ * Rule-based shortcut that bypasses MCTS for provably-optimal decisions.
+ * When a rule fires with `successProb >= RULE_SUCCESS_THRESHOLD` the caller
+ * should take that action without running further search.
+ *
+ * Covers: single remaining action, guaranteed-add, guaranteed success chain.
+ *
+ * @param {Object}        state
+ * @param {Object}        target
+ * @param {Object}        env
+ * @param {Array<Object>} validActions - Pre-computed valid actions for `state`.
+ * @returns {{ action: Object, rule: string, reason: string }|null}
+ */
 function resolveRuleAction(state, target, env, validActions) {
   if (!env || env.rulesEnabled === false) {
     return null;
@@ -707,6 +1045,16 @@ function resolveRuleAction(state, target, env, validActions) {
   return null;
 }
 
+/**
+ * Return affix entries from `state` that are eligible for
+ * enchant/remove and belong to `categoryName`.
+ * Enchanted slots are excluded (they cannot be re-enchanted).
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @param {string} categoryName
+ * @returns {Array<{ entry: Object, index: number }>}
+ */
 function getEligibleByCategory(state, env, categoryName) {
   return state.affixes
     .map((entry, index) => ({ entry, index }))
@@ -719,6 +1067,13 @@ function getEligibleByCategory(state, env, categoryName) {
     });
 }
 
+/**
+ * Return the roll weight for an affix catalogue entry.
+ * Defaults to 1 if the weight is missing, non-finite, or ≤0.
+ *
+ * @param {Object} affix - Catalogue entry with optional `rollWeight` field.
+ * @returns {number}
+ */
 function getAffixRollWeight(affix) {
   const weight = Number(affix && affix.rollWeight);
   if (!Number.isFinite(weight) || weight <= 0) {
@@ -727,6 +1082,13 @@ function getAffixRollWeight(affix) {
   return weight;
 }
 
+/**
+ * Sum the roll weights of all affixes in `categoryName`.
+ *
+ * @param {Object} env
+ * @param {string} categoryName
+ * @returns {number}
+ */
 function getCategoryWeightTotal(env, categoryName) {
   const list = env.categoryAffixes[categoryName] || [];
   let total = 0;
@@ -736,6 +1098,16 @@ function getCategoryWeightTotal(env, categoryName) {
   return total;
 }
 
+/**
+ * Compute the probability-weighted outcome distribution for `action` from
+ * `state`.  Each outcome is `{ state, probability }`.
+ * Outcomes with the same resulting state are merged.
+ *
+ * @param {Object} state
+ * @param {Object} action
+ * @param {Object} env
+ * @returns {Array<{ state: Object, probability: number }>}
+ */
 function getActionOutcomes(state, action, env) {
   const outcomes = [];
 
@@ -896,6 +1268,12 @@ function getActionOutcomes(state, action, env) {
   return [];
 }
 
+/**
+ * Merge outcomes that share the same state key by summing their probabilities.
+ *
+ * @param {Array<{ state: Object, probability: number }>} outcomes
+ * @returns {Array<{ state: Object, probability: number }>}
+ */
 function mergeOutcomes(outcomes) {
   const merged = Object.create(null);
   let total = 0;
@@ -923,10 +1301,33 @@ function mergeOutcomes(outcomes) {
   }));
 }
 
+/**
+ * Returns true if `action` is a Cube (transmute) action that costs one step.
+ * Non-cube actions (e.g. enchant via Occultist) cost no steps in this model.
+ *
+ * @param {{ type: string }} action
+ * @returns {boolean}
+ */
 function isCubeAction(action) {
   return action.type === "add" || action.type === "remove" || action.type === "chaotic" || action.type === "focused";
 }
 
+/**
+ * Core MCTS traversal.  Descends the tree with UCB1 selection until a leaf
+ * node is reached, then expands it with rollouts, and back-propagates.
+ *
+ * At `depthLimit <= 0` the function is a leaf estimator: it calls
+ * `env.scorer` if available, otherwise falls back to the built-in heuristics.
+ *
+ * @param {Object} tree         - MCTS tree { rootKey, nodes }.
+ * @param {string} nodeKey      - Key of the node to start from.
+ * @param {Object} env          - Runtime environment (may have `env.scorer`).
+ * @param {Object} target
+ * @param {number} depthLimit   - Remaining recursive depth budget.
+ * @param {number} rolloutDepthLimit
+ * @param {number} rolloutCount - Number of rollout episodes per leaf.
+ * @returns {{ cubeSteps: number, successProb: number }}
+ */
 function simulateFromNode(tree, nodeKey, env, target, depthLimit, rolloutDepthLimit, rolloutCount) {
   const node = tree.nodes[nodeKey];
   if (!node) {
@@ -942,6 +1343,15 @@ function simulateFromNode(tree, nodeKey, env, target, depthLimit, rolloutDepthLi
   }
 
   if (depthLimit <= 0) {
+    if (env.scorer) {
+      const s = env.scorer(node.state);
+      return {
+        cubeSteps: (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+          ? s.expectedSteps
+          : heuristicRemainingSteps(node.state, target, env),
+        successProb: s.successProb,
+      };
+    }
     return {
       cubeSteps: heuristicRemainingSteps(node.state, target, env),
       successProb: heuristicSuccessProbability(node.state, target, env),
@@ -1034,6 +1444,20 @@ function simulateFromNode(tree, nodeKey, env, target, depthLimit, rolloutDepthLi
   };
 }
 
+/**
+ * Run `rolloutCount` random rollouts from `state` and return the mean
+ * (cubeSteps, successProb) across all episodes.
+ *
+ * At the end of each rollout the function calls `env.scorer` if available;
+ * otherwise it falls back to the built-in heuristic estimates.
+ *
+ * @param {Object} state
+ * @param {Object} env             - Runtime environment (may have `env.scorer`).
+ * @param {Object} target
+ * @param {number} depthLimit      - Maximum simulation depth per rollout.
+ * @param {number} rolloutCount
+ * @returns {{ cubeSteps: number, successProb: number }}
+ */
 function rollout(state, env, target, depthLimit, rolloutCount) {
   let successProbSum = 0;
   let cubeStepsSum = 0;
@@ -1076,6 +1500,12 @@ function rollout(state, env, target, depthLimit, rolloutCount) {
     } else if (finalTerm.terminal && !finalTerm.success) {
       successProb = 0;
       stepEstimate = steps + 12;
+    } else if (env.scorer) {
+      const s = env.scorer(cur);
+      successProb = s.successProb;
+      stepEstimate = steps + ((s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+        ? s.expectedSteps
+        : heuristicRemainingSteps(cur, target, env));
     } else {
       successProb = heuristicSuccessProbability(cur, target, env);
       stepEstimate = steps + heuristicRemainingSteps(cur, target, env);
@@ -1091,6 +1521,17 @@ function rollout(state, env, target, depthLimit, rolloutCount) {
   };
 }
 
+/**
+ * Choose an action for rollout simulation.  With probability `ROLLOUT_EPSILON`
+ * picks uniformly at random; otherwise picks the action with the highest
+ * expected `rolloutStateScore` across its outcomes.
+ *
+ * @param {Object}       state
+ * @param {Array<Object>} actions
+ * @param {Object}       env
+ * @param {Object}       target
+ * @returns {Object} Chosen action.
+ */
 function chooseRolloutAction(state, actions, env, target) {
   if (Math.random() < ROLLOUT_EPSILON) {
     return actions[Math.floor(Math.random() * actions.length)];
@@ -1121,10 +1562,24 @@ function chooseRolloutAction(state, actions, env, target) {
   return bestAction;
 }
 
+/**
+ * Composite score combining success probability and expected step count.
+ * Used to rank completed MCTS episodes (not direct action selection).
+ *
+ * @param {number} cubeSteps  - Estimated remaining cube uses.
+ * @param {number} successProb - Probability [0,1].
+ * @returns {number} Scalar score (higher is better).
+ */
 function scoreEpisode(cubeSteps, successProb) {
   return (successProb * 130) - ((1 - successProb) * 45) - cubeSteps;
 }
 
+/**
+ * Clamp a probability value to [0, 1], returning 0 for non-finite inputs.
+ *
+ * @param {number} value
+ * @returns {number}
+ */
 function clampProb(value) {
   if (!Number.isFinite(value)) {
     return 0;
@@ -1132,6 +1587,19 @@ function clampProb(value) {
   return Math.max(0, Math.min(1, value));
 }
 
+/**
+ * Estimate the expected remaining cube steps to reach `target` from `state`
+ * via `action`, averaged over `action`’s outcome distribution.
+ *
+ * Delegates to `env.scorer` when present; otherwise uses built-in heuristics.
+ * Falls back to a fixed default (35) when no outcome distribution is available.
+ *
+ * @param {Object} state
+ * @param {Object} action
+ * @param {Object} env  - Runtime environment (may have `env.scorer`).
+ * @param {Object} target
+ * @returns {number} Estimated cube steps.
+ */
 function immediateStepHint(state, action, env, target) {
   const outcomes = getActionOutcomes(state, action, env);
   if (outcomes.length === 0) {
@@ -1150,6 +1618,12 @@ function immediateStepHint(state, action, env, target) {
     if (term.terminal) {
       successProb = term.success ? 1 : 0;
       remainingSteps = 0;
+    } else if (env.scorer) {
+      const s = env.scorer(outcome.state);
+      successProb = s.successProb;
+      remainingSteps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+        ? s.expectedSteps
+        : heuristicRemainingSteps(outcome.state, target, env);
     } else {
       successProb = heuristicSuccessProbability(outcome.state, target, env);
       remainingSteps = heuristicRemainingSteps(outcome.state, target, env);
@@ -1163,9 +1637,27 @@ function immediateStepHint(state, action, env, target) {
     return weightedSteps / successMass;
   }
 
+  if (env.scorer) {
+    const s = env.scorer(state);
+    const fallback = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+      ? s.expectedSteps
+      : heuristicRemainingSteps(state, target, env);
+    return cubeCost + fallback;
+  }
   return cubeCost + heuristicRemainingSteps(state, target, env);
 }
 
+/**
+ * Select the best action for `node` using UCB1 (for visited actions) or
+ * heuristic priors (for unvisited actions).  At the root applies ε-greedy
+ * exploration and a minimum-visit floor before switching to UCB.
+ *
+ * @param {Object}      node         - MCTS node with `state` and `actions` map.
+ * @param {boolean}     [isRoot]     - Enable root-specific exploration policy.
+ * @param {Object|null} [env]        - If provided, enables heuristic priors.
+ * @param {Object|null} [target]
+ * @returns {Object} Chosen action-stats entry.
+ */
 function chooseAction(node, isRoot = false, env = null, target = null) {
   const actionEntries = Object.values(node.actions);
   const totalVisits = Math.max(1, node.visits);
@@ -1240,6 +1732,13 @@ function chooseAction(node, isRoot = false, env = null, target = null) {
   return best;
 }
 
+/**
+ * Sample an action entry with probability inversely proportional to its
+ * visit count, biasing selection towards under-explored actions.
+ *
+ * @param {Array<Object>} actions - Action-stats entries with a `visits` field.
+ * @returns {Object}
+ */
 function sampleByInverseVisits(actions) {
   let totalWeight = 0;
   const weights = actions.map((actionStats) => {
@@ -1259,6 +1758,13 @@ function sampleByInverseVisits(actions) {
   return actions[actions.length - 1];
 }
 
+/**
+ * Sample a single outcome from `outcomes` proportionally to their
+ * probabilities using the roulette-wheel method.
+ *
+ * @param {Array<{ state: Object, probability: number }>} outcomes
+ * @returns {{ state: Object, probability: number }}
+ */
 function sampleOutcome(outcomes) {
   const r = Math.random();
   let acc = 0;
@@ -1271,6 +1777,15 @@ function sampleOutcome(outcomes) {
   return outcomes[outcomes.length - 1];
 }
 
+/**
+ * Comparator for sorting scored action summary candidates.
+ * Primary key: `successProb` descending; secondary: `expectedSteps` ascending;
+ * tertiary: `visits` descending; quaternary: action key lexicographic.
+ *
+ * @param {Object} left
+ * @param {Object} right
+ * @returns {number}
+ */
 function compareSummaryCandidates(left, right) {
   const successDiff = right.successProb - left.successProb;
   if (Math.abs(successDiff) > 1e-9) {
@@ -1292,6 +1807,17 @@ function compareSummaryCandidates(left, right) {
   return actionKey(left.action).localeCompare(actionKey(right.action));
 }
 
+/**
+ * Extract a human-readable summary from the MCTS tree root.
+ * Scores each action by its visit statistics, falls back to heuristic
+ * priors for unvisited actions, and applies rule-based overrides.
+ *
+ * @param {Object} tree    - MCTS tree.
+ * @param {string} rootKey - Key of the root node.
+ * @param {Object} env
+ * @param {Object} target
+ * @returns {Object} { action, successProb, expectedSteps, diagnostics }
+ */
 function summarizeRoot(tree, rootKey, env, target) {
   if (env.impossibleTargetGAReason) {
     return emptySummary(env.impossibleTargetGAReason);
@@ -1340,7 +1866,16 @@ function summarizeRoot(tree, rootKey, env, target) {
     }
 
     if (!Number.isFinite(expectedSteps)) {
-      expectedSteps = heuristicRemainingSteps(root.state, target, env) + (isCubeAction(entry.action) ? 1 : 0);
+      let baseSteps;
+      if (env.scorer) {
+        const s = env.scorer(root.state);
+        baseSteps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+          ? s.expectedSteps
+          : heuristicRemainingSteps(root.state, target, env);
+      } else {
+        baseSteps = heuristicRemainingSteps(root.state, target, env);
+      }
+      expectedSteps = baseSteps + (isCubeAction(entry.action) ? 1 : 0);
     }
 
     const rank = successProb;
@@ -1402,6 +1937,17 @@ function summarizeRoot(tree, rootKey, env, target) {
   };
 }
 
+/**
+ * Estimate the probability of eventually reaching `target` from `state`.
+ * Delegates to `env.scorer` when present; otherwise uses the built-in
+ * analytical heuristic.
+ *
+ * @param {Object} state
+ * @param {Object} action
+ * @param {Object} env  - Runtime environment (may have `env.scorer`).
+ * @param {Object} target
+ * @returns {number} Success probability in [0, 1].
+ */
 function immediateSuccessHint(state, action, env, target) {
   const outcomes = getActionOutcomes(state, action, env);
   if (outcomes.length === 0) {
@@ -1415,15 +1961,31 @@ function immediateSuccessHint(state, action, env, target) {
       hint += outcome.probability * (term.success ? 1 : 0);
       continue;
     }
-    hint += outcome.probability * heuristicSuccessProbability(outcome.state, target, env);
+    const sp = env.scorer
+      ? env.scorer(outcome.state).successProb
+      : heuristicSuccessProbability(outcome.state, target, env);
+    hint += outcome.probability * sp;
   }
   return clampProb(hint);
 }
 
+/**
+ * Return a map of affixId → count for `state.affixes`.
+ *
+ * @param {Object} state
+ * @returns {Object}
+ */
 function getAffixIdCountsFromState(state) {
   return getAffixCounts((state && state.affixes) || []);
 }
 
+/**
+ * Compute the added/removed affix IDs between two states.
+ *
+ * @param {Object} beforeState
+ * @param {Object} afterState
+ * @returns {{ added: string[], removed: string[] }}
+ */
 function diffAffixCounts(beforeState, afterState) {
   const beforeCounts = getAffixIdCountsFromState(beforeState);
   const afterCounts = getAffixIdCountsFromState(afterState);
@@ -1447,6 +2009,16 @@ function diffAffixCounts(beforeState, afterState) {
   return { added, removed };
 }
 
+/**
+ * Produce a human-readable label describing what changed between two states
+ * as a result of `action`.
+ *
+ * @param {Object} beforeState
+ * @param {Object} afterState
+ * @param {Object} action
+ * @param {Object} env
+ * @returns {string}
+ */
 function outcomeLabelFromStates(beforeState, afterState, action, env) {
   const diff = diffAffixCounts(beforeState, afterState);
 
@@ -1481,6 +2053,16 @@ function outcomeLabelFromStates(beforeState, afterState, action, env) {
   return "Outcome";
 }
 
+/**
+ * Build a probability breakdown (outcomes + sources) suitable for the UI
+ * for a given `action` from `state`.  Only the top 6 outcomes/sources are
+ * returned (by probability).
+ *
+ * @param {Object} state
+ * @param {Object} action
+ * @param {Object} env
+ * @returns {{ outcomes: Array, sources: Array }}
+ */
 function getActionProbabilityBreakdown(state, action, env) {
   if (!action) {
     return { outcomes: [], sources: [] };
@@ -1571,6 +2153,12 @@ function getActionProbabilityBreakdown(state, action, env) {
   return { outcomes: [], sources: [] };
 }
 
+/**
+ * Filter, sort descending by probability, and take the top 6 entries.
+ *
+ * @param {Array<{ label: string, probability: number }>} list
+ * @returns {Array}
+ */
 function topBreakdown(list) {
   return list
     .filter((entry) => Number.isFinite(entry.probability) && entry.probability > 0)
@@ -1578,6 +2166,14 @@ function topBreakdown(list) {
     .slice(0, 6);
 }
 
+/**
+ * Return a display name for the affix at position `index` in `state.affixes`.
+ *
+ * @param {Object} state
+ * @param {number} index
+ * @param {Object} env
+ * @returns {string}
+ */
 function sourceLabel(state, index, env) {
   if (!Number.isInteger(index) || index < 0 || index >= state.affixes.length) {
     return "Selected affix";
@@ -1585,20 +2181,53 @@ function sourceLabel(state, index, env) {
   return affixName(state.affixes[index].affixId, env);
 }
 
+/**
+ * Look up the human-readable name for `affixId` in the catalogue.
+ * Returns the raw ID string as a fallback.
+ *
+ * @param {string} affixId
+ * @param {Object} env
+ * @returns {string}
+ */
 function affixName(affixId, env) {
   const affix = env.affixMap[affixId];
   return affix ? affix.name : affixId;
 }
 
+/**
+ * Scalar score for a state used during rollout action selection.
+ * Terminal success → 100, failure → −120.
+ * Non-terminal: `(successProb × 200) − remainingSteps`.
+ * Uses `env.scorer` when present, otherwise the built-in heuristics.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env  - Runtime environment (may have `env.scorer`).
+ * @returns {number}
+ */
 function rolloutStateScore(state, target, env) {
   const terminal = isTerminal(state, target, env);
   if (terminal.terminal) {
     return terminal.success ? 100 : -120;
   }
 
+  if (env.scorer) {
+    const s = env.scorer(state);
+    const steps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+      ? s.expectedSteps
+      : heuristicRemainingSteps(state, target, env);
+    return (s.successProb * 200) - steps;
+  }
+
   return (heuristicSuccessProbability(state, target, env) * 200) - heuristicRemainingSteps(state, target, env);
 }
 
+/**
+ * Build a map of affixId → required count from a target spec.
+ *
+ * @param {Object} target - { affixes: [{affixId, requireGA}] }
+ * @returns {Object}
+ */
 function getTargetCountsFromTarget(target) {
   const counts = Object.create(null);
   const requirements = (target && Array.isArray(target.affixes)) ? target.affixes : [];
@@ -1613,6 +2242,15 @@ function getTargetCountsFromTarget(target) {
   return counts;
 }
 
+/**
+ * Return a boolean array parallel to `state.affixes` indicating which slots
+ * satisfy a target affix requirement.  Respects required counts (e.g. two
+ * copies of the same affix).
+ *
+ * @param {Object} state
+ * @param {Object} targetCounts - Map of affixId → required count.
+ * @returns {boolean[]}
+ */
 function markMatchedTargetAffixes(state, targetCounts) {
   const seenCounts = Object.create(null);
 
@@ -1627,6 +2265,17 @@ function markMatchedTargetAffixes(state, targetCounts) {
   });
 }
 
+/**
+ * Count how many matched (target-satisfying) affixes in `state` fall into
+ * `categoryName` and are not enchanted.  Used to estimate clean-up cost
+ * after a failed roll.
+ *
+ * @param {Object}   state
+ * @param {Object}   env
+ * @param {string}   categoryName
+ * @param {boolean[]} matchedFlags - Output of `markMatchedTargetAffixes`.
+ * @returns {number}
+ */
 function countKeptEligibleAffixes(state, env, categoryName, matchedFlags) {
   let count = 0;
 
@@ -1649,6 +2298,17 @@ function countKeptEligibleAffixes(state, env, categoryName, matchedFlags) {
   return count;
 }
 
+/**
+ * Returns true if affix slot `entry` at `index` can serve as the source
+ * for a focused transmute bridge operation.
+ * A slot is ineligible if it is enchanted, GA-protected, or already matched.
+ *
+ * @param {Object}   entry        - Affix entry { affixId, isGA, isEnchanted }.
+ * @param {Object}   env
+ * @param {boolean[]} matchedFlags
+ * @param {number}   index
+ * @returns {boolean}
+ */
 function canUseFocusedBridgeSource(entry, env, matchedFlags, index) {
   if (!entry || !entry.affixId || entry.isEnchanted) {
     return false;
@@ -1659,6 +2319,17 @@ function canUseFocusedBridgeSource(entry, env, matchedFlags, index) {
   return !isProtectedGA(entry, env);
 }
 
+/**
+ * Returns true if the affix at `sourceIndex` is the sole affix in
+ * `categoryName` on the item (excluding `sourceIndex` itself).
+ * When true, a focused transmute on it will not hit any other category affix.
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @param {number} sourceIndex
+ * @param {string} categoryName
+ * @returns {boolean}
+ */
 function isGuaranteedFocusedSourceForCategory(state, env, sourceIndex, categoryName) {
   for (let index = 0; index < state.affixes.length; index += 1) {
     if (index === sourceIndex) {
@@ -1679,6 +2350,16 @@ function isGuaranteedFocusedSourceForCategory(state, env, sourceIndex, categoryN
   return true;
 }
 
+/**
+ * Estimate the expected transmute cost (in cube uses) to land `targetAffixId`
+ * via a focused bridge from a source that is the sole member of its category.
+ * Returns Infinity when no path exists.
+ *
+ * @param {Object} env
+ * @param {string} categoryName  - The category to bridge through.
+ * @param {string} targetAffixId
+ * @returns {number}
+ */
 function getFocusedCategoryHitCost(env, categoryName, targetAffixId) {
   const list = env.categoryAffixes[categoryName] || [];
   let hitWeight = 0;
@@ -1699,6 +2380,17 @@ function getFocusedCategoryHitCost(env, categoryName, targetAffixId) {
   return totalWeight / hitWeight;
 }
 
+/**
+ * Shortest-path cost to transmute the affix at `sourceIndex` into
+ * `targetAffixId` via a chain of guaranteed focused bridge hops.
+ * Uses Dijkstra over the category graph.  Returns Infinity if unreachable.
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @param {number} sourceIndex
+ * @param {string} targetAffixId
+ * @returns {number}
+ */
 function estimateSourceFocusedBridgeSteps(state, env, sourceIndex, targetAffixId) {
   const source = state.affixes[sourceIndex];
   if (!source || !source.affixId || source.isEnchanted) {
@@ -1755,6 +2447,16 @@ function estimateSourceFocusedBridgeSteps(state, env, sourceIndex, targetAffixId
   return Infinity;
 }
 
+/**
+ * If exactly one target affix is missing and a guaranteed focused-bridge path
+ * exists, return `{ successProb: 1, expectedSteps }`.  Otherwise return null.
+ * Used as a fast-path in both heuristics to avoid the general estimator.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {{ successProb: number, expectedSteps: number }|null}
+ */
 function getGuaranteedFocusedBridgeEstimate(state, target, env) {
   const targetCounts = env.targetCounts || getTargetCountsFromTarget(target);
   const stateCounts = getAffixCounts(state.affixes);
@@ -1802,6 +2504,19 @@ function getGuaranteedFocusedBridgeEstimate(state, target, env) {
   };
 }
 
+/**
+ * Estimate the expected cube steps needed to add a specific missing `affixId`
+ * to the current item, accounting for open slots, extra (non-target) affixes
+ * that need removing, and the roll-weight distribution within each category.
+ *
+ * @param {Object}   state
+ * @param {Object}   env
+ * @param {string}   affixId
+ * @param {number}   openSlots   - Empty affix slots on the item.
+ * @param {number}   extraCount  - Non-target affixes that can be replaced.
+ * @param {boolean[]} matchedFlags - Output of `markMatchedTargetAffixes`.
+ * @returns {number} Estimated steps (≥35 as a safe default).
+ */
 function estimateMissingAffixSteps(state, env, affixId, openSlots, extraCount, matchedFlags) {
   const affix = env.affixMap[affixId];
   if (!affix || !Array.isArray(affix.categories) || affix.categories.length === 0) {
@@ -1840,6 +2555,18 @@ function estimateMissingAffixSteps(state, env, affixId, openSlots, extraCount, m
   return Number.isFinite(best) ? best : 35;
 }
 
+/**
+ * Compute a scalar quality score for `state` relative to `target`.
+ * Awards points for target affixes present/GA-satisfied; penalises for
+ * missing affixes, unwanted affixes, and broken GA requirements.
+ *
+ * Used as input to the logistic function in `heuristicSuccessProbability`.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {number}
+ */
 function evaluateState(state, target, env) {
   if (breaksRequiredGA(state, env)) {
     return -220;
@@ -1885,6 +2612,19 @@ function evaluateState(state, target, env) {
   return score;
 }
 
+/**
+ * Estimate the probability of eventually reaching `target` from `state`
+ * using the built-in analytical heuristic (not the RF scorer).
+ *
+ * Returns 0 for permanently impossible states; 1 for guaranteed success
+ * (focused-bridge path); otherwise combines a logistic on `evaluateState`
+ * with an exponential reachability decay on `heuristicRemainingSteps`.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {number} Success probability in [0, 1].
+ */
 function heuristicSuccessProbability(state, target, env) {
   if (env.impossibleTargetGAReason) {
     return 0;
@@ -1911,6 +2651,19 @@ function heuristicSuccessProbability(state, target, env) {
   return clampProb(logistic * reachability);
 }
 
+/**
+ * Estimate the expected remaining cube steps to complete `target` from
+ * `state` using the built-in analytical heuristic (not the RF scorer).
+ *
+ * Uses the focused-bridge fast path when applicable; otherwise sums per-affix
+ * step estimates from `estimateMissingAffixSteps`, adding a GA sacrifice
+ * penalty for any missing GA requirements.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {number} Estimated remaining steps (≥1).
+ */
 function heuristicRemainingSteps(state, target, env) {
   if (env.impossibleTargetGAReason) {
     return 35;
@@ -1962,6 +2715,13 @@ function heuristicRemainingSteps(state, target, env) {
   return Math.max(1, total);
 }
 
+/**
+ * Return an "impossible / no result" summary with `reason` as the
+ * human-readable explanation.
+ *
+ * @param {string} reason
+ * @returns {Object}
+ */
 function emptySummary(reason) {
   return {
     action: null,
@@ -1977,6 +2737,14 @@ function emptySummary(reason) {
   };
 }
 
+/**
+ * Return a summary for a state that is already terminal.
+ * On success returns zero-step result; on failure delegates to `emptySummary`.
+ *
+ * @param {{ terminal: boolean, success: boolean }} terminal
+ * @param {Object} env
+ * @returns {Object}
+ */
 function terminalSummary(terminal, env) {
   if (terminal.success) {
     return {
@@ -1996,6 +2764,16 @@ function terminalSummary(terminal, env) {
   return emptySummary(env.impossibleTargetGAReason || "Target requirements cannot be satisfied from the current state.");
 }
 
+/**
+ * Prune and serialise the MCTS tree to `depthLimit` levels below the root.
+ * Nodes beyond the depth limit are omitted, keeping the payload small for
+ * transmission back to the UI or for storage as a warm-start tree.
+ *
+ * @param {{ rootKey: string, nodes: Object }} tree
+ * @param {string} rootKey
+ * @param {number} depthLimit - 0 = root only, 3 = typical warm-start.
+ * @returns {{ rootKey: string, nodes: Object }}
+ */
 function shrinkTree(tree, rootKey, depthLimit) {
   const out = {
     rootKey,

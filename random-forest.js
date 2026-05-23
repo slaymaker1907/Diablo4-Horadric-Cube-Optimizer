@@ -20,7 +20,7 @@
  *   node random-forest.js eval    [--model=…] [--data=…]
  */
 
-const fs = require("node:fs");
+const fs = (typeof require !== "undefined") ? require("node:fs") : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -63,6 +63,13 @@ const NUM_FEATURES = FEATURE_NAMES.length;
 // Feature Extraction
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Infer the affix family tag ("elemental-damage" | "specific-resistance" | "")
+ * by prefix-matching the ID.  Used when the full catalogue is not available.
+ *
+ * @param {string} affixId
+ * @returns {string}
+ */
 function inferAffixFamily(affixId) {
   if (!affixId) return "";
   if (affixId.startsWith(ELEMENTAL_DAMAGE_PREFIX)) return "elemental-damage";
@@ -181,6 +188,14 @@ function extractFeatures(row) {
 // Seeded RNG (XorShift32 — same algorithm as generate_training_data.js)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Create a deterministic XorShift32 pseudo-random number generator.
+ * Returns values uniformly in [0, 1).  Uses the same algorithm as
+ * generate_training_data.js for reproducible splits.
+ *
+ * @param {number} seed - 32-bit unsigned integer seed.
+ * @returns {() => number}
+ */
 function makeRng(seed) {
   let s = (seed >>> 0) || 0x9e3779b9;
   return function rng() {
@@ -424,6 +439,7 @@ function trainModel(data, config) {
 /** Threshold below which a scenario is considered impossible. */
 const IMPOSSIBLE_THRESHOLD = 0.05;
 
+/** Clamp `v` to [lo, hi]. @param {number} v @param {number} lo @param {number} hi @returns {number} */
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 /**
@@ -626,14 +642,33 @@ function computeMetrics(modelOrFn, testData) {
 // I/O helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Serialise `model` to a JSON file at `filePath`.
+ *
+ * @param {Object} model
+ * @param {string} filePath
+ */
 function saveModel(model, filePath) {
   fs.writeFileSync(filePath, JSON.stringify(model));
 }
 
+/**
+ * Load a serialised model from a JSON file.
+ *
+ * @param {string} filePath
+ * @returns {Object} model
+ */
 function loadModel(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+/**
+ * Read an NDJSON file and parse each line as a JSON object.
+ * Blank lines and parse errors are silently skipped.
+ *
+ * @param {string} filePath
+ * @returns {Object[]}
+ */
 function loadNdjson(filePath) {
   return fs.readFileSync(filePath, "utf8")
     .trim()
@@ -646,6 +681,12 @@ function loadNdjson(filePath) {
 // CLI
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Parse CLI flags (`--key=value`) into a config object.
+ *
+ * @param {string[]} argv - `process.argv.slice(2)` or equivalent.
+ * @returns {Object}
+ */
 function parseCliArgs(argv) {
   const args = {};
   for (const arg of argv) {
@@ -657,6 +698,7 @@ function parseCliArgs(argv) {
   return args;
 }
 
+/** Print CLI usage information to stdout. */
 function printHelp() {
   process.stdout.write([
     "Usage: node random-forest.js <command> [options]",
@@ -776,14 +818,14 @@ async function main() {
   }
 }
 
-if (require.main === module) {
+if (typeof require !== "undefined" && require.main === module) {
   main().catch((err) => {
     process.stderr.write((err.stack || err.message) + "\n");
     process.exitCode = 1;
   });
 }
 
-module.exports = {
+if (typeof module !== "undefined") module.exports = {
   VERSION,
   FEATURE_NAMES,
   FI,

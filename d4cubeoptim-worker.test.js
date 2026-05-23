@@ -357,6 +357,52 @@ test("focused reroll randomly selects source within the prism category", () => {
   approxEqual(gaTouchedProbability, 0.5);
 });
 
+test("gear-slot legality narrows add outcomes for specific item slots", () => {
+  const { affixes, categories } = buildCatalogFixture({
+    Aggressive: [
+      "Critical Strike Chance",
+      "Attack Speed",
+      "Weapon Damage",
+    ],
+  });
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: [],
+    gearSlots: ["Any", "Ring", "Gloves"],
+  };
+  const env = worker.buildEnv(data, {}, { affixes: [] });
+
+  const ringState = {
+    gearSlot: "Ring",
+    isLegendary: false,
+    enchantressAvailable: true,
+    affixes: [],
+  };
+  const anyState = {
+    ...ringState,
+    gearSlot: "Any",
+  };
+
+  const ringOutcomes = worker.getActionOutcomes(ringState, {
+    type: "add",
+    prism: "Aggressive",
+  }, env);
+  const anyOutcomes = worker.getActionOutcomes(anyState, {
+    type: "add",
+    prism: "Aggressive",
+  }, env);
+
+  assert.deepEqual(
+    ringOutcomes.map((outcome) => outcome.state.affixes[0].affixId).sort(),
+    ["attack-speed", "critical-strike-chance"]
+  );
+  assert.deepEqual(
+    anyOutcomes.map((outcome) => outcome.state.affixes[0].affixId).sort(),
+    ["attack-speed", "critical-strike-chance", "weapon-damage"]
+  );
+});
+
 test("target-required GA blocks risky category actions in strict mode", () => {
   const { data, currentState } = buildFixture();
   const target = {

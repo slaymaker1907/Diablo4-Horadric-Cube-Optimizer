@@ -40,10 +40,20 @@
  * ```
  */
 
-// Load the RF scoring module when running as a browser Web Worker.
-// Functions become worker-scope globals; gracefully degrades if unavailable.
+let gearSlotLegality = null;
+
+if (typeof module !== "undefined" && module.exports) {
+  gearSlotLegality = require("./gear-slot-legality.js");
+}
+
+// Load worker-side helper modules when running as a browser Web Worker.
+// Functions become worker-scope globals; gracefully degrade if unavailable.
 if (typeof importScripts !== "undefined") {
   try { importScripts("./random-forest.js"); } catch (_) { /* scorer unavailable */ }
+  try { importScripts("./gear-slot-legality.js"); } catch (_) { /* slot legality unavailable */ }
+  if (typeof d4cubeoptimGearSlotLegality !== "undefined") {
+    gearSlotLegality = d4cubeoptimGearSlotLegality;
+  }
 }
 
 /** Cached browser-side RF model, set once per worker lifetime. */
@@ -105,6 +115,8 @@ const FAMILY_OTHER_IDS = {
   [ELEMENTAL_DAMAGE_FAMILY]: `${ELEMENTAL_DAMAGE_FAMILY}-other`,
   [SPECIFIC_RESISTANCE_FAMILY]: `${SPECIFIC_RESISTANCE_FAMILY}-other`,
 };
+
+const DEFAULT_GEAR_SLOT = "Any";
 
 if (typeof self !== "undefined") {
   self.onmessage = (event) => {
@@ -525,10 +537,23 @@ function buildEnv(data, gaConfig, target) {
   const affixes = data.affixes || [];
   const affixMap = Object.create(null);
   const categoryAffixes = Object.create(null);
+  const categoryAffixesBySlot = Object.create(null);
   const categoryWeightTotals = Object.create(null);
+  const categoryWeightTotalsBySlot = Object.create(null);
 
   for (const affix of affixes) {
-    affixMap[affix.id] = affix;
+    const derivedGearSlots = Array.isArray(affix && affix.gearSlots)
+      ? affix.gearSlots.slice()
+      : (gearSlotLegality && typeof gearSlotLegality.getLegalGearSlotsForAffixName === "function"
+        ? gearSlotLegality.getLegalGearSlotsForAffixName(affix && affix.name)
+        : null);
+
+    affixMap[affix.id] = {
+      ...affix,
+      gearSlots: Array.isArray(derivedGearSlots) && derivedGearSlots.length > 0
+        ? derivedGearSlots
+        : null,
+    };
   }
 
   for (const categoryName of categoryNames) {
@@ -537,6 +562,31 @@ function buildEnv(data, gaConfig, target) {
       .filter(Boolean);
     categoryWeightTotals[categoryName] = categoryAffixes[categoryName]
       .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
+  }
+
+  const knownGearSlots = Array.isArray(data && data.gearSlots) && data.gearSlots.length > 0
+    ? data.gearSlots.filter((slot) => typeof slot === "string" && slot)
+    : (gearSlotLegality && Array.isArray(gearSlotLegality.GEAR_SLOTS)
+      ? gearSlotLegality.GEAR_SLOTS
+      : [DEFAULT_GEAR_SLOT]);
+  const gearSlots = Array.from(new Set([DEFAULT_GEAR_SLOT].concat(knownGearSlots)));
+
+  categoryAffixesBySlot[DEFAULT_GEAR_SLOT] = categoryAffixes;
+  categoryWeightTotalsBySlot[DEFAULT_GEAR_SLOT] = categoryWeightTotals;
+
+  for (const gearSlot of gearSlots) {
+    if (gearSlot === DEFAULT_GEAR_SLOT) {
+      continue;
+    }
+
+    categoryAffixesBySlot[gearSlot] = Object.create(null);
+    categoryWeightTotalsBySlot[gearSlot] = Object.create(null);
+    for (const categoryName of categoryNames) {
+      const filtered = categoryAffixes[categoryName].filter((affix) => affixSupportsGearSlot(affix, gearSlot));
+      categoryAffixesBySlot[gearSlot][categoryName] = filtered;
+      categoryWeightTotalsBySlot[gearSlot][categoryName] = filtered
+        .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
+    }
   }
 
   const wantedByFamily = Object.create(null);
@@ -590,7 +640,7 @@ function buildEnv(data, gaConfig, target) {
       continue;
     }
 
-    const seedAffix = affixes.find((entry) => getAffixFamily(entry.id, affixMap) === family);
+    const seedAffix = Object.values(affixMap).find((entry) => getAffixFamily(entry.id, affixMap) === family);
     if (!seedAffix) {
       continue;
     }
@@ -599,6 +649,7 @@ function buildEnv(data, gaConfig, target) {
       id: otherId,
       name: family === ELEMENTAL_DAMAGE_FAMILY ? "Elemental Damage (Other)" : "Specific Resistance (Other)",
       categories: Array.isArray(seedAffix.categories) ? [...seedAffix.categories] : [],
+      gearSlots: Array.isArray(seedAffix.gearSlots) ? [...seedAffix.gearSlots] : null,
       family,
       rollWeight: 1,
     };
@@ -609,9 +660,12 @@ function buildEnv(data, gaConfig, target) {
 
   return {
     affixMap,
+    gearSlots,
     categoryNames,
     categoryAffixes,
+    categoryAffixesBySlot,
     categoryWeightTotals,
+    categoryWeightTotalsBySlot,
     targetAffixSet: new Set(data.targetAffixIds || []),
     gaRequiredCounts,
     gaSacrificeId,
@@ -632,6 +686,41 @@ function buildEnv(data, gaConfig, target) {
     targetCounts,
     targetGARequired,
   };
+}
+
+function getStateGearSlot(state) {
+  return (state && state.gearSlot) || DEFAULT_GEAR_SLOT;
+}
+
+function affixSupportsGearSlot(affix, gearSlot) {
+  if (!affix) {
+    return false;
+  }
+
+  if (!gearSlot || gearSlot === DEFAULT_GEAR_SLOT) {
+    return true;
+  }
+
+  const legalSlots = Array.isArray(affix.gearSlots) ? affix.gearSlots : null;
+  if (!legalSlots || legalSlots.length === 0) {
+    return true;
+  }
+
+  return legalSlots.includes(DEFAULT_GEAR_SLOT) || legalSlots.includes(gearSlot);
+}
+
+function getCategoryAffixesForState(state, env, categoryName) {
+  const gearSlot = getStateGearSlot(state);
+  if (gearSlot === DEFAULT_GEAR_SLOT) {
+    return env.categoryAffixes[categoryName] || [];
+  }
+
+  const bySlot = env.categoryAffixesBySlot && env.categoryAffixesBySlot[gearSlot];
+  if (bySlot && Array.isArray(bySlot[categoryName])) {
+    return bySlot[categoryName];
+  }
+
+  return (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
 }
 
 /**
@@ -1191,8 +1280,19 @@ function getAffixRollWeight(affix) {
  * @param {string} categoryName
  * @returns {number}
  */
-function getCategoryWeightTotal(env, categoryName) {
-  return env.categoryWeightTotals[categoryName] || 0;
+function getCategoryWeightTotal(state, env, categoryName) {
+  const gearSlot = getStateGearSlot(state);
+  if (gearSlot === DEFAULT_GEAR_SLOT) {
+    return env.categoryWeightTotals[categoryName] || 0;
+  }
+
+  const bySlot = env.categoryWeightTotalsBySlot && env.categoryWeightTotalsBySlot[gearSlot];
+  if (bySlot && Number.isFinite(bySlot[categoryName])) {
+    return bySlot[categoryName];
+  }
+
+  return getCategoryAffixesForState(state, env, categoryName)
+    .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
 }
 
 /**
@@ -1214,12 +1314,12 @@ function getActionOutcomes(state, action, env) {
   const outcomes = [];
 
   if (action.type === "add") {
-    const list = env.categoryAffixes[action.prism] || [];
+    const list = getCategoryAffixesForState(state, env, action.prism);
     if (list.length === 0 || state.affixes.length >= 4) {
       return [];
     }
 
-    const totalWeight = getCategoryWeightTotal(env, action.prism);
+    const totalWeight = getCategoryWeightTotal(state, env, action.prism);
     if (totalWeight <= 0) {
       return [];
     }
@@ -1272,13 +1372,13 @@ function getActionOutcomes(state, action, env) {
       return [];
     }
 
-    const list = env.categoryAffixes[action.prism] || [];
+    const list = getCategoryAffixesForState(state, env, action.prism);
     if (list.length === 0) {
       return [];
     }
 
     const sourceP = 1 / eligible.length;
-    const totalWeight = getCategoryWeightTotal(env, action.prism);
+    const totalWeight = getCategoryWeightTotal(state, env, action.prism);
     if (totalWeight <= 0) {
       return [];
     }
@@ -1319,12 +1419,12 @@ function getActionOutcomes(state, action, env) {
 
     for (const { index } of eligible) {
       for (const categoryName of env.categoryNames) {
-        const list = env.categoryAffixes[categoryName] || [];
+        const list = getCategoryAffixesForState(state, env, categoryName);
         if (list.length === 0) {
           continue;
         }
 
-        const totalWeight = getCategoryWeightTotal(env, categoryName);
+        const totalWeight = getCategoryWeightTotal(state, env, categoryName);
         if (totalWeight <= 0) {
           continue;
         }
@@ -2590,8 +2690,8 @@ function isGuaranteedFocusedSourceForCategory(state, env, sourceIndex, categoryN
  * @param {string} targetAffixId
  * @returns {number}
  */
-function getFocusedCategoryHitCost(env, categoryName, targetAffixId) {
-  const list = env.categoryAffixes[categoryName] || [];
+function getFocusedCategoryHitCost(state, env, categoryName, targetAffixId) {
+  const list = getCategoryAffixesForState(state, env, categoryName);
   let hitWeight = 0;
   let totalWeight = 0;
 
@@ -2652,7 +2752,7 @@ function estimateSourceFocusedBridgeSteps(state, env, sourceIndex, targetAffixId
         continue;
       }
 
-      const list = env.categoryAffixes[categoryName] || [];
+      const list = getCategoryAffixesForState(state, env, categoryName);
       const seenNextIds = new Set();
       for (const candidate of list) {
         if (seenNextIds.has(candidate.id)) {
@@ -2660,7 +2760,7 @@ function estimateSourceFocusedBridgeSteps(state, env, sourceIndex, targetAffixId
         }
         seenNextIds.add(candidate.id);
 
-        const hitCost = getFocusedCategoryHitCost(env, categoryName, candidate.id);
+        const hitCost = getFocusedCategoryHitCost(state, env, categoryName, candidate.id);
         if (!Number.isFinite(hitCost)) {
           continue;
         }
@@ -2756,7 +2856,7 @@ function estimateMissingAffixSteps(state, env, affixId, openSlots, extraCount, m
   let best = Infinity;
 
   for (const categoryName of affix.categories) {
-    const list = env.categoryAffixes[categoryName] || [];
+    const list = getCategoryAffixesForState(state, env, categoryName);
     if (list.length === 0) {
       continue;
     }
@@ -3367,6 +3467,8 @@ if (typeof module !== "undefined" && module.exports) {
     getMissingTargetAffixIds,
     getBestAddActionForAffix,
     resolveRuleAction,
+    affixSupportsGearSlot,
+    getCategoryAffixesForState,
     getEligibleByCategory,
     getActionOutcomes,
     mergeOutcomes,

@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Horadric Cube Affix Optimizer v2</title>
+	<title>Horadric Cube Affix Optimizer v3</title>
 	<style>
 		:root {
 			--bg: #090505;
@@ -302,6 +302,7 @@
 		}
 
 		.risk-list,
+		.diagnostic-list,
 		.candidate-list,
 		.history-list,
 		.limitations,
@@ -313,6 +314,7 @@
 		}
 
 		.risk-list li,
+		.diagnostic-list li,
 		.candidate-list li,
 		.history-list li,
 		.limitations li,
@@ -447,16 +449,16 @@
 <body>
 	<div class="page">
 		<div class="title-wrap">
-			<h1>Horadric Cube Affix Optimizer v2</h1>
+			<h1>Horadric Cube Affix Optimizer v3</h1>
 			<div class="subtitle">
-				Exact reachable-graph SSP solver with lexicographic GA preservation, success probability, and step minimization.
+				Hybrid exact solver with feasibility checks, decomposition-plus-ILP routing, and residual LAO* escalation.
 			</div>
 		</div>
 
 		<div class="toolbar">
 			<div class="card group-main">
 				<div class="field" style="width: 170px;">
-					<label for="thinking-seconds">Thinking Time (seconds)</label>
+					<label for="thinking-seconds">Thinking Time</label>
 					<input id="thinking-seconds" type="number" min="0" step="1" value="10">
 				</div>
 				<button id="strict-toggle" class="toggle">Strict GA: Off</button>
@@ -466,7 +468,7 @@
 			</div>
 			<div class="card group-status">
 				<div class="status" id="run-status">Idle</div>
-				<div style="color: var(--muted); font-size: 0.84rem;">0s = unlimited until Stop</div>
+				<div style="color: var(--muted); font-size: 0.84rem;">Higher values allow larger residual searches. 0s = largest residual budget.</div>
 			</div>
 		</div>
 
@@ -566,6 +568,27 @@
 							<span class="label">Std Dev (Success Paths)</span>
 							<span class="value" id="result-std">-</span>
 						</div>
+						<div class="metric">
+							<span class="label">Strategy</span>
+							<span class="value" id="result-strategy">-</span>
+						</div>
+						<div class="metric">
+							<span class="label">Feasibility</span>
+							<span class="value" id="result-feasibility">-</span>
+						</div>
+						<div class="metric">
+							<span class="label">Decomposition / ILP</span>
+							<span class="value" id="result-decomposition">-</span>
+						</div>
+						<div class="metric">
+							<span class="label">Residual Status</span>
+							<span class="value" id="result-residual">-</span>
+						</div>
+					</div>
+
+					<div class="field">
+						<label>Solver Diagnostics</label>
+						<ul class="diagnostic-list" id="diagnostic-list"></ul>
 					</div>
 
 					<div class="field">
@@ -596,7 +619,7 @@
 					<li>Enter current affixes and mark GA and Enchanted flags where applicable.</li>
 					<li>Enter desired target affixes. Require GA is only available for affixes that are already GA on the source item.</li>
 					<li>Set Legendary if removal is unavailable for your item.</li>
-					<li>Choose thinking time. Use 10s for quick guidance, or 0 for unlimited search and click Stop when satisfied.</li>
+					<li>Thinking Time increases the residual graph and iteration budget. Higher values let harder residual cases search deeper, but it is not a wall-clock cutoff for exact routes.</li>
 					<li>Click Optimize and follow the recommended operation.</li>
 					<li>After each in-game outcome, use Apply Last Outcome to update state and re-run optimization.</li>
 					<li>Target GA requirements are enforced strictly; the optimizer will reject impossible GA targets instead of estimating a success chance.</li>
@@ -611,7 +634,8 @@
 					<li>Choosing a specific gear slot narrows the legal affix pool for that item, which blocks impossible rolls and usually reduces compute time. Keep it at Any to preserve the full pool.</li>
 					<li>Affix values or thresholds are not modeled yet (example: minimum 1500 Maximum Life).</li>
 					<li>Gold and crafting materials are not included in objective cost.</li>
-					<li>MCTS results are estimates and improve with more compute time.</li>
+					<li>Residual solving is exact only within the current abstract-state cap and iteration cap; larger residual cases still return explicit solver-limit diagnostics if they exhaust the selected budget.</li>
+					<li>Thinking Time expands the residual solver budget, but it still does not interrupt exact routes on a wall-clock timer.</li>
 				</ul>
 
 				<div class="divider"></div>
@@ -723,8 +747,8 @@
 			];
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
-		const STORAGE_KEY = "d4cubeoptim_state_v2";
-		const WORKER_VERSION = "2026-05-23-exact-ssp-slot-legality";
+		const STORAGE_KEY = "d4cubeoptim_state_v3";
+		const WORKER_VERSION = "2026-05-23-v3-residual-iteration-budget";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -819,6 +843,11 @@
 			resultSuccess: document.getElementById("result-success"),
 			resultSteps: document.getElementById("result-steps"),
 			resultStd: document.getElementById("result-std"),
+			resultStrategy: document.getElementById("result-strategy"),
+			resultFeasibility: document.getElementById("result-feasibility"),
+			resultDecomposition: document.getElementById("result-decomposition"),
+			resultResidual: document.getElementById("result-residual"),
+			diagnosticList: document.getElementById("diagnostic-list"),
 			gaRiskList: document.getElementById("ga-risk-list"),
 			candidateList: document.getElementById("candidate-list"),
 			historyList: document.getElementById("history-list"),
@@ -951,7 +980,7 @@
 			if (worker) {
 				return;
 			}
-			worker = new Worker(`./d4cubeoptimv2-worker.js?v=${WORKER_VERSION}`);
+			worker = new Worker(`./d4cubeoptimv3-worker.js?v=${WORKER_VERSION}`);
 			if (supportsSharedStop) {
 				stopBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
 				stopSignal = new Int32Array(stopBuffer);
@@ -1092,6 +1121,7 @@
 			els.resultSteps.textContent = numberOrDash(message.expectedSteps);
 			els.resultStd.textContent = numberOrDash(message.stdDev);
 
+			renderSolverDiagnostics(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderManualControls();
@@ -1174,6 +1204,85 @@
 			});
 		}
 
+		function renderSolverDiagnostics(diagnostics) {
+			els.resultStrategy.textContent = diagnostics ? describeStrategy(diagnostics.strategy) : "-";
+			els.resultFeasibility.textContent = summarizeFeasibilityMetric(diagnostics ? diagnostics.feasibility : null);
+			els.resultDecomposition.textContent = summarizeDecompositionMetric(diagnostics);
+			els.resultResidual.textContent = summarizeResidualMetric(diagnostics);
+
+			els.diagnosticList.innerHTML = "";
+			if (!diagnostics) {
+				const li = document.createElement("li");
+				li.textContent = "Run optimizer to inspect feasibility, decomposition, ILP, and residual diagnostics.";
+				els.diagnosticList.appendChild(li);
+				return;
+			}
+
+			appendDiagnosticLine(`Strategy: ${describeStrategy(diagnostics.strategy)}.`);
+			if (diagnostics.reason) {
+				appendDiagnosticLine(diagnostics.reason);
+			}
+
+			const feasibility = diagnostics.feasibility || null;
+			if (feasibility && feasibility.ok) {
+				appendDiagnosticLine("Feasibility checks passed.");
+			} else if (feasibility) {
+				appendDiagnosticLine(`Feasibility ${feasibility.check || "?"} failed: ${feasibility.message || "No message provided."}`);
+			}
+
+			const decomposition = diagnostics.decomposition || null;
+			if (decomposition && decomposition.status === "APPLICABLE") {
+				const selectedCount = Array.isArray(decomposition.selectedOptions) ? decomposition.selectedOptions.length : 0;
+				appendDiagnosticLine(`Decomposition applicable: ${decomposition.targetCount} target(s), ${decomposition.optionCount} safe option(s), ${selectedCount} selected.`);
+				(decomposition.selectedOptions || []).slice(0, 4).forEach((option) => {
+					let line = `Selected ${affixName(option.targetAffixId)} -> slot ${Number(option.slotIndex) + 1}`;
+					if (option.caseId) {
+						line += ` via Case ${option.caseId}`;
+					}
+					if (Number.isInteger(option.stage)) {
+						line += `, stage ${option.stage + 1}`;
+					}
+					appendDiagnosticLine(`${line}.`);
+				});
+			} else if (decomposition && decomposition.status === "ESCALATED") {
+				appendDiagnosticLine(`Residual escalation: ${decomposition.reason || "Decomposition declined to model at least one target exactly."}`);
+				(decomposition.residualTargets || []).slice(0, 4).forEach((entry) => {
+					appendDiagnosticLine(`Escalated target ${affixName(entry.targetAffixId)}: ${entry.reason}`);
+				});
+			} else if (decomposition && decomposition.status !== "NOT_RUN") {
+				appendDiagnosticLine(`Decomposition status: ${formatStatusLabel(decomposition.status)}.`);
+			}
+
+			const ilp = diagnostics.ilp || null;
+			if (ilp && ilp.status === "OPTIMAL") {
+				appendDiagnosticLine(`ILP OPTIMAL: objective ${numberOrDash(ilp.objective)}, iterations ${ilp.iterations}, nodes ${ilp.nodesVisited}.`);
+			} else if (ilp && ilp.status && ilp.status !== "NOT_RUN") {
+				appendDiagnosticLine(`ILP ${formatStatusLabel(ilp.status)}: iterations ${ilp.iterations}, nodes ${ilp.nodesVisited}.`);
+			}
+
+			const residual = diagnostics.residual || null;
+			if (residual && residual.status === "OPTIMAL") {
+				const totalIterations = (residual.phase1Iterations || 0) + (residual.phase2Iterations || 0);
+				appendDiagnosticLine(`Residual OPTIMAL: ${residual.abstractStates} abstract states, ${residual.deadStates} dead states, ${totalIterations} total iterations.`);
+			} else if (residual && residual.status === "ITERATION_LIMIT") {
+				appendDiagnosticLine(`Residual ITERATION LIMIT: ${residual.abstractStates} abstract states explored before reaching the ${residual.stateLimit}-state / iteration guardrail. Increase Thinking Time to allow a larger residual search.`);
+			} else if (residual && residual.status === "STATE_LIMIT") {
+				appendDiagnosticLine(`Residual STATE LIMIT: abstract graph hit ${residual.abstractStates} states against the ${residual.stateLimit}-state cap. Increase Thinking Time to allow a larger residual search.`);
+			} else if (residual && residual.status && residual.status !== "NOT_RUN") {
+				appendDiagnosticLine(`Residual ${formatStatusLabel(residual.status)}.`);
+			}
+
+			if (diagnostics.stepEstimateReason) {
+				appendDiagnosticLine(diagnostics.stepEstimateReason);
+			}
+
+			function appendDiagnosticLine(text) {
+				const li = document.createElement("li");
+				li.textContent = text;
+				els.diagnosticList.appendChild(li);
+			}
+		}
+
 		function estimateOneStepGARisk(action, state) {
 			const risks = [];
 			if (!action) {
@@ -1240,23 +1349,9 @@
 
 		function renderCandidates(diagnostics) {
 			els.candidateList.innerHTML = "";
-			if (diagnostics && diagnostics.strategy) {
-				const summary = document.createElement("li");
-				const expanded = Number.isFinite(diagnostics.expandedStates) ? diagnostics.expandedStates : "-";
-				const dead = Number.isFinite(diagnostics.deadStates) ? diagnostics.deadStates : "-";
-				summary.textContent = `Strategy ${diagnostics.strategy} | expanded ${expanded} | dead ${dead}`;
-				els.candidateList.appendChild(summary);
-			}
-
-			if (diagnostics && diagnostics.stepEstimateReason) {
-				const note = document.createElement("li");
-				note.textContent = diagnostics.stepEstimateReason;
-				els.candidateList.appendChild(note);
-			}
-
 			if (!diagnostics || !Array.isArray(diagnostics.candidateActions) || diagnostics.candidateActions.length === 0) {
 				const li = document.createElement("li");
-				li.textContent = "No candidate actions sampled yet.";
+				li.textContent = emptyCandidateMessage(diagnostics);
 				els.candidateList.appendChild(li);
 				return;
 			}
@@ -1273,6 +1368,12 @@
 					.join(", ");
 
 				let text = `${describeAction(candidate.action)} | eventual ${(candidate.successProb * 100).toFixed(1)}% | steps ${stepText} | visits ${candidate.visits}`;
+				if (candidate.caseId) {
+					text += ` | case ${candidate.caseId}`;
+				}
+				if (Number.isInteger(candidate.stage)) {
+					text += ` | stage ${candidate.stage + 1}`;
+				}
 				if (sourceText) {
 					text += ` | source: ${sourceText}`;
 				}
@@ -1282,6 +1383,26 @@
 				li.textContent = text;
 				els.candidateList.appendChild(li);
 			});
+		}
+
+		function emptyCandidateMessage(diagnostics) {
+			if (!diagnostics) {
+				return "Run optimizer to list candidate actions.";
+			}
+
+			if (diagnostics.feasibility && diagnostics.feasibility.ok === false) {
+				return "No candidate actions because optimization stopped at the feasibility layer.";
+			}
+
+			if (diagnostics.residual && diagnostics.residual.status && diagnostics.residual.status !== "NOT_RUN" && diagnostics.residual.status !== "OPTIMAL") {
+				return "No candidate action list is available for this residual failure state.";
+			}
+
+			if (diagnostics.strategy) {
+				return `No alternate candidate actions were reported for the ${describeStrategy(diagnostics.strategy)} result.`;
+			}
+
+			return "No candidate actions reported for this result.";
 		}
 
 		function setRunButtons() {
@@ -1299,6 +1420,7 @@
 			currentBestAction = null;
 			lastDiagnostics = null;
 			lastOneStepRisk = null;
+			renderSolverDiagnostics(null);
 			renderGARisk(null);
 			renderCandidates(null);
 		}
@@ -1334,6 +1456,7 @@
 			renderCurrentAffixes();
 			renderTargetAffixes();
 			renderManualControls();
+			renderSolverDiagnostics(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderHistory();
@@ -1883,6 +2006,81 @@
 				return `Use Enchantress on ${source} -> ${affixName(action.targetAffixId)}`;
 			}
 			return JSON.stringify(action);
+		}
+
+		function describeStrategy(strategy) {
+			if (strategy === "v3-feasibility") {
+				return "Feasibility Stop";
+			}
+			if (strategy === "v3-decomposition-ilp") {
+				return "Decomposition + ILP";
+			}
+			if (strategy === "v3-residual-lao-star") {
+				return "Residual LAO*";
+			}
+			if (strategy === "v3-v2-fallback") {
+				return "Legacy v2 Fallback";
+			}
+			return strategy || "-";
+		}
+
+		function formatStatusLabel(status) {
+			if (!status) {
+				return "-";
+			}
+			return String(status)
+				.replace(/_/g, " ")
+				.toLowerCase()
+				.replace(/(^|\s)\S/g, (match) => match.toUpperCase());
+		}
+
+		function summarizeFeasibilityMetric(feasibility) {
+			if (!feasibility) {
+				return "-";
+			}
+
+			if (feasibility.ok) {
+				return "Passed";
+			}
+
+			return feasibility.check ? `${feasibility.check} failed` : "Failed";
+		}
+
+		function summarizeDecompositionMetric(diagnostics) {
+			const decomposition = diagnostics && diagnostics.decomposition ? diagnostics.decomposition : null;
+			const ilp = diagnostics && diagnostics.ilp ? diagnostics.ilp : null;
+			if (!decomposition) {
+				return "-";
+			}
+
+			if (decomposition.status === "APPLICABLE") {
+				return ilp && ilp.status && ilp.status !== "NOT_RUN"
+					? `ILP ${formatStatusLabel(ilp.status)}`
+					: "Applicable";
+			}
+
+			if (decomposition.status === "ESCALATED") {
+				return "Escalated";
+			}
+
+			if (decomposition.status === "NOT_RUN") {
+				return "Not run";
+			}
+
+			return formatStatusLabel(decomposition.status);
+		}
+
+		function summarizeResidualMetric(diagnostics) {
+			const residual = diagnostics && diagnostics.residual ? diagnostics.residual : null;
+			if (!residual) {
+				return "-";
+			}
+
+			if (residual.status === "NOT_RUN") {
+				return "Not run";
+			}
+
+			return formatStatusLabel(residual.status);
 		}
 
 		function affixName(id) {

@@ -608,7 +608,7 @@
 				<strong style="color: var(--accent);">Current Limitations</strong>
 				<ul class="limitations">
 					<li>Affix pool is derived from prism categories only, not slot-accurate roll tables.</li>
-					<li>Gear slot is stored and shown for future extension, but does not yet filter affix pools.</li>
+					<li>Choosing a specific gear slot narrows the legal affix pool for that item, which blocks impossible rolls and usually reduces compute time. Keep it at Any to preserve the full pool.</li>
 					<li>Affix values or thresholds are not modeled yet (example: minimum 1500 Maximum Life).</li>
 					<li>Gold and crafting materials are not included in objective cost.</li>
 					<li>MCTS results are estimates and improve with more compute time.</li>
@@ -618,7 +618,7 @@
 
 				<strong style="color: var(--accent);">Questions To Calibrate Future Versions</strong>
 				<ul class="questions-list">
-					<li>Should each gear slot use a slot-specific legal affix table?</li>
+					<li>Should each gear slot later use slot-specific roll weights beyond the current legality table?</li>
 					<li>Do you want objective weighting for gold cost versus cube-step count?</li>
 					<li>Should prism category selection be constrained by empirical in-game roll frequencies?</li>
 					<li>Should the optimizer support multiple target templates for different builds?</li>
@@ -632,6 +632,7 @@
 
 	<datalist id="affix-options"></datalist>
 
+	<script src="./gear-slot-legality.js"></script>
 	<script>
 		const DAMAGE_TYPES = ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
 		const ELEMENTAL_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
@@ -701,24 +702,29 @@
 			],
 		};
 
-		const GEAR_SLOTS = [
-			"Any",
-			"Helm",
-			"Chest",
-			"Gloves",
-			"Pants",
-			"Boots",
-			"Amulet",
-			"Ring",
-			"1H Weapon",
-			"2H Weapon",
-			"Offhand",
-			"Shield",
-		];
+		const slotLegality = typeof d4cubeoptimGearSlotLegality === "object" && d4cubeoptimGearSlotLegality
+			? d4cubeoptimGearSlotLegality
+			: null;
+		const GEAR_SLOTS = slotLegality && Array.isArray(slotLegality.GEAR_SLOTS)
+			? slotLegality.GEAR_SLOTS.slice()
+			: [
+				"Any",
+				"Helm",
+				"Chest",
+				"Gloves",
+				"Pants",
+				"Boots",
+				"Amulet",
+				"Ring",
+				"1H Weapon",
+				"2H Weapon",
+				"Offhand",
+				"Shield",
+			];
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v1";
-		const WORKER_VERSION = "2026-05-22-rollout-cache-4";
+		const WORKER_VERSION = "2026-05-23-rollout-slot-legality";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -853,12 +859,7 @@
 		}
 
 		function populateStaticLists() {
-			els.affixOptions.innerHTML = "";
-			AFFIXES.forEach((affix) => {
-				const option = document.createElement("option");
-				option.value = affix.name;
-				els.affixOptions.appendChild(option);
-			});
+			renderAffixOptions();
 
 			els.gearSlot.innerHTML = "";
 			GEAR_SLOTS.forEach((slot) => {
@@ -903,7 +904,9 @@
 
 			els.gearSlot.addEventListener("change", () => {
 				appState.current.gearSlot = els.gearSlot.value;
+				invalidatePolicyCache();
 				saveState();
+				renderAll();
 			});
 
 			els.legendaryToggle.addEventListener("click", () => {
@@ -1020,6 +1023,11 @@
 			}
 
 			sanitizeState();
+			const illegalSelection = getFirstIllegalAffixSelection();
+			if (illegalSelection) {
+				renderStatus(`${illegalSelection.label} ${illegalSelection.name} is not legal on ${illegalSelection.gearSlot}. Select Any to disable slot narrowing.`, "");
+				return;
+			}
 			const runState = exportCurrentState();
 			const runTarget = exportTargetState();
 
@@ -1049,6 +1057,7 @@
 				data: {
 					affixes: AFFIXES,
 					categories: CATEGORY_TO_AFFIX_IDS,
+					gearSlots: GEAR_SLOTS,
 					targetAffixIds: runTarget.affixes.map((entry) => entry.affixId),
 				},
 				gaConfig: {
@@ -1326,6 +1335,7 @@
 
 		function renderAll() {
 			sanitizeState();
+			renderAffixOptions();
 			renderSettingsControls();
 			renderCurrentControls();
 			renderCurrentAffixes();
@@ -1429,7 +1439,8 @@
 				input.setAttribute("list", "affix-options");
 				input.value = affixName(entry.affixId);
 				input.placeholder = "Affix";
-				if (!entry.affixId) {
+				const selectedAffix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (!entry.affixId || (selectedAffix && !isAffixLegalForCurrentSlot(selectedAffix))) {
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
@@ -1513,7 +1524,8 @@
 				input.setAttribute("list", "affix-options");
 				input.value = affixName(entry.affixId);
 				input.placeholder = "Target affix";
-				if (!entry.affixId) {
+				const selectedAffix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (!entry.affixId || (selectedAffix && !isAffixLegalForCurrentSlot(selectedAffix))) {
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
@@ -1873,13 +1885,76 @@
 			return AFFIX_BY_ID[id] ? AFFIX_BY_ID[id].name : id;
 		}
 
+		function getCurrentGearSlotForFiltering() {
+			return GEAR_SLOTS.includes(appState && appState.current && appState.current.gearSlot)
+				? appState.current.gearSlot
+				: "Any";
+		}
+
+		function isAffixLegalForCurrentSlot(affix, gearSlot = getCurrentGearSlotForFiltering()) {
+			if (!affix) {
+				return false;
+			}
+			if (!gearSlot || gearSlot === "Any") {
+				return true;
+			}
+
+			const legalSlots = Array.isArray(affix.gearSlots) ? affix.gearSlots : null;
+			if (!legalSlots || legalSlots.length === 0) {
+				return true;
+			}
+
+			return legalSlots.includes("Any") || legalSlots.includes(gearSlot);
+		}
+
+		function renderAffixOptions() {
+			els.affixOptions.innerHTML = "";
+			const gearSlot = getCurrentGearSlotForFiltering();
+			const visibleAffixes = gearSlot === "Any"
+				? AFFIXES
+				: AFFIXES.filter((affix) => isAffixLegalForCurrentSlot(affix, gearSlot));
+
+			visibleAffixes.forEach((affix) => {
+				const option = document.createElement("option");
+				option.value = affix.name;
+				els.affixOptions.appendChild(option);
+			});
+		}
+
+		function getFirstIllegalAffixSelection() {
+			const gearSlot = getCurrentGearSlotForFiltering();
+			if (gearSlot === "Any") {
+				return null;
+			}
+
+			for (const entry of appState.current.affixes) {
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot)) {
+					return { label: "Current affix", name: affix.name, gearSlot };
+				}
+			}
+
+			for (const entry of appState.target.affixes) {
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot)) {
+					return { label: "Target affix", name: affix.name, gearSlot };
+				}
+			}
+
+			return null;
+		}
+
 		function affixIdFromText(text) {
 			const mapped = LEGACY_AFFIX_NAME_ALIASES[normalizeName(text || "")] || text;
 			const normalized = normalizeName(mapped || "");
 			if (!normalized) {
 				return "";
 			}
-			return AFFIX_BY_NAME[normalized] ? AFFIX_BY_NAME[normalized].id : "";
+			const affix = AFFIX_BY_NAME[normalized];
+			if (!affix || !isAffixLegalForCurrentSlot(affix)) {
+				return "";
+			}
+			return affix.id;
 		}
 
 		function normalizeAffixId(id) {
@@ -1921,12 +1996,16 @@
 					const name = typeof entry === "string" ? entry : entry.name;
 					const rollWeight = typeof entry === "string" ? 1 : Number(entry.rollWeight);
 					const family = typeof entry === "string" ? "" : String(entry.family || "");
+					const gearSlots = slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
+						? slotLegality.getLegalGearSlotsForAffixName(name)
+						: null;
 					const id = slugify(name);
 					if (!map[id]) {
 						map[id] = {
 							id,
 							name,
 							categories: [],
+							gearSlots: Array.isArray(gearSlots) && gearSlots.length > 0 ? gearSlots.slice() : null,
 							family,
 							rollWeight: Number.isFinite(rollWeight) && rollWeight > 0 ? rollWeight : 1,
 						};

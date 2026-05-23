@@ -1,0 +1,20 @@
+# Decisions
+
+## Current Decisions
+
+- The v3 implementation is being delivered in explicit phases from [original-plan.md](original-plan.md) rather than as a monolithic rewrite.
+- The ILP solver is intentionally scoped to exact small binary ILPs. It is not a general branch-and-cut engine.
+- The first runnable v3 slice implements feasibility checks and temporarily delegates feasible scenarios to the v2 exact solver.
+- The Phase 3 ILP implementation uses presolve, two-phase simplex LP relaxations, most-fractional branching, and a rounded-LP repair heuristic; no cuts are implemented, so the solver must not be described as branch-and-cut.
+- Continuous variables are supported only in the LP layer and direct tests; branch-and-bound decisions are currently binary-only because that is the only model family the worker plans to emit.
+- The Phase 4 worker model consumes only decomposition-safe host options; unsupported or residual-only targets escalate into the Phase 5 residual solver instead of silently widening the decomposition assumptions.
+- The current Phase 5 residual solver expands the abstract graph up front within a Thinking Time-derived budget (500-state / 4096-iteration base, up to 4096 states and 1048576 iterations with a steeper iteration ramp), then runs LAO*-style policy-graph backups on that abstraction. This keeps the implementation exact and testable for the supported residual slice while letting harder browser cases spend a larger exact budget.
+- The public v3 worker contract always includes `diagnostics.feasibility`, `diagnostics.decomposition`, `diagnostics.ilp`, and `diagnostics.residual`; layers that do not run report explicit statuses such as `NOT_RUN` or `ESCALATED` instead of omitting fields.
+- The Phase 8 contract review kept the current strategy IDs and status values unchanged; [d4cubeoptimv3.html](../d4cubeoptimv3.html) remains responsible for translating those stable internal labels into user-facing wording.
+- Browser-worker imports share one global scope under `importScripts(...)`, so top-level bindings in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js) must not reuse names already declared by imported worker scripts such as [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js).
+- A decomposition ILP result of `INFEASIBLE` is treated as a routing miss, not a terminal user outcome; the worker escalates those cases into the residual solver because per-target decomposition options can still fail global host assignment even when the overall problem remains solvable.
+- Repo-local markdown notes in `v2-improvement-notes` are mandatory artifacts and must be maintained throughout the project.
+
+## Non-Goals For The Current Slice
+
+- No requirement matrix or final handoff freeze yet.

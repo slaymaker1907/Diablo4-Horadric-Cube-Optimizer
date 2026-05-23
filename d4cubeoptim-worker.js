@@ -621,6 +621,9 @@ function buildEnv(data, gaConfig, target) {
     eligibleByCategoryCache: new Map(),
     actionOutcomeCache: new Map(),
     actionHintCache: new Map(),
+    analyticalStateEstimateCache: new Map(),
+    rolloutStateScoreCache: new Map(),
+    rolloutActionCache: new Map(),
     exactStateSummaryCache: new Map(),
     wantedByFamily,
     familyOtherId,
@@ -1471,9 +1474,10 @@ function simulateFromNode(tree, nodeKey, env, target, depthLimit, rolloutDepthLi
         successProb: s.successProb,
       };
     }
+    const estimate = getAnalyticalStateEstimate(node.state, target, env);
     return {
-      cubeSteps: heuristicRemainingSteps(node.state, target, env),
-      successProb: heuristicSuccessProbability(node.state, target, env),
+      cubeSteps: estimate.expectedSteps,
+      successProb: estimate.successProb,
     };
   }
 
@@ -1626,8 +1630,9 @@ function rollout(state, env, target, depthLimit, rolloutCount) {
         ? s.expectedSteps
         : heuristicRemainingSteps(cur, target, env));
     } else {
-      successProb = heuristicSuccessProbability(cur, target, env);
-      stepEstimate = steps + heuristicRemainingSteps(cur, target, env);
+      const estimate = getAnalyticalStateEstimate(cur, target, env);
+      successProb = estimate.successProb;
+      stepEstimate = steps + estimate.expectedSteps;
     }
 
     successProbSum += successProb;
@@ -1656,6 +1661,13 @@ function chooseRolloutAction(state, actions, env, target) {
     return actions[Math.floor(Math.random() * actions.length)];
   }
 
+  const cacheKey = (ROLLOUT_EPSILON <= 0 && env.rolloutActionCache)
+    ? stateKey(state)
+    : "";
+  if (cacheKey && env.rolloutActionCache.has(cacheKey)) {
+    return env.rolloutActionCache.get(cacheKey);
+  }
+
   let bestAction = actions[0];
   let bestScore = -Infinity;
 
@@ -1676,6 +1688,10 @@ function chooseRolloutAction(state, actions, env, target) {
       bestScore = score;
       bestAction = action;
     }
+  }
+
+  if (cacheKey) {
+    env.rolloutActionCache.set(cacheKey, bestAction);
   }
 
   return bestAction;
@@ -1751,8 +1767,9 @@ function getActionHintSummary(state, action, env, target) {
         ? s.expectedSteps
         : heuristicRemainingSteps(outcome.state, target, env);
     } else {
-      outcomeSuccessProb = heuristicSuccessProbability(outcome.state, target, env);
-      remainingSteps = heuristicRemainingSteps(outcome.state, target, env);
+      const estimate = getAnalyticalStateEstimate(outcome.state, target, env);
+      outcomeSuccessProb = estimate.successProb;
+      remainingSteps = estimate.expectedSteps;
     }
 
     successProb += outcome.probability * outcomeSuccessProb;
@@ -1770,7 +1787,7 @@ function getActionHintSummary(state, action, env, target) {
       : heuristicRemainingSteps(state, target, env);
     expectedSteps = cubeCost + fallback;
   } else {
-    expectedSteps = cubeCost + heuristicRemainingSteps(state, target, env);
+    expectedSteps = cubeCost + getAnalyticalStateEstimate(state, target, env).expectedSteps;
   }
 
   const summary = {
@@ -2410,15 +2427,29 @@ function rolloutStateScore(state, target, env) {
     return terminal.success ? 100 : -120;
   }
 
+  const cacheKey = env.rolloutStateScoreCache ? stateKey(state) : "";
+  if (cacheKey && env.rolloutStateScoreCache.has(cacheKey)) {
+    return env.rolloutStateScoreCache.get(cacheKey);
+  }
+
+  let score;
+
   if (env.scorer) {
     const s = env.scorer(state);
     const steps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
       ? s.expectedSteps
       : heuristicRemainingSteps(state, target, env);
-    return (s.successProb * 200) - steps;
+    score = (s.successProb * 200) - steps;
+  } else {
+    const estimate = getAnalyticalStateEstimate(state, target, env);
+    score = (estimate.successProb * 200) - estimate.expectedSteps;
   }
 
-  return (heuristicSuccessProbability(state, target, env) * 200) - heuristicRemainingSteps(state, target, env);
+  if (cacheKey) {
+    env.rolloutStateScoreCache.set(cacheKey, score);
+  }
+
+  return score;
 }
 
 /**
@@ -3045,82 +3076,71 @@ function getExactSmallStateSummary(state, target, env) {
 }
 
 /**
- * Estimate the probability of eventually reaching `target` from `state`
- * using the built-in analytical heuristic (not the RF scorer).
- *
- * Returns 0 for permanently impossible states; 1 for guaranteed success
- * (focused-bridge path); otherwise combines a logistic on `evaluateState`
- * with an exponential reachability decay on `heuristicRemainingSteps`.
+ * Compute the heuristic-only state estimate once and cache it for the run.
+ * This preserves existing heuristic behavior while avoiding repeated exact/
+ * bridge/step computations across rollout scoring and leaf evaluation.
  *
  * @param {Object} state
  * @param {Object} target
  * @param {Object} env
- * @returns {number} Success probability in [0, 1].
+ * @returns {{ successProb: number, expectedSteps: number }}
  */
-function heuristicSuccessProbability(state, target, env) {
-  if (env.impossibleTargetGAReason) {
-    return 0;
-  }
-
-  if (breaksRequiredGA(state, env)) {
-    return 0;
-  }
-
-  const terminal = isTerminal(state, target, env);
-  if (terminal.terminal) {
-    return terminal.success ? 1 : 0;
+function getAnalyticalStateEstimate(state, target, env) {
+  const cacheKey = stateKey(state);
+  if (env.analyticalStateEstimateCache && env.analyticalStateEstimateCache.has(cacheKey)) {
+    return env.analyticalStateEstimateCache.get(cacheKey);
   }
 
   const exactSummary = getExactSmallStateSummary(state, target, env);
+  let summary = null;
+  let exactSuccessProb = null;
+
   if (exactSummary) {
-    return exactSummary.successProb;
+    exactSuccessProb = exactSummary.successProb;
+    if (Number.isFinite(exactSummary.expectedSteps)) {
+      summary = {
+        successProb: exactSummary.successProb,
+        expectedSteps: exactSummary.expectedSteps,
+      };
+    }
   }
 
-  const guaranteedFocusedBridge = getGuaranteedFocusedBridgeEstimate(state, target, env);
-  if (guaranteedFocusedBridge) {
-    return guaranteedFocusedBridge.successProb;
+  if (!summary) {
+    const guaranteedFocusedBridge = getGuaranteedFocusedBridgeEstimate(state, target, env);
+    if (guaranteedFocusedBridge) {
+      summary = {
+        successProb: exactSuccessProb != null ? exactSuccessProb : guaranteedFocusedBridge.successProb,
+        expectedSteps: guaranteedFocusedBridge.expectedSteps,
+      };
+    } else {
+      const remainingSteps = computeHeuristicRemainingSteps(state, target, env);
+      const score = evaluateState(state, target, env);
+      const logistic = 1 / (1 + Math.exp(-((score - 4) / 16)));
+      const reachability = Math.exp(-(remainingSteps / 24));
+      summary = {
+        successProb: exactSuccessProb != null ? exactSuccessProb : clampProb(logistic * reachability),
+        expectedSteps: remainingSteps,
+      };
+    }
   }
 
-  const score = evaluateState(state, target, env);
-  const logistic = 1 / (1 + Math.exp(-((score - 4) / 16)));
-  const remainingSteps = heuristicRemainingSteps(state, target, env);
-  const reachability = Math.exp(-(remainingSteps / 24));
-  return clampProb(logistic * reachability);
+  if (env.analyticalStateEstimateCache) {
+    env.analyticalStateEstimateCache.set(cacheKey, summary);
+  }
+
+  return summary;
 }
 
 /**
- * Estimate the expected remaining cube steps to complete `target` from
- * `state` using the built-in analytical heuristic (not the RF scorer).
- *
- * Uses the focused-bridge fast path when applicable; otherwise sums per-affix
- * step estimates from `estimateMissingAffixSteps`, adding a GA sacrifice
- * penalty for any missing GA requirements.
+ * Shared body for the heuristic remaining-step estimator once impossible /
+ * terminal / exact / guaranteed-bridge short-circuits have been handled.
  *
  * @param {Object} state
  * @param {Object} target
  * @param {Object} env
- * @returns {number} Estimated remaining steps (≥1).
+ * @returns {number}
  */
-function heuristicRemainingSteps(state, target, env) {
-  if (env.impossibleTargetGAReason) {
-    return 35;
-  }
-
-  const terminal = isTerminal(state, target, env);
-  if (terminal.terminal) {
-    return 0;
-  }
-
-  const exactSummary = getExactSmallStateSummary(state, target, env);
-  if (exactSummary && Number.isFinite(exactSummary.expectedSteps)) {
-    return exactSummary.expectedSteps;
-  }
-
-  const guaranteedFocusedBridge = getGuaranteedFocusedBridgeEstimate(state, target, env);
-  if (guaranteedFocusedBridge) {
-    return guaranteedFocusedBridge.expectedSteps;
-  }
-
+function computeHeuristicRemainingSteps(state, target, env) {
   const stateCounts = getAffixCounts(state.affixes);
   const stateGACounts = getAffixCounts(state.affixes, (entry) => entry.isGA);
   const targetCounts = env.targetCounts || getTargetCountsFromTarget(target);
@@ -3155,6 +3175,62 @@ function heuristicRemainingSteps(state, target, env) {
   }
 
   return Math.max(1, total);
+}
+
+/**
+ * Estimate the probability of eventually reaching `target` from `state`
+ * using the built-in analytical heuristic (not the RF scorer).
+ *
+ * Returns 0 for permanently impossible states; 1 for guaranteed success
+ * (focused-bridge path); otherwise combines a logistic on `evaluateState`
+ * with an exponential reachability decay on `heuristicRemainingSteps`.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {number} Success probability in [0, 1].
+ */
+function heuristicSuccessProbability(state, target, env) {
+  if (env.impossibleTargetGAReason) {
+    return 0;
+  }
+
+  if (breaksRequiredGA(state, env)) {
+    return 0;
+  }
+
+  const terminal = isTerminal(state, target, env);
+  if (terminal.terminal) {
+    return terminal.success ? 1 : 0;
+  }
+
+  return getAnalyticalStateEstimate(state, target, env).successProb;
+}
+
+/**
+ * Estimate the expected remaining cube steps to complete `target` from
+ * `state` using the built-in analytical heuristic (not the RF scorer).
+ *
+ * Uses the focused-bridge fast path when applicable; otherwise sums per-affix
+ * step estimates from `estimateMissingAffixSteps`, adding a GA sacrifice
+ * penalty for any missing GA requirements.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {number} Estimated remaining steps (≥1).
+ */
+function heuristicRemainingSteps(state, target, env) {
+  if (env.impossibleTargetGAReason) {
+    return 35;
+  }
+
+  const terminal = isTerminal(state, target, env);
+  if (terminal.terminal) {
+    return 0;
+  }
+
+  return getAnalyticalStateEstimate(state, target, env).expectedSteps;
 }
 
 /**

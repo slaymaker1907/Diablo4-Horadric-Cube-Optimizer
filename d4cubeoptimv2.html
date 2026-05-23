@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Horadric Cube Affix Optimizer</title>
+	<title>Horadric Cube Affix Optimizer v2</title>
 	<style>
 		:root {
 			--bg: #090505;
@@ -447,9 +447,9 @@
 <body>
 	<div class="page">
 		<div class="title-wrap">
-			<h1>Horadric Cube Affix Optimizer</h1>
+			<h1>Horadric Cube Affix Optimizer v2</h1>
 			<div class="subtitle">
-				Minimize expected cube operations while preserving Greater Affixes where possible.
+				Exact reachable-graph SSP solver with lexicographic GA preservation, success probability, and step minimization.
 			</div>
 		</div>
 
@@ -717,8 +717,8 @@
 		];
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
-		const STORAGE_KEY = "d4cubeoptim_state_v1";
-		const WORKER_VERSION = "2026-05-22-rollout-cache-4";
+		const STORAGE_KEY = "d4cubeoptim_state_v2";
+		const WORKER_VERSION = "2026-05-23-exact-ssp-1";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -777,7 +777,6 @@
 		let worker = null;
 		let activeRunId = 0;
 		let treeCache = null;
-		let rfModel = null;
 		let runInProgress = false;
 		let currentBestAction = null;
 		let lastDiagnostics = null;
@@ -824,32 +823,11 @@
 
 		init();
 
-		function syncScorerModelToWorker() {
-			if (!worker || !rfModel) {
-				return;
-			}
-			worker.postMessage({
-				type: "set-scorer-model",
-				model: rfModel,
-			});
-		}
-
 		function init() {
 			populateStaticLists();
 			bindEvents();
 			renderAll();
 			ensureWorker();
-			// Load the RF model for the scorer; optimizer works without it if fetch fails.
-			fetch("./model.json")
-				.then((r) => (r.ok ? r.json() : null))
-				.then((m) => {
-					if (!m) {
-						return;
-					}
-					rfModel = m;
-					syncScorerModelToWorker();
-				})
-				.catch(() => {});
 		}
 
 		function populateStaticLists() {
@@ -937,7 +915,7 @@
 				if (appState.target.affixes.length >= 4) {
 					return;
 				}
-				appState.target.affixes.push({ affixId: "", requireGA: false });
+				appState.target.affixes.push({ affixId: "", requireGA: false, needsImprovement: false });
 				saveState();
 				renderTargetAffixes();
 			});
@@ -970,7 +948,7 @@
 			if (worker) {
 				return;
 			}
-			worker = new Worker(`./d4cubeoptim-worker.js?v=${WORKER_VERSION}`);
+			worker = new Worker(`./d4cubeoptimv2-worker.js?v=${WORKER_VERSION}`);
 			if (supportsSharedStop) {
 				stopBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
 				stopSignal = new Int32Array(stopBuffer);
@@ -1010,8 +988,6 @@
 					setRunButtons();
 				}
 			};
-
-			syncScorerModelToWorker();
 		}
 
 		function startRun() {
@@ -1053,6 +1029,9 @@
 				},
 				gaConfig: {
 					currentGAAffixes: currentGA,
+					unsatisfactoryAffixIds: runTarget.affixes
+						.filter((entry) => entry.needsImprovement)
+						.map((entry) => entry.affixId),
 					sacrificeAffixId: "",
 					strictMode: !!appState.settings.strictMode,
 				},
@@ -1252,6 +1231,20 @@
 
 		function renderCandidates(diagnostics) {
 			els.candidateList.innerHTML = "";
+			if (diagnostics && diagnostics.strategy) {
+				const summary = document.createElement("li");
+				const expanded = Number.isFinite(diagnostics.expandedStates) ? diagnostics.expandedStates : "-";
+				const dead = Number.isFinite(diagnostics.deadStates) ? diagnostics.deadStates : "-";
+				summary.textContent = `Strategy ${diagnostics.strategy} | expanded ${expanded} | dead ${dead}`;
+				els.candidateList.appendChild(summary);
+			}
+
+			if (diagnostics && diagnostics.stepEstimateReason) {
+				const note = document.createElement("li");
+				note.textContent = diagnostics.stepEstimateReason;
+				els.candidateList.appendChild(note);
+			}
+
 			if (!diagnostics || !Array.isArray(diagnostics.candidateActions) || diagnostics.candidateActions.length === 0) {
 				const li = document.createElement("li");
 				li.textContent = "No candidate actions sampled yet.";
@@ -1362,6 +1355,7 @@
 				.map((entry) => ({
 					affixId: entry.affixId,
 					requireGA: !!entry.isGA,
+					needsImprovement: false,
 				}));
 
 			if (nextTargetAffixes.length === 0) {
@@ -1544,8 +1538,19 @@
 				reqWrap.appendChild(req);
 				reqWrap.appendChild(document.createTextNode("Require GA"));
 
-				const spacer = document.createElement("div");
-				spacer.style.width = "1px";
+				const improveWrap = document.createElement("label");
+				improveWrap.className = "checkbox-chip";
+				const improve = document.createElement("input");
+				improve.type = "checkbox";
+				improve.checked = !!entry.needsImprovement;
+				improve.disabled = !entry.affixId;
+				improve.addEventListener("change", () => {
+					appState.target.affixes[index].needsImprovement = improve.checked;
+					saveState();
+					renderTargetAffixes();
+				});
+				improveWrap.appendChild(improve);
+				improveWrap.appendChild(document.createTextNode("Needs Improvement"));
 
 				const removeBtn = document.createElement("button");
 				removeBtn.className = "btn ghost remove-btn";
@@ -1558,7 +1563,7 @@
 
 				row.appendChild(input);
 				row.appendChild(reqWrap);
-				row.appendChild(spacer);
+				row.appendChild(improveWrap);
 				row.appendChild(removeBtn);
 				els.targetAffixes.appendChild(row);
 			});
@@ -1757,6 +1762,7 @@
 				.map((entry) => ({
 					affixId: normalizeAffixId(entry.affixId),
 					requireGA: !!entry.requireGA,
+					needsImprovement: !!entry.needsImprovement,
 				}));
 
 			normalizeTargetGARequirements();
@@ -1804,6 +1810,7 @@
 					.map((entry) => ({
 						affixId: entry.affixId,
 						requireGA: !!entry.requireGA,
+						needsImprovement: !!entry.needsImprovement,
 					})),
 			};
 		}

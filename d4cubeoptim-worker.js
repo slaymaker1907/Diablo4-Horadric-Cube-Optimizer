@@ -46,6 +46,9 @@ if (typeof importScripts !== "undefined") {
   try { importScripts("./random-forest.js"); } catch (_) { /* scorer unavailable */ }
 }
 
+/** Cached browser-side RF model, set once per worker lifetime. */
+let workerScorerModel = null;
+
 /** Global stop flag set by worker "stop" messages. */
 let stopRequested = false;
 
@@ -63,6 +66,18 @@ const ROOT_MIN_VISITS_BASE = 6;
  * Higher values force more exhaustive early exploration.
  */
 const ROOT_MIN_VISITS_LOG_SCALE = 2;
+
+/** Maximum missing target-affix instances for the exact small-state solver. */
+const EXACT_SMALL_STATE_MAX_MISSING = 1;
+
+/** Hard cap on reachable states before the exact solver bails out. */
+const EXACT_SMALL_STATE_LIMIT = 4096;
+
+/** Iteration cap for exact small-state value iteration. */
+const EXACT_SMALL_STATE_MAX_ITERATIONS = 2048;
+
+/** Convergence epsilon for exact small-state value iteration. */
+const EXACT_SMALL_STATE_EPSILON = 1e-9;
 
 /**
  * Probability of choosing a random action during rollouts.
@@ -95,6 +110,11 @@ if (typeof self !== "undefined") {
   self.onmessage = (event) => {
     const payload = event.data || {};
 
+    if (payload.type === "set-scorer-model") {
+      workerScorerModel = payload.model || null;
+      return;
+    }
+
     if (payload.type === "stop") {
       stopRequested = true;
       return;
@@ -126,12 +146,13 @@ if (typeof self !== "undefined") {
 function runOptimization(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
+  const scorerModel = payload.scorerModel || workerScorerModel;
 
   // Reconstruct RF scorer from the serialised model passed in the payload.
   // scoreState is available as a global after importScripts('./random-forest.js').
   let scorer = null;
-  if (payload.scorerModel && typeof scoreState === "function") {
-    scorer = (state, target) => scoreState(payload.scorerModel, state, target);
+  if (scorerModel && typeof scoreState === "function") {
+    scorer = (state, target) => scoreState(scorerModel, state, target);
   }
 
   const result = optimizePayload(payload, {
@@ -202,11 +223,21 @@ function optimizePayload(payload, options = {}) {
   }
 
   const env = buildEnv(data, gaConfig, target);
+  const scorerCache = new Map();
 
   // Attach the optional scorer so heuristic call-sites throughout the MCTS
   // can delegate to it.  Binding `target` here keeps call-sites clean.
   if (typeof options.scorer === "function") {
-    env.scorer = (state) => options.scorer(state, target);
+    env.scorer = (state) => {
+      const key = stateKey(state);
+      if (scorerCache.has(key)) {
+        return scorerCache.get(key);
+      }
+
+      const score = options.scorer(state, target);
+      scorerCache.set(key, score);
+      return score;
+    };
   }
 
   const maxTime = Number(timeMs);
@@ -231,6 +262,17 @@ function optimizePayload(payload, options = {}) {
     return {
       iterations: 0,
       ...result,
+      tree: includeTree ? shrinkTree(mctsTree, rootKey, 0) : null,
+      stoppedByUser: false,
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+
+  const exactSummary = getExactSmallStateSummary(mctsTree.nodes[rootKey].state, target, env);
+  if (exactSummary) {
+    return {
+      iterations: 0,
+      ...exactSummary,
       tree: includeTree ? shrinkTree(mctsTree, rootKey, 0) : null,
       stoppedByUser: false,
       elapsedMs: Date.now() - startedAt,
@@ -483,6 +525,7 @@ function buildEnv(data, gaConfig, target) {
   const affixes = data.affixes || [];
   const affixMap = Object.create(null);
   const categoryAffixes = Object.create(null);
+  const categoryWeightTotals = Object.create(null);
 
   for (const affix of affixes) {
     affixMap[affix.id] = affix;
@@ -492,6 +535,8 @@ function buildEnv(data, gaConfig, target) {
     categoryAffixes[categoryName] = (categories[categoryName] || [])
       .map((id) => affixMap[id])
       .filter(Boolean);
+    categoryWeightTotals[categoryName] = categoryAffixes[categoryName]
+      .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
   }
 
   const wantedByFamily = Object.create(null);
@@ -566,11 +611,17 @@ function buildEnv(data, gaConfig, target) {
     affixMap,
     categoryNames,
     categoryAffixes,
+    categoryWeightTotals,
     targetAffixSet: new Set(data.targetAffixIds || []),
     gaRequiredCounts,
     gaSacrificeId,
     sourceGACounts,
     impossibleTargetGAReason,
+    validActionsCache: new Map(),
+    eligibleByCategoryCache: new Map(),
+    actionOutcomeCache: new Map(),
+    actionHintCache: new Map(),
+    exactStateSummaryCache: new Map(),
     wantedByFamily,
     familyOtherId,
     strictMode: !!(gaConfig && gaConfig.strictMode),
@@ -737,7 +788,7 @@ function getAffixCounts(affixes, filterFn) {
 
 /**
  * Returns true if `entry` is a GA slot that the target explicitly requires.
- * Protected GAs must never be removed or rerolled.
+ * In strict mode these entries cannot be targeted by risky actions.
  *
  * @param {Object} entry - Affix entry { affixId, isGA, isEnchanted }.
  * @param {Object} env
@@ -833,6 +884,11 @@ function actionKey(action) {
  * @returns {Array<Object>} Array of action objects.
  */
 function getValidActions(state, target, env) {
+  const cacheKey = stateKey(state);
+  if (env.validActionsCache && env.validActionsCache.has(cacheKey)) {
+    return env.validActionsCache.get(cacheKey);
+  }
+
   const actions = [];
 
   for (const categoryName of env.categoryNames) {
@@ -841,7 +897,7 @@ function getValidActions(state, target, env) {
     }
 
     const eligible = getEligibleByCategory(state, env, categoryName);
-    const touchesProtectedGA = eligible.some(({ entry }) => isProtectedGA(entry, env));
+    const touchesProtectedGA = env.strictMode && eligible.some(({ entry }) => isProtectedGA(entry, env));
 
     if (!state.isLegendary && eligible.length > 0) {
       if (!touchesProtectedGA) {
@@ -863,7 +919,7 @@ function getValidActions(state, target, env) {
     state.affixes.forEach((entry, index) => {
       desiredIds.add(entry.affixId);
       for (const targetAffixId of desiredIds) {
-        if (isProtectedGA(entry, env) && targetAffixId !== entry.affixId) {
+        if (env.strictMode && isProtectedGA(entry, env) && targetAffixId !== entry.affixId) {
           continue;
         }
         actions.push({
@@ -875,7 +931,39 @@ function getValidActions(state, target, env) {
     });
   }
 
+  if (env.validActionsCache) {
+    env.validActionsCache.set(cacheKey, actions);
+  }
+
   return actions;
+}
+
+/**
+ * Explain why the current state has no available actions.
+ * In strict mode we distinguish "no safe action" from a truly actionless state.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {string}
+ */
+function getNoValidActionReason(state, target, env) {
+  if (env && env.impossibleTargetGAReason) {
+    return env.impossibleTargetGAReason;
+  }
+
+  if (env && env.strictMode) {
+    const flexibleActions = getValidActions(state, target, {
+      ...env,
+      strictMode: false,
+      validActionsCache: null,
+    });
+    if (Array.isArray(flexibleActions) && flexibleActions.length > 0) {
+      return "No safe action preserves all required GAs from the current state. Disable Target GA Strict to inspect risky alternatives.";
+    }
+  }
+
+  return "No actions from current state";
 }
 
 /**
@@ -1056,7 +1144,12 @@ function resolveRuleAction(state, target, env, validActions) {
  * @returns {Array<{ entry: Object, index: number }>}
  */
 function getEligibleByCategory(state, env, categoryName) {
-  return state.affixes
+  const cacheKey = `${stateKey(state)}|${categoryName}`;
+  if (env.eligibleByCategoryCache && env.eligibleByCategoryCache.has(cacheKey)) {
+    return env.eligibleByCategoryCache.get(cacheKey);
+  }
+
+  const eligible = state.affixes
     .map((entry, index) => ({ entry, index }))
     .filter(({ entry }) => {
       if (entry.isEnchanted) {
@@ -1065,6 +1158,12 @@ function getEligibleByCategory(state, env, categoryName) {
       const affix = env.affixMap[entry.affixId];
       return affix && affix.categories.includes(categoryName);
     });
+
+  if (env.eligibleByCategoryCache) {
+    env.eligibleByCategoryCache.set(cacheKey, eligible);
+  }
+
+  return eligible;
 }
 
 /**
@@ -1090,12 +1189,7 @@ function getAffixRollWeight(affix) {
  * @returns {number}
  */
 function getCategoryWeightTotal(env, categoryName) {
-  const list = env.categoryAffixes[categoryName] || [];
-  let total = 0;
-  for (const affix of list) {
-    total += getAffixRollWeight(affix);
-  }
-  return total;
+  return env.categoryWeightTotals[categoryName] || 0;
 }
 
 /**
@@ -1109,6 +1203,11 @@ function getCategoryWeightTotal(env, categoryName) {
  * @returns {Array<{ state: Object, probability: number }>}
  */
 function getActionOutcomes(state, action, env) {
+  const cacheKey = `${stateKey(state)}|${actionKey(action)}`;
+  if (env.actionOutcomeCache && env.actionOutcomeCache.has(cacheKey)) {
+    return env.actionOutcomeCache.get(cacheKey);
+  }
+
   const outcomes = [];
 
   if (action.type === "add") {
@@ -1135,7 +1234,11 @@ function getActionOutcomes(state, action, env) {
       }
       outcomes.push({ probability: p, state: next });
     }
-    return mergeOutcomes(outcomes);
+    const merged = mergeOutcomes(outcomes);
+    if (env.actionOutcomeCache) {
+      env.actionOutcomeCache.set(cacheKey, merged);
+    }
+    return merged;
   }
 
   if (action.type === "remove") {
@@ -1153,7 +1256,11 @@ function getActionOutcomes(state, action, env) {
       next.affixes.splice(index, 1);
       outcomes.push({ probability: p, state: next });
     }
-    return mergeOutcomes(outcomes);
+    const merged = mergeOutcomes(outcomes);
+    if (env.actionOutcomeCache) {
+      env.actionOutcomeCache.set(cacheKey, merged);
+    }
+    return merged;
   }
 
   if (action.type === "focused") {
@@ -1188,7 +1295,11 @@ function getActionOutcomes(state, action, env) {
         outcomes.push({ probability: sourceP * affixP, state: next });
       }
     }
-    return mergeOutcomes(outcomes);
+    const merged = mergeOutcomes(outcomes);
+    if (env.actionOutcomeCache) {
+      env.actionOutcomeCache.set(cacheKey, merged);
+    }
+    return merged;
   }
 
   if (action.type === "chaotic") {
@@ -1231,7 +1342,11 @@ function getActionOutcomes(state, action, env) {
       }
     }
 
-    return mergeOutcomes(outcomes);
+    const merged = mergeOutcomes(outcomes);
+    if (env.actionOutcomeCache) {
+      env.actionOutcomeCache.set(cacheKey, merged);
+    }
+    return merged;
   }
 
   if (action.type === "enchant") {
@@ -1262,7 +1377,11 @@ function getActionOutcomes(state, action, env) {
       return [];
     }
 
-    return [{ probability: 1, state: next }];
+    const direct = [{ probability: 1, state: next }];
+    if (env.actionOutcomeCache) {
+      env.actionOutcomeCache.set(cacheKey, direct);
+    }
+    return direct;
   }
 
   return [];
@@ -1588,6 +1707,85 @@ function clampProb(value) {
 }
 
 /**
+ * Compute both immediate action hints in one pass over the action outcomes.
+ * Results are cached per (state, action) for the duration of one run.
+ *
+ * @param {Object} state
+ * @param {Object} action
+ * @param {Object} env
+ * @param {Object} target
+ * @returns {{ successProb: number, expectedSteps: number }}
+ */
+function getActionHintSummary(state, action, env, target) {
+  const cacheKey = `${stateKey(state)}|${actionKey(action)}`;
+  if (env.actionHintCache && env.actionHintCache.has(cacheKey)) {
+    return env.actionHintCache.get(cacheKey);
+  }
+
+  const outcomes = getActionOutcomes(state, action, env);
+  if (outcomes.length === 0) {
+    const empty = { successProb: 0, expectedSteps: 35 };
+    if (env.actionHintCache) {
+      env.actionHintCache.set(cacheKey, empty);
+    }
+    return empty;
+  }
+
+  const cubeCost = isCubeAction(action) ? 1 : 0;
+  let successProb = 0;
+  let successMass = 0;
+  let weightedSteps = 0;
+
+  for (const outcome of outcomes) {
+    const term = isTerminal(outcome.state, target, env);
+    let outcomeSuccessProb;
+    let remainingSteps;
+
+    if (term.terminal) {
+      outcomeSuccessProb = term.success ? 1 : 0;
+      remainingSteps = 0;
+    } else if (env.scorer) {
+      const s = env.scorer(outcome.state);
+      outcomeSuccessProb = s.successProb;
+      remainingSteps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+        ? s.expectedSteps
+        : heuristicRemainingSteps(outcome.state, target, env);
+    } else {
+      outcomeSuccessProb = heuristicSuccessProbability(outcome.state, target, env);
+      remainingSteps = heuristicRemainingSteps(outcome.state, target, env);
+    }
+
+    successProb += outcome.probability * outcomeSuccessProb;
+    successMass += outcome.probability * outcomeSuccessProb;
+    weightedSteps += outcome.probability * outcomeSuccessProb * (cubeCost + remainingSteps);
+  }
+
+  let expectedSteps;
+  if (successMass > 1e-7) {
+    expectedSteps = weightedSteps / successMass;
+  } else if (env.scorer) {
+    const s = env.scorer(state);
+    const fallback = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
+      ? s.expectedSteps
+      : heuristicRemainingSteps(state, target, env);
+    expectedSteps = cubeCost + fallback;
+  } else {
+    expectedSteps = cubeCost + heuristicRemainingSteps(state, target, env);
+  }
+
+  const summary = {
+    successProb: clampProb(successProb),
+    expectedSteps,
+  };
+
+  if (env.actionHintCache) {
+    env.actionHintCache.set(cacheKey, summary);
+  }
+
+  return summary;
+}
+
+/**
  * Estimate the expected remaining cube steps to reach `target` from `state`
  * via `action`, averaged over `action`’s outcome distribution.
  *
@@ -1601,50 +1799,7 @@ function clampProb(value) {
  * @returns {number} Estimated cube steps.
  */
 function immediateStepHint(state, action, env, target) {
-  const outcomes = getActionOutcomes(state, action, env);
-  if (outcomes.length === 0) {
-    return 35;
-  }
-
-  const cubeCost = isCubeAction(action) ? 1 : 0;
-  let successMass = 0;
-  let weightedSteps = 0;
-
-  for (const outcome of outcomes) {
-    const term = isTerminal(outcome.state, target, env);
-    let successProb;
-    let remainingSteps;
-
-    if (term.terminal) {
-      successProb = term.success ? 1 : 0;
-      remainingSteps = 0;
-    } else if (env.scorer) {
-      const s = env.scorer(outcome.state);
-      successProb = s.successProb;
-      remainingSteps = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
-        ? s.expectedSteps
-        : heuristicRemainingSteps(outcome.state, target, env);
-    } else {
-      successProb = heuristicSuccessProbability(outcome.state, target, env);
-      remainingSteps = heuristicRemainingSteps(outcome.state, target, env);
-    }
-
-    successMass += outcome.probability * successProb;
-    weightedSteps += outcome.probability * successProb * (cubeCost + remainingSteps);
-  }
-
-  if (successMass > 1e-7) {
-    return weightedSteps / successMass;
-  }
-
-  if (env.scorer) {
-    const s = env.scorer(state);
-    const fallback = (s.expectedSteps != null && Number.isFinite(s.expectedSteps))
-      ? s.expectedSteps
-      : heuristicRemainingSteps(state, target, env);
-    return cubeCost + fallback;
-  }
-  return cubeCost + heuristicRemainingSteps(state, target, env);
+  return getActionHintSummary(state, action, env, target).expectedSteps;
 }
 
 /**
@@ -1808,6 +1963,65 @@ function compareSummaryCandidates(left, right) {
 }
 
 /**
+ * Compute the exact one-step probability that each currently satisfied target
+ * affix requirement becomes unsatisfied after taking `action` from `state`.
+ *
+ * @param {Object} state
+ * @param {Object|null} action
+ * @param {Object} env
+ * @param {Object} target
+ * @returns {Array<{ name: string, risk: number, requireGA: boolean }>}
+ */
+function getOneStepTargetLossRisk(state, action, env, target) {
+  if (!action) {
+    return [];
+  }
+
+  const outcomes = getActionOutcomes(state, action, env);
+  if (outcomes.length === 0) {
+    return [];
+  }
+
+  const targetCounts = env.targetCounts || getTargetCountsFromTarget(target);
+  const currentCounts = getAffixCounts(state.affixes);
+  const currentGACounts = getAffixCounts(state.affixes, (entry) => entry.isGA);
+  const risks = [];
+
+  for (const [affixId, requiredCount] of Object.entries(targetCounts)) {
+    const requiredGA = env.targetGARequired[affixId] || 0;
+    if ((currentCounts[affixId] || 0) < requiredCount || (currentGACounts[affixId] || 0) < requiredGA) {
+      continue;
+    }
+
+    let risk = 0;
+    for (const outcome of outcomes) {
+      const nextCounts = getAffixCounts(outcome.state.affixes);
+      const nextGACounts = getAffixCounts(outcome.state.affixes, (entry) => entry.isGA);
+      if ((nextCounts[affixId] || 0) < requiredCount || (nextGACounts[affixId] || 0) < requiredGA) {
+        risk += outcome.probability;
+      }
+    }
+
+    if (risk > 1e-12) {
+      risks.push({
+        name: affixName(affixId, env),
+        risk,
+        requireGA: requiredGA > 0,
+      });
+    }
+  }
+
+  risks.sort((left, right) => {
+    if (Math.abs(right.risk - left.risk) > 1e-12) {
+      return right.risk - left.risk;
+    }
+    return left.name.localeCompare(right.name);
+  });
+
+  return risks;
+}
+
+/**
  * Extract a human-readable summary from the MCTS tree root.
  * Scores each action by its visit statistics, falls back to heuristic
  * priors for unvisited actions, and applies rule-based overrides.
@@ -1840,6 +2054,7 @@ function summarizeRoot(tree, rootKey, env, target) {
         variance: null,
         stdDev: null,
         successProb: immediateSuccessHint(root.state, ruleDecision.action, env, target),
+        oneStepRisk: getOneStepTargetLossRisk(root.state, ruleDecision.action, env, target),
         diagnostics: {
           reason: ruleDecision.reason,
           rootVisits: root.visits,
@@ -1850,7 +2065,7 @@ function summarizeRoot(tree, rootKey, env, target) {
       };
     }
 
-    return emptySummary("No actions from current state");
+    return emptySummary(getNoValidActionReason(root.state, target, env));
   }
 
   const scored = actionStatsList.map((entry) => {
@@ -1928,6 +2143,7 @@ function summarizeRoot(tree, rootKey, env, target) {
     variance,
     stdDev,
     successProb: best.successProb,
+    oneStepRisk: getOneStepTargetLossRisk(root.state, best.action, env, target),
     diagnostics: {
       rootVisits: root.visits,
       strategy: ruleDecision && ruleDecision.action ? "rules-first" : "mcts",
@@ -1949,24 +2165,7 @@ function summarizeRoot(tree, rootKey, env, target) {
  * @returns {number} Success probability in [0, 1].
  */
 function immediateSuccessHint(state, action, env, target) {
-  const outcomes = getActionOutcomes(state, action, env);
-  if (outcomes.length === 0) {
-    return 0;
-  }
-
-  let hint = 0;
-  for (const outcome of outcomes) {
-    const term = isTerminal(outcome.state, target, env);
-    if (term.terminal) {
-      hint += outcome.probability * (term.success ? 1 : 0);
-      continue;
-    }
-    const sp = env.scorer
-      ? env.scorer(outcome.state).successProb
-      : heuristicSuccessProbability(outcome.state, target, env);
-    hint += outcome.probability * sp;
-  }
-  return clampProb(hint);
+  return getActionHintSummary(state, action, env, target).successProb;
 }
 
 /**
@@ -2613,6 +2812,239 @@ function evaluateState(state, target, env) {
 }
 
 /**
+ * Return true when the state is small enough that an exact local solve is
+ * cheaper and more reliable than the analytical heuristic.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {boolean}
+ */
+function shouldUseExactSmallStateSolver(state, target, env) {
+  if (env.impossibleTargetGAReason || breaksRequiredGA(state, env)) {
+    return false;
+  }
+
+  const terminal = isTerminal(state, target, env);
+  if (terminal.terminal) {
+    return false;
+  }
+
+  const targetCounts = env.targetCounts || getTargetCountsFromTarget(target);
+  return getMissingTargetAffixIds(state, targetCounts).length <= EXACT_SMALL_STATE_MAX_MISSING;
+}
+
+/**
+ * Solve a compact reachable subgraph exactly using value iteration.
+ * Returns null when the reachable graph is too large to solve cheaply.
+ *
+ * @param {Object} state
+ * @param {Object} target
+ * @param {Object} env
+ * @returns {{ action: Object|null, successProb: number, expectedSteps: number|null, variance: null, stdDev: null, diagnostics: Object }|null}
+ */
+function getExactSmallStateSummary(state, target, env) {
+  const rootKey = stateKey(state);
+  if (env.exactStateSummaryCache && env.exactStateSummaryCache.has(rootKey)) {
+    return env.exactStateSummaryCache.get(rootKey);
+  }
+
+  if (!shouldUseExactSmallStateSolver(state, target, env)) {
+    if (env.exactStateSummaryCache) {
+      env.exactStateSummaryCache.set(rootKey, null);
+    }
+    return null;
+  }
+
+  const stateList = [cloneState(state)];
+  const keyToIndex = new Map([[rootKey, 0]]);
+  const terminalByIndex = [];
+  const actionsByIndex = [];
+
+  for (let queueIndex = 0; queueIndex < stateList.length; queueIndex += 1) {
+    const current = stateList[queueIndex];
+    const terminal = isTerminal(current, target, env);
+    terminalByIndex[queueIndex] = terminal;
+    if (terminal.terminal) {
+      actionsByIndex[queueIndex] = [];
+      continue;
+    }
+
+    const actionEntries = [];
+    for (const action of getValidActions(current, target, env)) {
+      const outcomes = getActionOutcomes(current, action, env);
+      const transitions = [];
+
+      for (const outcome of outcomes) {
+        const childKey = stateKey(outcome.state);
+        let childIndex = keyToIndex.get(childKey);
+        if (childIndex === undefined) {
+          childIndex = stateList.length;
+          keyToIndex.set(childKey, childIndex);
+          stateList.push(outcome.state);
+          if (stateList.length > EXACT_SMALL_STATE_LIMIT) {
+            if (env.exactStateSummaryCache) {
+              env.exactStateSummaryCache.set(rootKey, null);
+            }
+            return null;
+          }
+        }
+
+        transitions.push({
+          probability: outcome.probability,
+          childIndex,
+        });
+      }
+
+      actionEntries.push({
+        action,
+        cubeCost: isCubeAction(action) ? 1 : 0,
+        transitions,
+      });
+    }
+
+    actionsByIndex[queueIndex] = actionEntries;
+  }
+
+  const successProbByIndex = new Float64Array(stateList.length);
+  const weightedStepsByIndex = new Float64Array(stateList.length);
+
+  for (let index = 0; index < stateList.length; index += 1) {
+    const terminal = terminalByIndex[index];
+    if (terminal && terminal.terminal) {
+      successProbByIndex[index] = terminal.success ? 1 : 0;
+    }
+  }
+
+  for (let iteration = 0; iteration < EXACT_SMALL_STATE_MAX_ITERATIONS; iteration += 1) {
+    let maxDelta = 0;
+
+    for (let index = 0; index < stateList.length; index += 1) {
+      const terminal = terminalByIndex[index];
+      if (terminal && terminal.terminal) {
+        continue;
+      }
+
+      const actions = actionsByIndex[index] || [];
+      let bestSuccess = 0;
+      for (const entry of actions) {
+        let successMass = 0;
+        for (const transition of entry.transitions) {
+          successMass += transition.probability * successProbByIndex[transition.childIndex];
+        }
+        if (successMass > bestSuccess) {
+          bestSuccess = successMass;
+        }
+      }
+
+      maxDelta = Math.max(maxDelta, Math.abs(bestSuccess - successProbByIndex[index]));
+      successProbByIndex[index] = bestSuccess;
+    }
+
+    if (maxDelta < EXACT_SMALL_STATE_EPSILON) {
+      break;
+    }
+  }
+
+  for (let iteration = 0; iteration < EXACT_SMALL_STATE_MAX_ITERATIONS; iteration += 1) {
+    let maxDelta = 0;
+
+    for (let index = 0; index < stateList.length; index += 1) {
+      const terminal = terminalByIndex[index];
+      if (terminal && terminal.terminal) {
+        continue;
+      }
+
+      const actions = actionsByIndex[index] || [];
+      const optimalSuccess = successProbByIndex[index];
+      let bestWeighted = Infinity;
+
+      for (const entry of actions) {
+        let successMass = 0;
+        let weighted = 0;
+        for (const transition of entry.transitions) {
+          successMass += transition.probability * successProbByIndex[transition.childIndex];
+          weighted += transition.probability * weightedStepsByIndex[transition.childIndex];
+        }
+
+        if (successMass <= EXACT_SMALL_STATE_EPSILON) {
+          continue;
+        }
+        if (Math.abs(successMass - optimalSuccess) > 1e-8) {
+          continue;
+        }
+
+        const candidate = entry.cubeCost * successMass + weighted;
+        if (candidate < bestWeighted) {
+          bestWeighted = candidate;
+        }
+      }
+
+      if (!Number.isFinite(bestWeighted)) {
+        bestWeighted = 0;
+      }
+
+      maxDelta = Math.max(maxDelta, Math.abs(bestWeighted - weightedStepsByIndex[index]));
+      weightedStepsByIndex[index] = bestWeighted;
+    }
+
+    if (maxDelta < EXACT_SMALL_STATE_EPSILON) {
+      break;
+    }
+  }
+
+  const rootActions = (actionsByIndex[0] || []).map((entry) => {
+    let successMass = 0;
+    let weighted = 0;
+    for (const transition of entry.transitions) {
+      successMass += transition.probability * successProbByIndex[transition.childIndex];
+      weighted += transition.probability * weightedStepsByIndex[transition.childIndex];
+    }
+
+    const expectedSteps = successMass > EXACT_SMALL_STATE_EPSILON
+      ? (entry.cubeCost * successMass + weighted) / successMass
+      : null;
+    const breakdown = getActionProbabilityBreakdown(state, entry.action, env);
+
+    return {
+      action: entry.action,
+      visits: 0,
+      successProb: successMass,
+      expectedSteps,
+      rank: successMass,
+      probabilityBreakdown: breakdown.outcomes,
+      sourceBreakdown: breakdown.sources,
+    };
+  }).sort(compareSummaryCandidates);
+
+  const result = {
+    action: rootActions.length > 0 ? rootActions[0].action : null,
+    successProb: successProbByIndex[0],
+    expectedSteps: successProbByIndex[0] > EXACT_SMALL_STATE_EPSILON
+      ? weightedStepsByIndex[0] / successProbByIndex[0]
+      : null,
+    variance: null,
+    stdDev: null,
+    oneStepRisk: rootActions.length > 0
+      ? getOneStepTargetLossRisk(state, rootActions[0].action, env, target)
+      : [],
+    diagnostics: {
+      reason: rootActions.length === 0 ? getNoValidActionReason(state, target, env) : null,
+      rootVisits: 0,
+      strategy: "exact-small-state",
+      solvedStates: stateList.length,
+      candidateActions: rootActions.slice(0, 6),
+    },
+  };
+
+  if (env.exactStateSummaryCache) {
+    env.exactStateSummaryCache.set(rootKey, result);
+  }
+
+  return result;
+}
+
+/**
  * Estimate the probability of eventually reaching `target` from `state`
  * using the built-in analytical heuristic (not the RF scorer).
  *
@@ -2637,6 +3069,11 @@ function heuristicSuccessProbability(state, target, env) {
   const terminal = isTerminal(state, target, env);
   if (terminal.terminal) {
     return terminal.success ? 1 : 0;
+  }
+
+  const exactSummary = getExactSmallStateSummary(state, target, env);
+  if (exactSummary) {
+    return exactSummary.successProb;
   }
 
   const guaranteedFocusedBridge = getGuaranteedFocusedBridgeEstimate(state, target, env);
@@ -2672,6 +3109,11 @@ function heuristicRemainingSteps(state, target, env) {
   const terminal = isTerminal(state, target, env);
   if (terminal.terminal) {
     return 0;
+  }
+
+  const exactSummary = getExactSmallStateSummary(state, target, env);
+  if (exactSummary && Number.isFinite(exactSummary.expectedSteps)) {
+    return exactSummary.expectedSteps;
   }
 
   const guaranteedFocusedBridge = getGuaranteedFocusedBridgeEstimate(state, target, env);
@@ -2729,6 +3171,7 @@ function emptySummary(reason) {
     variance: null,
     stdDev: null,
     successProb: 0,
+    oneStepRisk: [],
     diagnostics: {
       reason,
       rootVisits: 0,
@@ -2753,6 +3196,7 @@ function terminalSummary(terminal, env) {
       variance: 0,
       stdDev: 0,
       successProb: 1,
+      oneStepRisk: [],
       diagnostics: {
         reason: "Current state already satisfies the target.",
         rootVisits: 0,
@@ -2862,6 +3306,7 @@ if (typeof module !== "undefined" && module.exports) {
     sampleOutcome,
     summarizeRoot,
     immediateSuccessHint,
+    getOneStepTargetLossRisk,
     getActionProbabilityBreakdown,
     topBreakdown,
     sourceLabel,
@@ -2877,6 +3322,8 @@ if (typeof module !== "undefined" && module.exports) {
     getGuaranteedFocusedBridgeEstimate,
     estimateMissingAffixSteps,
     evaluateState,
+    shouldUseExactSmallStateSolver,
+    getExactSmallStateSummary,
     heuristicSuccessProbability,
     heuristicRemainingSteps,
     emptySummary,

@@ -67,10 +67,26 @@ function buildCatalogFixture(categoryToNames) {
   const byId = new Map();
 
   for (const [category, names] of Object.entries(categoryToNames)) {
-    for (const name of names) {
+    for (const entry of names) {
+      const name = typeof entry === "string" ? entry : entry.name;
+      const family = typeof entry === "string" ? "" : String(entry.family || "");
+      const rollWeight = typeof entry === "string" ? 1 : Number(entry.rollWeight);
       const id = normalizeName(name);
       if (!byId.has(id)) {
-        byId.set(id, { id, name, categories: [] });
+        byId.set(id, {
+          id,
+          name,
+          categories: [],
+          family,
+          rollWeight: Number.isFinite(rollWeight) && rollWeight > 0 ? rollWeight : 1,
+        });
+      }
+
+      if (family) {
+        byId.get(id).family = family;
+      }
+      if (Number.isFinite(rollWeight) && rollWeight > 0) {
+        byId.get(id).rollWeight = rollWeight;
       }
       byId.get(id).categories.push(category);
     }
@@ -81,7 +97,7 @@ function buildCatalogFixture(categoryToNames) {
   const categories = Object.fromEntries(
     Object.entries(categoryToNames).map(([category, names]) => [
       category,
-      names.map((name) => byName[name].id),
+      names.map((entry) => byName[typeof entry === "string" ? entry : entry.name].id),
     ])
   );
 
@@ -183,6 +199,141 @@ function buildLegendaryAggressiveBridgeFixture() {
   return fixture;
 }
 
+function buildOneMissingOffensiveFixture() {
+  const damageTypes = ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
+  const elementalTypedAffixes = damageTypes.map((type) => ({
+    name: `Elemental Damage (${type})`,
+    family: "elemental-damage",
+    rollWeight: 1 / damageTypes.length,
+  }));
+  const specificResistanceTypedAffixes = damageTypes.map((type) => ({
+    name: `Specific Resistance (${type})`,
+    family: "specific-resistance",
+    rollWeight: 1 / damageTypes.length,
+  }));
+
+  const categoryToNames = {
+    Aggressive: [
+      "Mainstat",
+      "Weapon Damage",
+      "Attack Speed",
+      "Critical Strike Chance",
+      "Critical Strike Damage",
+      "Vulnerable Damage",
+      "DoT Damage",
+      "All Damage",
+      ...elementalTypedAffixes,
+      "Thorns",
+    ],
+    Pragmatic: [
+      "Barrier Generation",
+      "Cooldown Reduction",
+      "Fortify Generation",
+      "Healing Received",
+      "Impairment Reduction",
+      "Life Regeneration",
+      "Lucky Hit Chance",
+      "Movement Speed",
+      "Potion Capacity",
+      "Thorns",
+      "Maximum Evade Charges",
+      "Attacks reduce Evade Cooldown",
+      "Evade grants Movement Speed",
+    ],
+    Protector: [
+      "Armor",
+      "Damage Reduction",
+      "Dodge Chance",
+      "Fortify Generation",
+      "Life on Hit",
+      "Life on Kill",
+      "Life Regeneration",
+      "Maximum Life",
+      "All Resistance",
+      ...specificResistanceTypedAffixes,
+    ],
+    Resourceful: [
+      "Lucky Hit Chance restore Resource",
+      "Maximum Resource",
+      "Resource Cost Reduction",
+      "Resource on Kill",
+      "Resource Regeneration",
+    ],
+    Adept: [
+      "Mainstat",
+      "Skill Ranks",
+    ],
+    Chromatic: [
+      ...specificResistanceTypedAffixes,
+    ],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const currentState = {
+    isLegendary: false,
+    enchantressAvailable: false,
+    gearSlot: "Any",
+    affixes: [
+      { affixId: byName["Critical Strike Chance"].id, isGA: false, isEnchanted: false },
+      { affixId: byName["Armor"].id, isGA: true, isEnchanted: false },
+      { affixId: byName["Vulnerable Damage"].id, isGA: true, isEnchanted: false },
+      { affixId: byName["Elemental Damage (Physical)"].id, isGA: false, isEnchanted: false },
+    ],
+  };
+
+  const target = {
+    affixes: [
+      { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+      { affixId: byName["Critical Strike Damage"].id, requireGA: false },
+      { affixId: byName["Vulnerable Damage"].id, requireGA: true },
+      { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+    ],
+  };
+
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: target.affixes.map((entry) => entry.affixId),
+  };
+
+  return { data, currentState, target, byName };
+}
+
+function buildLegendarySingleMissingBridgeFixture() {
+  const { data, byName } = buildOneMissingOffensiveFixture();
+  const currentState = {
+    isLegendary: true,
+    enchantressAvailable: false,
+    gearSlot: "Any",
+    affixes: [
+      { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+      { affixId: byName["Critical Strike Chance"].id, isGA: true, isEnchanted: false },
+      { affixId: byName["Critical Strike Damage"].id, isGA: true, isEnchanted: false },
+      { affixId: byName["Maximum Life"].id, isGA: true, isEnchanted: false },
+    ],
+  };
+
+  const target = {
+    affixes: [
+      { affixId: byName["Evade grants Movement Speed"].id, requireGA: false },
+      { affixId: byName["Critical Strike Chance"].id, requireGA: true },
+      { affixId: byName["Critical Strike Damage"].id, requireGA: true },
+      { affixId: byName["Maximum Life"].id, requireGA: false },
+    ],
+  };
+
+  return {
+    data: {
+      affixes: data.affixes,
+      categories: data.categories,
+      targetAffixIds: target.affixes.map((entry) => entry.affixId),
+    },
+    currentState,
+    target,
+    byName,
+  };
+}
+
 test("focused reroll randomly selects source within the prism category", () => {
   const { data, currentState, target } = buildFixture();
   const env = worker.buildEnv(data, {
@@ -206,7 +357,30 @@ test("focused reroll randomly selects source within the prism category", () => {
   approxEqual(gaTouchedProbability, 0.5);
 });
 
-test("target-required GA blocks risky category actions even when strict mode is off", () => {
+test("target-required GA blocks risky category actions in strict mode", () => {
+  const { data, currentState } = buildFixture();
+  const target = {
+    affixes: [
+      { affixId: "armor", requireGA: true },
+      { affixId: "movement-speed", requireGA: false },
+    ],
+  };
+  const env = worker.buildEnv(data, {
+    currentGAAffixes: ["armor"],
+    strictMode: true,
+    sacrificeAffixId: "",
+  }, target);
+
+  const actions = worker.getValidActions(currentState, target, env);
+  const protectorActions = actions.filter((action) => action.prism === "Protector");
+
+  assert.ok(protectorActions.some((action) => action.type === "add"));
+  assert.ok(!protectorActions.some((action) => action.type === "remove"));
+  assert.ok(!protectorActions.some((action) => action.type === "chaotic"));
+  assert.ok(!protectorActions.some((action) => action.type === "focused"));
+});
+
+test("target-required GA keeps risky category actions available in flexible mode", () => {
   const { data, currentState } = buildFixture();
   const target = {
     affixes: [
@@ -224,9 +398,9 @@ test("target-required GA blocks risky category actions even when strict mode is 
   const protectorActions = actions.filter((action) => action.prism === "Protector");
 
   assert.ok(protectorActions.some((action) => action.type === "add"));
-  assert.ok(!protectorActions.some((action) => action.type === "remove"));
-  assert.ok(!protectorActions.some((action) => action.type === "chaotic"));
-  assert.ok(!protectorActions.some((action) => action.type === "focused"));
+  assert.ok(protectorActions.some((action) => action.type === "remove"));
+  assert.ok(protectorActions.some((action) => action.type === "chaotic"));
+  assert.ok(protectorActions.some((action) => action.type === "focused"));
 });
 
 test("source GAs not required by the target do not block risky category actions", () => {
@@ -597,11 +771,11 @@ test("worker reports impossible target GA requirements that were not GA on the s
   assert.match(summary.diagnostics.reason, /Impossible target/);
 });
 
-test("heuristic remaining steps models the direct pragmatic retry loop for the evade-charge scenario", () => {
+test("exact small-state estimates replace the old overestimate on the evade-charge scenario", () => {
   const { data, currentState, target, byName } = buildEvadeScenarioFixture();
   const env = worker.buildEnv(data, {
     currentGAAffixes: [byName["All Resistance"].id, byName["Armor"].id],
-    strictMode: false,
+    strictMode: true,
     sacrificeAffixId: "",
   }, target);
 
@@ -615,9 +789,96 @@ test("heuristic remaining steps models the direct pragmatic retry loop for the e
     prism: "Pragmatic",
   }, env).find((outcome) => !worker.isTerminal(outcome.state, target, env).success).state;
 
-  assert.equal(worker.heuristicRemainingSteps(currentState, target, env), 25);
-  assert.equal(worker.heuristicRemainingSteps(chromaticState, target, env), 26);
-  assert.equal(worker.heuristicRemainingSteps(pragmaticMissState, target, env), 13);
+  approxEqual(worker.heuristicRemainingSteps(currentState, target, env), 13, 1e-6);
+  approxEqual(worker.heuristicRemainingSteps(chromaticState, target, env), 14, 1e-6);
+  approxEqual(worker.heuristicRemainingSteps(pragmaticMissState, target, env), 13, 1e-6);
+  assert.equal(worker.getExactSmallStateSummary(currentState, target, env).diagnostics.strategy, "exact-small-state");
+});
+
+test("flexible mode ranks chaotic protector first in the legendary bridge case when Maximum Life GA is required", () => {
+  const { data, currentState, byName } = buildLegendarySingleMissingBridgeFixture();
+  const target = {
+    affixes: [
+      { affixId: byName["Evade grants Movement Speed"].id, requireGA: false },
+      { affixId: byName["Critical Strike Chance"].id, requireGA: true },
+      { affixId: byName["Critical Strike Damage"].id, requireGA: true },
+      { affixId: byName["Maximum Life"].id, requireGA: true },
+    ],
+  };
+  const result = worker.optimizeScenario({
+    state: currentState,
+    target,
+    data: {
+      ...data,
+      targetAffixIds: target.affixes.map((entry) => entry.affixId),
+    },
+    gaConfig: {
+      currentGAAffixes: [
+        byName["Critical Strike Chance"].id,
+        byName["Critical Strike Damage"].id,
+        byName["Maximum Life"].id,
+      ],
+      strictMode: false,
+      sacrificeAffixId: "",
+    },
+    timeMs: 100,
+  });
+
+  assert.equal(result.iterations, 0);
+  assert.equal(result.diagnostics.strategy, "exact-small-state");
+  assert.deepEqual(result.action, {
+    type: "chaotic",
+    prism: "Protector",
+  });
+  assert.equal(result.diagnostics.solvedStates, 3810);
+  approxEqual(result.successProb, 0.2977609998267527, 1e-6);
+  approxEqual(result.expectedSteps, 14.979332345152072, 1e-6);
+  assert.deepEqual(result.oneStepRisk.map((entry) => entry.name), ["Maximum Life"]);
+  approxEqual(result.oneStepRisk[0].risk, 0.5, 1e-6);
+
+  const topTwo = result.diagnostics.candidateActions.slice(0, 2);
+  assert.deepEqual(topTwo.map((entry) => entry.action), [
+    { type: "chaotic", prism: "Protector" },
+    { type: "focused", prism: "Protector" },
+  ]);
+  assert.ok(topTwo[0].successProb > topTwo[1].successProb);
+});
+
+test("strict mode reports no safe action in the legendary bridge case when Maximum Life GA is required", () => {
+  const { data, currentState, byName } = buildLegendarySingleMissingBridgeFixture();
+  const target = {
+    affixes: [
+      { affixId: byName["Evade grants Movement Speed"].id, requireGA: false },
+      { affixId: byName["Critical Strike Chance"].id, requireGA: true },
+      { affixId: byName["Critical Strike Damage"].id, requireGA: true },
+      { affixId: byName["Maximum Life"].id, requireGA: true },
+    ],
+  };
+
+  const result = worker.optimizeScenario({
+    state: currentState,
+    target,
+    data: {
+      ...data,
+      targetAffixIds: target.affixes.map((entry) => entry.affixId),
+    },
+    gaConfig: {
+      currentGAAffixes: [
+        byName["Critical Strike Chance"].id,
+        byName["Critical Strike Damage"].id,
+        byName["Maximum Life"].id,
+      ],
+      strictMode: true,
+      sacrificeAffixId: "",
+    },
+    timeMs: 100,
+  });
+
+  assert.equal(result.iterations, 0);
+  assert.equal(result.diagnostics.strategy, "exact-small-state");
+  assert.equal(result.action, null);
+  assert.equal(result.successProb, 0);
+  assert.match(result.diagnostics.reason, /No safe action preserves all required GAs/);
 });
 
 test("rules resolver prefers pragmatic add when one target affix is missing", () => {
@@ -781,8 +1042,8 @@ test("bridge-aware hints recognize guaranteed focused chains on the legendary ag
     expectedSteps: 13,
   });
 
-  approxEqual(worker.immediateSuccessHint(currentState, focusedAggressive, env, target), 1);
-  approxEqual(worker.immediateStepHint(currentState, focusedAggressive, env, target), 18);
+  approxEqual(worker.immediateSuccessHint(currentState, focusedAggressive, env, target), 1, 1e-6);
+  approxEqual(worker.immediateStepHint(currentState, focusedAggressive, env, target), 18, 1e-6);
 });
 
 test("heuristic-guided chooser prefers the focused aggressive bridge after chain tuning", () => {
@@ -812,4 +1073,126 @@ test("heuristic-guided chooser prefers the focused aggressive bridge after chain
     type: "focused",
     prism: "Aggressive",
   });
+});
+
+test("exact small-state solver ranks remove above chaotic and focused in the one-missing offensive scenario", () => {
+  const { data, currentState, target, byName } = buildOneMissingOffensiveFixture();
+  const env = worker.buildEnv(data, {
+    currentGAAffixes: [byName["Armor"].id, byName["Vulnerable Damage"].id],
+    strictMode: true,
+    sacrificeAffixId: "",
+  }, target);
+
+  const summary = worker.getExactSmallStateSummary(currentState, target, env);
+
+  assert.ok(summary);
+  assert.equal(summary.diagnostics.strategy, "exact-small-state");
+  assert.equal(summary.diagnostics.solvedStates, 72);
+  assert.deepEqual(summary.action, {
+    type: "remove",
+    prism: "Protector",
+  });
+  approxEqual(summary.successProb, 1 / 7);
+  approxEqual(summary.expectedSteps, 18 / 7);
+
+  const topThree = summary.diagnostics.candidateActions.slice(0, 3);
+  assert.deepEqual(topThree.map((entry) => entry.action), [
+    { type: "remove", prism: "Protector" },
+    { type: "chaotic", prism: "Protector" },
+    { type: "focused", prism: "Protector" },
+  ]);
+  approxEqual(topThree[0].expectedSteps, 18 / 7);
+  approxEqual(topThree[1].expectedSteps, 3.266343825665949);
+  approxEqual(topThree[2].expectedSteps, 25 / 7);
+});
+
+test("optimizeScenario uses the exact small-state fast path for the one-missing offensive scenario", () => {
+  const { data, currentState, target, byName } = buildOneMissingOffensiveFixture();
+
+  const result = worker.optimizeScenario({
+    state: currentState,
+    target,
+    data,
+    gaConfig: {
+      currentGAAffixes: [byName["Armor"].id, byName["Vulnerable Damage"].id],
+      strictMode: true,
+      sacrificeAffixId: "",
+    },
+    timeMs: 100,
+  });
+
+  assert.equal(result.iterations, 0);
+  assert.equal(result.diagnostics.strategy, "exact-small-state");
+  assert.deepEqual(result.action, {
+    type: "remove",
+    prism: "Protector",
+  });
+  approxEqual(result.successProb, 1 / 7);
+  approxEqual(result.expectedSteps, 18 / 7);
+});
+
+test("exact small-state solver handles the legendary single-missing bridge scenario", () => {
+  const { data, currentState, target, byName } = buildLegendarySingleMissingBridgeFixture();
+  const env = worker.buildEnv(data, {
+    currentGAAffixes: [
+      byName["Critical Strike Chance"].id,
+      byName["Critical Strike Damage"].id,
+      byName["Maximum Life"].id,
+    ],
+    strictMode: true,
+    sacrificeAffixId: "",
+  }, target);
+
+  const summary = worker.getExactSmallStateSummary(currentState, target, env);
+
+  assert.ok(summary);
+  assert.equal(summary.diagnostics.strategy, "exact-small-state");
+  assert.equal(summary.diagnostics.solvedStates, 1330);
+  assert.deepEqual(summary.action, {
+    type: "focused",
+    prism: "Protector",
+  });
+  assert.ok(summary.successProb > 0.99);
+  approxEqual(summary.expectedSteps, 25.447136616631404, 1e-6);
+
+  const topTwo = summary.diagnostics.candidateActions.slice(0, 2);
+  assert.deepEqual(topTwo.map((entry) => entry.action), [
+    { type: "focused", prism: "Protector" },
+    { type: "chaotic", prism: "Protector" },
+  ]);
+  assert.ok(topTwo[0].successProb > topTwo[1].successProb);
+  assert.ok(topTwo[1].expectedSteps < topTwo[0].expectedSteps);
+  assert.deepEqual(summary.oneStepRisk.map((entry) => entry.name), ["Maximum Life"]);
+  approxEqual(summary.oneStepRisk[0].risk, 0.45, 1e-6);
+});
+
+test("optimizeScenario uses the exact fast path for the legendary single-missing bridge scenario", () => {
+  const { data, currentState, target, byName } = buildLegendarySingleMissingBridgeFixture();
+
+  const result = worker.optimizeScenario({
+    state: currentState,
+    target,
+    data,
+    gaConfig: {
+      currentGAAffixes: [
+        byName["Critical Strike Chance"].id,
+        byName["Critical Strike Damage"].id,
+        byName["Maximum Life"].id,
+      ],
+      strictMode: true,
+      sacrificeAffixId: "",
+    },
+    timeMs: 100,
+  });
+
+  assert.equal(result.iterations, 0);
+  assert.equal(result.diagnostics.strategy, "exact-small-state");
+  assert.deepEqual(result.action, {
+    type: "focused",
+    prism: "Protector",
+  });
+  assert.ok(result.successProb > 0.99);
+  approxEqual(result.expectedSteps, 25.447136616631404, 1e-6);
+  assert.deepEqual(result.oneStepRisk.map((entry) => entry.name), ["Maximum Life"]);
+  approxEqual(result.oneStepRisk[0].risk, 0.45, 1e-6);
 });

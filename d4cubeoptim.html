@@ -555,7 +555,7 @@
 							<span class="value" id="result-action">-</span>
 						</div>
 						<div class="metric">
-							<span class="label">Success Probability</span>
+							<span class="label">Eventual Success Probability</span>
 							<span class="value" id="result-success">-</span>
 						</div>
 						<div class="metric">
@@ -569,7 +569,7 @@
 					</div>
 
 					<div class="field">
-						<label>One-Step GA Risk For Recommended Action</label>
+						<label>One-Step Target Loss Risk</label>
 						<ul class="risk-list" id="ga-risk-list"></ul>
 					</div>
 
@@ -718,7 +718,7 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v1";
-		const WORKER_VERSION = "2026-05-22-reconciled-family-rules-0";
+		const WORKER_VERSION = "2026-05-22-exact-small-state-3";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -781,6 +781,7 @@
 		let runInProgress = false;
 		let currentBestAction = null;
 		let lastDiagnostics = null;
+		let lastOneStepRisk = null;
 		const supportsSharedStop = typeof SharedArrayBuffer !== "undefined" && typeof Atomics !== "undefined";
 		let stopBuffer = null;
 		let stopSignal = null;
@@ -823,6 +824,16 @@
 
 		init();
 
+		function syncScorerModelToWorker() {
+			if (!worker || !rfModel) {
+				return;
+			}
+			worker.postMessage({
+				type: "set-scorer-model",
+				model: rfModel,
+			});
+		}
+
 		function init() {
 			populateStaticLists();
 			bindEvents();
@@ -831,7 +842,13 @@
 			// Load the RF model for the scorer; optimizer works without it if fetch fails.
 			fetch("./model.json")
 				.then((r) => (r.ok ? r.json() : null))
-				.then((m) => { if (m) rfModel = m; })
+				.then((m) => {
+					if (!m) {
+						return;
+					}
+					rfModel = m;
+					syncScorerModelToWorker();
+				})
 				.catch(() => {});
 		}
 
@@ -993,6 +1010,8 @@
 					setRunButtons();
 				}
 			};
+
+			syncScorerModelToWorker();
 		}
 
 		function startRun() {
@@ -1040,7 +1059,6 @@
 				timeMs,
 				stopBuffer,
 				tree: treeCache,
-				scorerModel: rfModel,
 			});
 		}
 
@@ -1074,14 +1092,19 @@
 		function applyWorkerResult(message, isFinal) {
 			currentBestAction = message.action || null;
 			lastDiagnostics = message.diagnostics || null;
+			lastOneStepRisk = Array.isArray(message.oneStepRisk)
+				? message.oneStepRisk
+				: estimateOneStepGARisk(message.action, exportCurrentState());
 			applySuggestedActionDefaults(currentBestAction);
 
-			els.resultAction.textContent = message.action ? describeAction(message.action) : "No recommendation yet";
+			els.resultAction.textContent = message.action
+				? describeAction(message.action)
+				: ((message.diagnostics && message.diagnostics.reason) || "No recommendation yet");
 			els.resultSuccess.textContent = percentOrDash(message.successProb);
 			els.resultSteps.textContent = numberOrDash(message.expectedSteps);
 			els.resultStd.textContent = numberOrDash(message.stdDev);
 
-			renderGARisk(message.action);
+			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderManualControls();
 
@@ -1138,38 +1161,27 @@
 			appState.lastAction = next;
 		}
 
-		function renderGARisk(action) {
+		function renderGARisk(risks) {
 			els.gaRiskList.innerHTML = "";
 
-			const gaEntries = appState.current.affixes
-				.map((entry, index) => ({ entry, index }))
-				.filter(({ entry }) => entry.isGA);
-
-			if (gaEntries.length === 0) {
-				const li = document.createElement("li");
-				li.textContent = "No GA on current item.";
-				els.gaRiskList.appendChild(li);
-				return;
-			}
-
-			if (!action) {
+			if (risks == null) {
 				const li = document.createElement("li");
 				li.textContent = "Run optimizer to compute risk estimate.";
 				els.gaRiskList.appendChild(li);
 				return;
 			}
 
-			const risks = estimateOneStepGARisk(action, exportCurrentState());
 			if (risks.length === 0) {
 				const li = document.createElement("li");
-				li.textContent = "Recommended action does not expose a GA in one-step selection.";
+				li.textContent = "Recommended action preserves all currently satisfied target requirements in one step.";
 				els.gaRiskList.appendChild(li);
 				return;
 			}
 
 			risks.forEach((risk) => {
 				const li = document.createElement("li");
-				li.textContent = `${risk.name}: ${(risk.risk * 100).toFixed(2)}% risk this step`;
+				const suffix = risk.requireGA ? " (GA-required target)" : "";
+				li.textContent = `${risk.name}${suffix}: ${(risk.risk * 100).toFixed(2)}% chance to become unsatisfied this step`;
 				els.gaRiskList.appendChild(li);
 			});
 		}
@@ -1258,7 +1270,7 @@
 					.map((entry) => `${entry.label} ${(entry.probability * 100).toFixed(1)}%`)
 					.join(", ");
 
-				let text = `${describeAction(candidate.action)} | success ${(candidate.successProb * 100).toFixed(1)}% | steps ${stepText} | visits ${candidate.visits}`;
+				let text = `${describeAction(candidate.action)} | eventual ${(candidate.successProb * 100).toFixed(1)}% | steps ${stepText} | visits ${candidate.visits}`;
 				if (sourceText) {
 					text += ` | source: ${sourceText}`;
 				}
@@ -1284,6 +1296,7 @@
 			treeCache = null;
 			currentBestAction = null;
 			lastDiagnostics = null;
+			lastOneStepRisk = null;
 			renderGARisk(null);
 			renderCandidates(null);
 		}
@@ -1293,6 +1306,7 @@
 			treeCache = null;
 			currentBestAction = null;
 			lastDiagnostics = null;
+			lastOneStepRisk = null;
 
 			try {
 				localStorage.removeItem(STORAGE_KEY);
@@ -1317,17 +1331,16 @@
 			renderCurrentAffixes();
 			renderTargetAffixes();
 			renderManualControls();
-			renderGARisk(currentBestAction);
+			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderHistory();
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
 		}
 
 		function renderSettingsControls() {
-			appState.settings.strictMode = true;
-			els.strictToggle.classList.add("active");
-			els.strictToggle.textContent = "Target GA Strict";
-			els.strictToggle.disabled = true;
+			els.strictToggle.classList.toggle("active", !!appState.settings.strictMode);
+			els.strictToggle.textContent = appState.settings.strictMode ? "Target GA Strict" : "Target GA Flexible";
+			els.strictToggle.disabled = false;
 		}
 
 		function renderCurrentControls() {
@@ -1691,7 +1704,7 @@
 				const act = entry.action ? describeAction(entry.action) : "No action";
 				const p = Number.isFinite(entry.successProb) ? `${(entry.successProb * 100).toFixed(1)}%` : "-";
 				const s = Number.isFinite(entry.expectedSteps) ? entry.expectedSteps.toFixed(2) : "-";
-				const mode = entry.strictMode ? "strict" : "normal";
+				const mode = entry.strictMode ? "strict" : "flexible";
 				const stopSuffix = entry.stoppedByUser ? " (stopped)" : "";
 				return `${stamp} | run ${mode} | ${act} | p ${p} | steps ${s} | iter ${entry.iterations}${stopSuffix}`;
 			}
@@ -1749,7 +1762,7 @@
 			normalizeTargetGARequirements();
 
 			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 10);
-			appState.settings.strictMode = true;
+			appState.settings.strictMode = !!appState.settings.strictMode;
 
 			appState.lastAction.mode = ["added", "removed", "changed", "enchanted"].includes(appState.lastAction.mode)
 				? appState.lastAction.mode

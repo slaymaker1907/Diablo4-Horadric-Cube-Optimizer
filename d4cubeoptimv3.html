@@ -774,12 +774,12 @@
 		const DAMAGE_TYPES = Array.isArray(_cfg.DAMAGE_TYPES) ? _cfg.DAMAGE_TYPES : ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
 		const ELEMENTAL_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
 			name: `Elemental Damage (${type})`,
-			family: "",
+			family: "elemental-damage",
 			rollWeight: 1,
 		}));
 		const SPECIFIC_RESISTANCE_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
 			name: `Specific Resistance (${type})`,
-			family: "",
+			family: "specific-resistance",
 			rollWeight: 1,
 		}));
 

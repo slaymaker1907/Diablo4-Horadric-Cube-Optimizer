@@ -408,7 +408,7 @@ function inferAffixFamily(affixId) {
  */
 function getAffixFamily(affixId, affixMap) {
   const affix = affixMap[affixId];
-  if (affix && affix.family !== undefined) {
+  if (affix && affix.family) {
     return affix.family;
   }
   return inferAffixFamily(affixId);

@@ -47,6 +47,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Removed `requireGA` from all target-affix mechanics: the enchant outcome now correctly sets `isGA: false` when an affix changes (GA is preserved only when enchanting to the same affixId), and the `requireGA` field is stripped from all code paths since acquiring a new GA through cube or enchant operations is not possible in D4 — only preserving existing GAs is supported. Feasibility checks F1, F2, and F3 (which relied on `requireGA`) are removed; `CLOSED_FORM_CASE_IDS.D` is removed; implicit GA protection via `gaRequiredCounts` (populated from `currentGAAffixes`) remains the sole mechanism for preserving GAs when `strictMode` is enabled.
 - Fixed decomposition GA-protection gap: added `isCategoryFocusedBlockedByGAV3` helper and applied it to Cases B, C, F, G in `getClosedFormPlanCandidatesV3`. When any protected GA affix (non-enchanted, in `gaRequiredCounts`) shares a prism category with the affix being rerolled, that prism is skipped — preventing the closed-form model from generating plans that would randomly endanger the GA. Such cases now correctly escalate to the residual solver, which blocks dangerous actions via `touchesProtectedGA` under `strictMode: true`.
 - Made GA preservation always-on in v3 UI: removed the `Target GA Strict` toggle, `strictMode` is now always `true` in `gaConfig`, `renderSettingsControls` and all toggle state removed; "Eventual Success Probability" label renamed "P(Success, GA Preserved)"; `WORKER_VERSION` bumped to `2026-05-24-v3-ga-always-on`.
+- Fixed Thorns prism mechanics: Thorns now uses the correct prism per operation type (Add=Aggressive, Focused/Chaotic=Protector, Remove=Pragmatic) via a general per-operation category override system (`operationCategories` on affix objects, `OPERATION_CATEGORY_OVERRIDES` in the catalog builder). Added Thorns to the Protector category for Focused/Chaotic eligibility. All affected helpers in the shared worker and v3 worker accept an `operationType` parameter and fall back to `affix.categories` when no override exists, preserving backward compatibility with existing test fixtures. Added gear-slot class-availability warning in the UI. `WORKER_VERSION` bumped to `2026-05-24-v3-thorns-prism-fix`.
 
 ## Planned Algorithmic Differences
 
@@ -66,9 +67,9 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 	- infeasible typed-family conflict renders `Feasibility Stop` with `F6` in the UI.
 	- decomposition case renders `Decomposition + ILP` with selected-option details.
 	- residual full-item remove-ambiguity case renders `Residual LAO*` with explicit `State Limit` diagnostics.
-- Current focused v3 worker validation status: 35 tests passing.
+- Current focused v3 worker validation status: 35 tests passing (includes 3 new Thorns per-operation tests).
 - Current combined regression command: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js`
-- Current combined regression status: 83 tests passing.
+- Current combined regression status: 82 tests passing.
 
 ## Deferred Work
 

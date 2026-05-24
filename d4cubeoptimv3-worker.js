@@ -199,8 +199,21 @@ function getAffixCategoriesV3(affixId, env) {
     : [];
 }
 
-function affixHasCategoryV3(affixId, category, env) {
-  return getAffixCategoriesV3(affixId, env).includes(category);
+function getAffixCategoriesForOpV3(affixId, operationType, env) {
+  const affix = env && env.affixMap ? env.affixMap[affixId] : null;
+  if (
+    affix
+    && operationType
+    && affix.operationCategories
+    && Array.isArray(affix.operationCategories[operationType])
+  ) {
+    return affix.operationCategories[operationType].slice().sort();
+  }
+  return affix && Array.isArray(affix.categories) ? affix.categories.slice().sort() : [];
+}
+
+function affixHasCategoryV3(affixId, category, env, operationType) {
+  return getAffixCategoriesForOpV3(affixId, operationType || null, env).includes(category);
 }
 
 function isAffixLegalForStateV3(affixId, state, env) {
@@ -218,35 +231,43 @@ function isAffixLegalForStateV3(affixId, state, env) {
   return legalSlots.includes("Any") || legalSlots.includes(gearSlot);
 }
 
-function getCategoryAffixesForStateV3(state, category, env) {
+function getCategoryAffixesForStateV3(state, category, env, operationType) {
   const gearSlot = (state && state.gearSlot) || "Any";
+  let base;
+
   if (gearSlot === "Any") {
-    return env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
+    base = env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
+  } else {
+    const bySlot = env && env.categoryAffixesBySlot ? env.categoryAffixesBySlot[gearSlot] : null;
+    if (bySlot && Array.isArray(bySlot[category])) {
+      base = bySlot[category];
+    } else {
+      const affixes = env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
+      base = affixes.filter((affix) => isAffixLegalForStateV3(affix.id, state, env));
+    }
   }
 
-  const bySlot = env && env.categoryAffixesBySlot ? env.categoryAffixesBySlot[gearSlot] : null;
-  if (bySlot && Array.isArray(bySlot[category])) {
-    return bySlot[category];
+  if (!operationType) {
+    return base;
   }
-
-  const affixes = env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
-  return affixes.filter((affix) => isAffixLegalForStateV3(affix.id, state, env));
+  return base.filter((affix) => getAffixCategoriesForOpV3(affix.id, operationType, env).includes(category));
 }
 
-function getCategoryPoolSizeV3(state, category, env) {
-  const affixes = getCategoryAffixesForStateV3(state, category, env);
+function getCategoryPoolSizeV3(state, category, env, operationType) {
+  const affixes = getCategoryAffixesForStateV3(state, category, env, operationType);
   return Array.isArray(affixes) ? affixes.length : 0;
 }
 
 function countPresentAffixesInCategoryV3(state, category, env, options = {}) {
   const ignoreIndex = Number.isInteger(options.ignoreIndex) ? options.ignoreIndex : -1;
+  const operationType = options.operationType || null;
   let count = 0;
 
   getCurrentAffixes(state).forEach((entry, index) => {
     if (index === ignoreIndex) {
       return;
     }
-    if (affixHasCategoryV3(entry.affixId, category, env)) {
+    if (affixHasCategoryV3(entry.affixId, category, env, operationType)) {
       count += 1;
     }
   });
@@ -255,7 +276,8 @@ function countPresentAffixesInCategoryV3(state, category, env, options = {}) {
 }
 
 function getCategorySuccessDenominatorV3(state, category, env, options = {}) {
-  const poolSize = getCategoryPoolSizeV3(state, category, env);
+  const operationType = options.operationType || null;
+  const poolSize = getCategoryPoolSizeV3(state, category, env, operationType);
   const presentCount = countPresentAffixesInCategoryV3(state, category, env, options);
   return Math.max(0, poolSize - presentCount);
 }
@@ -263,25 +285,25 @@ function getCategorySuccessDenominatorV3(state, category, env, options = {}) {
 
 // Returns true when using `prism` for a focused/chaotic/remove cube action
 // would randomly put a protected GA at risk because that GA's affix is also
-// in the prism's category.  Cases B, C, F, G must skip prisms for which this
-// returns true, routing them to the residual solver instead.
+// in the prism's category for the "focused" operation type.
+// Cases B, C, F, G must skip prisms for which this returns true.
 function isCategoryFocusedBlockedByGAV3(state, prism, env) {
   if (!env || !env.strictMode || !env.gaRequiredCounts) { return false; }
   return getCurrentAffixes(state).some((entry) => {
     if (!entry.isGA || entry.isEnchanted) { return false; }
     if (!(env.gaRequiredCounts[entry.affixId] > 0)) { return false; }
-    return affixHasCategoryV3(entry.affixId, prism, env);
+    return affixHasCategoryV3(entry.affixId, prism, env, "focused");
   });
 }
 
-function isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env) {
+function isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, operationType) {
   const matches = [];
 
   getCurrentAffixes(state).forEach((entry, index) => {
     if (entry.isEnchanted) {
       return;
     }
-    if (!affixHasCategoryV3(entry.affixId, category, env)) {
+    if (!affixHasCategoryV3(entry.affixId, category, env, operationType || null)) {
       return;
     }
     matches.push(index);
@@ -382,8 +404,9 @@ function getClosedFormResidualReasonV3(state, targetEntry, slotIndex, env, optio
     return "Host slot is already enchanted, so closed-form cube-touch cases do not apply.";
   }
 
-  const targetCategories = getAffixCategoriesV3(targetEntry.affixId, env);
-  if (targetCategories.length === 0) {
+  const targetCategoriesAdd = getAffixCategoriesForOpV3(targetEntry.affixId, "add", env);
+  const targetCategoriesFocused = getAffixCategoriesForOpV3(targetEntry.affixId, "focused", env);
+  if (targetCategoriesAdd.length === 0 && targetCategoriesFocused.length === 0) {
     return "Target affix has no legal category source in the current catalog.";
   }
 
@@ -391,13 +414,15 @@ function getClosedFormResidualReasonV3(state, targetEntry, slotIndex, env, optio
     return "No closed-form empty-slot plan has positive remaining pool size.";
   }
 
-  const sharedCategories = targetCategories.filter((category) => affixHasCategoryV3(hostEntry.affixId, category, env));
+  const sharedCategories = targetCategoriesFocused.filter(
+    (category) => affixHasCategoryV3(hostEntry.affixId, category, env, "focused")
+  );
   if (sharedCategories.length > 0) {
     return "Host slot shares a category with the target, but the closed-form assumptions for Cases B, F, or G are not satisfied.";
   }
 
-  const removableCategories = getAffixCategoriesV3(hostEntry.affixId, env)
-    .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env));
+  const removableCategories = getAffixCategoriesForOpV3(hostEntry.affixId, "remove", env)
+    .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, "remove"));
   if (removableCategories.length === 0) {
     return "Remove would not be deterministic because the host is not the unique unlocked slot in any current category.";
   }
@@ -411,9 +436,16 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     ? options.maxAffixSlots
     : getMaxAffixSlotsV3(state, options.data || null);
   const hostEntry = getHostEntryV3(state, slotIndex);
-  const targetCategories = getAffixCategoriesV3(targetEntry.affixId, env);
+  // Use "add"-appropriate categories for Case A (empty slot), "focused" for all reroll cases.
+  const targetCategoriesAdd = getAffixCategoriesForOpV3(targetEntry.affixId, "add", env);
+  const targetCategoriesFocused = getAffixCategoriesForOpV3(targetEntry.affixId, "focused", env);
 
-  if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= maxAffixSlots || targetCategories.length === 0) {
+  if (
+    !Number.isInteger(slotIndex)
+    || slotIndex < 0
+    || slotIndex >= maxAffixSlots
+    || (targetCategoriesAdd.length === 0 && targetCategoriesFocused.length === 0)
+  ) {
     return candidates;
   }
 
@@ -440,8 +472,8 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
       return candidates;
     }
 
-    for (const prism of targetCategories) {
-      const n = getCategorySuccessDenominatorV3(state, prism, env);
+    for (const prism of targetCategoriesAdd) {
+      const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "add" });
       const expectedSteps = computeCaseAExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
         candidates.push(createClosedFormCandidateV3(
@@ -461,21 +493,24 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     return candidates;
   }
 
-  const sharedCategories = targetCategories.filter((category) => affixHasCategoryV3(hostEntry.affixId, category, env));
+  const sharedCategories = targetCategoriesFocused.filter(
+    (category) => affixHasCategoryV3(hostEntry.affixId, category, env, "focused")
+  );
 
   if (targetEntry.needsImprovement && hostEntry.affixId === targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
+      const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = options.touchOnlyImprovement
         ? 1
-        : computeCaseBExpectedStepsV3(getCategorySuccessDenominatorV3(state, prism, env));
+        : computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
         candidates.push(createClosedFormCandidateV3(
           CLOSED_FORM_CASE_IDS.F,
           slotIndex,
           targetEntry,
           expectedSteps,
-          { prism, denominator: getCategorySuccessDenominatorV3(state, prism, env) }
+          { prism, denominator: n }
         ));
       }
     }
@@ -484,7 +519,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   if (sharedCategories.length > 0 && hostEntry.affixId !== targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
-      const n = getCategorySuccessDenominatorV3(state, prism, env);
+      const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
         candidates.push(createClosedFormCandidateV3(
@@ -501,7 +536,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   if (sharedCategories.length > 0 && hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
-      const n = getCategorySuccessDenominatorV3(state, prism, env);
+      const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
         candidates.push(createClosedFormCandidateV3(
@@ -516,13 +551,13 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   }
 
   if (sharedCategories.length === 0) {
-    const removableCategories = getAffixCategoriesV3(hostEntry.affixId, env)
-      .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env));
+    const removableCategories = getAffixCategoriesForOpV3(hostEntry.affixId, "remove", env)
+      .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, "remove"));
 
     for (const removePrism of removableCategories) {
-      for (const prism of targetCategories) {
+      for (const prism of targetCategoriesFocused) {
         if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
-        const n = getCategorySuccessDenominatorV3(state, prism, env, { ignoreIndex: slotIndex });
+        const n = getCategorySuccessDenominatorV3(state, prism, env, { ignoreIndex: slotIndex, operationType: "focused" });
         const expectedSteps = computeCaseCExpectedStepsV3(n);
         if (Number.isFinite(expectedSteps)) {
           candidates.push(createClosedFormCandidateV3(
@@ -645,7 +680,11 @@ function getDecompositionOptionActionV3(option) {
 
 function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candidate, state, env) {
   const hostEntry = getHostEntryV3(state, slotIndex);
-  const targetCategories = getAffixCategoriesV3(targetEntry.affixId, env);
+  // For Case A use add-op categories; for focused-reroll cases use focused-op categories.
+  const caseUsesAdd = candidate.caseId === CLOSED_FORM_CASE_IDS.A;
+  const targetCategories = caseUsesAdd
+    ? getAffixCategoriesForOpV3(targetEntry.affixId, "add", env)
+    : getAffixCategoriesForOpV3(targetEntry.affixId, "focused", env);
   const requiresConcretePrism = (
     candidate.caseId === CLOSED_FORM_CASE_IDS.A
     || candidate.caseId === CLOSED_FORM_CASE_IDS.B
@@ -659,7 +698,8 @@ function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candid
     return null;
   }
 
-  const prismDelta = prism && hostEntry && affixHasCategoryV3(hostEntry.affixId, prism, env)
+  const prismOpType = caseUsesAdd ? "add" : "focused";
+  const prismDelta = prism && hostEntry && affixHasCategoryV3(hostEntry.affixId, prism, env, prismOpType)
     ? 0
     : prism
       ? 1
@@ -2529,6 +2569,7 @@ if (typeof module !== "undefined" && module.exports) {
     getMaxAffixSlotsV3,
     getAffixFamilyV3,
     getAffixCategoriesV3,
+    getAffixCategoriesForOpV3,
     affixHasCategoryV3,
     isAffixLegalForStateV3,
     getCategoryPoolSizeV3,
@@ -2568,5 +2609,10 @@ if (typeof module !== "undefined" && module.exports) {
     optimizePayloadV3,
     optimizeScenarioV3,
     runOptimizationV3,
+    // Re-export key base-worker helpers used by tests.
+    buildEnv: sharedWorker ? sharedWorker.buildEnv : null,
+    getActionOutcomes: sharedWorker ? sharedWorker.getActionOutcomes : null,
+    getValidActions: sharedWorker ? sharedWorker.getValidActions : null,
+    getEligibleByCategory: sharedWorker ? sharedWorker.getEligibleByCategory : null,
   };
 }

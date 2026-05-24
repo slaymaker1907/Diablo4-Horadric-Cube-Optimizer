@@ -574,6 +574,9 @@
 						<button id="legendary-toggle" class="toggle">Legendary: No</button>
 						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
 						<button id="enchantress-toggle" class="toggle active">Enchantress Available</button>
+						<p id="gear-slot-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
+							Note: affix availability may vary by class. This tool models shared affixes only; some class-specific affixes (e.g. skill ranks) may not appear.
+						</p>
 					</div>
 
 					<div class="affix-list" id="current-affixes"></div>
@@ -815,6 +818,7 @@
 				"Maximum Life",
 				"All Resistance",
 				...SPECIFIC_RESISTANCE_TYPED_AFFIXES,
+				"Thorns",
 			],
 			"Resourceful": [
 				"Lucky Hit Chance restore Resource",
@@ -852,9 +856,22 @@
 				"Shield",
 			];
 
+		// Per-operation category overrides for affixes that use different prisms
+		// per operation type.  Keys are affix names (matched by exact name string).
+		// Each entry may specify: add, focused, chaotic, remove.
+		// When an operation type is not listed here the affix's default categories apply.
+		const OPERATION_CATEGORY_OVERRIDES = {
+			"Thorns": {
+				add:     ["Aggressive"],
+				focused: ["Protector"],
+				chaotic: ["Protector"],
+				remove:  ["Pragmatic"],
+			},
+		};
+
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-24-v3-ga-always-on";
+		const WORKER_VERSION = "2026-05-24-v3-thorns-prism-fix";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -864,7 +881,7 @@
 			"specific resistances": "Specific Resistance (Physical)",
 		};
 
-		const AFFIXES = buildAffixCatalog(CATEGORY_TO_AFFIX_NAMES);
+		const AFFIXES = buildAffixCatalog(CATEGORY_TO_AFFIX_NAMES, OPERATION_CATEGORY_OVERRIDES);
 		const AFFIX_BY_ID = Object.create(null);
 		const AFFIX_BY_NAME = Object.create(null);
 
@@ -938,6 +955,7 @@
 			thinkingSeconds: document.getElementById("thinking-seconds"),
 
 			gearSlot: document.getElementById("gear-slot"),
+			gearSlotWarning: document.getElementById("gear-slot-warning"),
 			legendaryToggle: document.getElementById("legendary-toggle"),
 			enchantressToggle: document.getElementById("enchantress-toggle"),
 
@@ -1597,6 +1615,10 @@
 		function renderCurrentControls() {
 			els.gearSlot.value = appState.current.gearSlot;
 
+			if (els.gearSlotWarning) {
+				els.gearSlotWarning.style.display = appState.current.gearSlot !== "Any" ? "" : "none";
+			}
+
 			els.legendaryToggle.classList.toggle("active", appState.current.isLegendary);
 			els.legendaryToggle.textContent = appState.current.isLegendary ? "Legendary: Yes" : "Legendary: No";
 
@@ -1816,6 +1838,15 @@
 			els.addTargetAffix.disabled = appState.target.affixes.length >= 4;
 		}
 
+		function getAffixCategoriesForMode(affix, mode) {
+			if (!affix) { return []; }
+			const opType = mode === "added" ? "add" : mode === "changed" ? "focused" : mode === "removed" ? "remove" : null;
+			if (opType && affix.operationCategories && Array.isArray(affix.operationCategories[opType])) {
+				return affix.operationCategories[opType];
+			}
+			return Array.isArray(affix.categories) ? affix.categories : [];
+		}
+
 		function getManualSourceAffixes(mode, prism) {
 			return appState.current.affixes
 				.map((entry, index) => ({ index, entry }))
@@ -1824,7 +1855,7 @@
 					if ((mode === "removed" || mode === "changed") && entry.isEnchanted) { return false; }
 					if (prism && prism !== "None" && mode === "changed") {
 						const affix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-						if (!affix || !affix.categories.includes(prism)) { return false; }
+						if (!affix || !getAffixCategoriesForMode(affix, mode).includes(prism)) { return false; }
 					}
 					return true;
 				});
@@ -1839,7 +1870,7 @@
 			);
 			let candidates = AFFIXES.filter((a) => isAffixLegalForCurrentSlot(a) && !currentIds.has(a.id));
 			if (prism && prism !== "None" && (mode === "changed" || mode === "added")) {
-				candidates = candidates.filter((a) => a.categories.includes(prism));
+				candidates = candidates.filter((a) => getAffixCategoriesForMode(a, mode).includes(prism));
 			}
 			return candidates;
 		}
@@ -2354,7 +2385,7 @@
 				.replace(/^-+|-+$/g, "");
 		}
 
-		function buildAffixCatalog(categories) {
+		function buildAffixCatalog(categories, overrides) {
 			const map = Object.create(null);
 
 			Object.entries(categories).forEach(([categoryName, names]) => {
@@ -2390,6 +2421,17 @@
 					}
 				});
 			});
+
+			if (overrides && typeof overrides === "object") {
+				for (const [affixName, opCategories] of Object.entries(overrides)) {
+					const id = slugify(affixName);
+					if (map[id] && opCategories && typeof opCategories === "object") {
+						map[id].operationCategories = Object.fromEntries(
+							Object.entries(opCategories).map(([op, cats]) => [op, Array.isArray(cats) ? cats.slice() : []])
+						);
+					}
+				}
+			}
 
 			return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
 		}

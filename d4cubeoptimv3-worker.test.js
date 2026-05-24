@@ -1419,3 +1419,133 @@ test("isCategoryFocusedBlockedByGAV3 escalates to residual when protected GA sha
     );
   }
 });
+
+// Helper: build a catalog fixture with Thorns carrying the correct per-operation overrides
+// (Aggressive=add, Protector=focused+chaotic, Pragmatic=remove).
+function buildThornsOverrideFixture() {
+  const categoryToNames = {
+    Aggressive: ["Critical Strike Chance", "Attack Speed", "Thorns"],
+    Pragmatic: ["Movement Speed", "Lucky Hit Chance", "Thorns"],
+    Protector: ["Armor", "Maximum Life", "Damage Reduction", "Thorns"],
+    Resourceful: ["Maximum Resource"],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+
+  // Attach operation-category overrides to Thorns to model the asymmetric prism bug.
+  const thorns = byName["Thorns"];
+  thorns.operationCategories = {
+    add:     ["Aggressive"],
+    focused: ["Protector"],
+    chaotic: ["Protector"],
+    remove:  ["Pragmatic"],
+  };
+
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+  return { data, byName };
+}
+
+test("Thorns can only be added via Aggressive prism with operationCategories override", () => {
+  const { data, byName } = buildThornsOverrideFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  // An item with 3 affixes (room to add).
+  const state = buildState([
+    { affixId: byName["Armor"].id },
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Movement Speed"].id },
+  ]);
+
+  // Aggressive add should produce Thorns as a possible outcome.
+  const addAggressiveOutcomes = worker.getActionOutcomes(
+    state, { type: "add", prism: "Aggressive" }, env
+  );
+  assert.ok(
+    addAggressiveOutcomes.some((o) => o.state.affixes.some((a) => a.affixId === byName["Thorns"].id)),
+    "Aggressive add must be able to produce Thorns"
+  );
+
+  // Pragmatic add must NOT produce Thorns (Pragmatic is for remove, not add).
+  const addPragmaticOutcomes = worker.getActionOutcomes(
+    state, { type: "add", prism: "Pragmatic" }, env
+  );
+  assert.ok(
+    !addPragmaticOutcomes.some((o) => o.state.affixes.some((a) => a.affixId === byName["Thorns"].id)),
+    "Pragmatic add must not produce Thorns"
+  );
+
+  // Protector add must NOT produce Thorns (Protector is for focused/chaotic, not add).
+  const addProtectorOutcomes = worker.getActionOutcomes(
+    state, { type: "add", prism: "Protector" }, env
+  );
+  assert.ok(
+    !addProtectorOutcomes.some((o) => o.state.affixes.some((a) => a.affixId === byName["Thorns"].id)),
+    "Protector add must not produce Thorns"
+  );
+});
+
+test("Thorns can only be targeted for focused/chaotic reroll via Protector prism with operationCategories override", () => {
+  const { data, byName } = buildThornsOverrideFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  // Item with Thorns on it — focused/chaotic reroll eligibility check.
+  const state = buildState([
+    { affixId: byName["Armor"].id },
+    { affixId: byName["Thorns"].id },
+    { affixId: byName["Movement Speed"].id },
+  ]);
+
+  const getEligible = (prism, opType) =>
+    worker.getEligibleByCategory(state, env, prism, opType);
+
+  // Thorns is eligible for Protector focused reroll.
+  assert.ok(
+    getEligible("Protector", "focused").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must be eligible for Protector focused reroll"
+  );
+  // Thorns is eligible for Protector chaotic reroll.
+  assert.ok(
+    getEligible("Protector", "chaotic").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must be eligible for Protector chaotic reroll"
+  );
+  // Thorns is NOT eligible for Aggressive focused reroll.
+  assert.ok(
+    !getEligible("Aggressive", "focused").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must not be eligible for Aggressive focused reroll"
+  );
+  // Thorns is NOT eligible for Pragmatic focused reroll.
+  assert.ok(
+    !getEligible("Pragmatic", "focused").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must not be eligible for Pragmatic focused reroll"
+  );
+});
+
+test("Thorns can only be removed via Pragmatic prism with operationCategories override", () => {
+  const { data, byName } = buildThornsOverrideFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const state = buildState([
+    { affixId: byName["Armor"].id },
+    { affixId: byName["Thorns"].id },
+    { affixId: byName["Movement Speed"].id },
+  ], { isLegendary: false });
+
+  const getEligible = (prism, opType) =>
+    worker.getEligibleByCategory(state, env, prism, opType);
+
+  // Thorns is eligible for Pragmatic remove.
+  assert.ok(
+    getEligible("Pragmatic", "remove").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must be eligible for Pragmatic remove"
+  );
+  // Thorns is NOT eligible for Aggressive remove.
+  assert.ok(
+    !getEligible("Aggressive", "remove").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must not be eligible for Aggressive remove"
+  );
+  // Thorns is NOT eligible for Protector remove.
+  assert.ok(
+    !getEligible("Protector", "remove").some((e) => e.entry.affixId === byName["Thorns"].id),
+    "Thorns must not be eligible for Protector remove"
+  );
+});

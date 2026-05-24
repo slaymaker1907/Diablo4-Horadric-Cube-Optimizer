@@ -706,18 +706,25 @@ function affixSupportsGearSlot(affix, gearSlot) {
   return legalSlots.includes(DEFAULT_GEAR_SLOT) || legalSlots.includes(gearSlot);
 }
 
-function getCategoryAffixesForState(state, env, categoryName) {
+function getCategoryAffixesForState(state, env, categoryName, operationType) {
   const gearSlot = getStateGearSlot(state);
+
+  let base;
   if (gearSlot === DEFAULT_GEAR_SLOT) {
-    return env.categoryAffixes[categoryName] || [];
+    base = env.categoryAffixes[categoryName] || [];
+  } else {
+    const bySlot = env.categoryAffixesBySlot && env.categoryAffixesBySlot[gearSlot];
+    if (bySlot && Array.isArray(bySlot[categoryName])) {
+      base = bySlot[categoryName];
+    } else {
+      base = (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
+    }
   }
 
-  const bySlot = env.categoryAffixesBySlot && env.categoryAffixesBySlot[gearSlot];
-  if (bySlot && Array.isArray(bySlot[categoryName])) {
-    return bySlot[categoryName];
+  if (!operationType) {
+    return base;
   }
-
-  return (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
+  return base.filter((affix) => getAffixCategoriesForOp(affix, operationType).includes(categoryName));
 }
 
 /**
@@ -955,18 +962,26 @@ function getValidActions(state, target, env) {
       actions.push({ type: "add", prism: categoryName });
     }
 
-    const eligible = getEligibleByCategory(state, env, categoryName);
-    const touchesProtectedGA = env.strictMode && eligible.some(({ entry }) => isProtectedGA(entry, env));
-
-    if (!state.isLegendary && eligible.length > 0) {
-      if (!touchesProtectedGA) {
+    const eligibleRemove = getEligibleByCategory(state, env, categoryName, "remove");
+    if (!state.isLegendary && eligibleRemove.length > 0) {
+      const touchesGA = env.strictMode && eligibleRemove.some(({ entry }) => isProtectedGA(entry, env));
+      if (!touchesGA) {
         actions.push({ type: "remove", prism: categoryName });
       }
     }
 
-    if (eligible.length > 0) {
-      if (!touchesProtectedGA) {
+    const eligibleChaotic = getEligibleByCategory(state, env, categoryName, "chaotic");
+    if (eligibleChaotic.length > 0) {
+      const touchesGA = env.strictMode && eligibleChaotic.some(({ entry }) => isProtectedGA(entry, env));
+      if (!touchesGA) {
         actions.push({ type: "chaotic", prism: categoryName });
+      }
+    }
+
+    const eligibleFocused = getEligibleByCategory(state, env, categoryName, "focused");
+    if (eligibleFocused.length > 0) {
+      const touchesGA = env.strictMode && eligibleFocused.some(({ entry }) => isProtectedGA(entry, env));
+      if (!touchesGA) {
         actions.push({ type: "focused", prism: categoryName });
       }
     }
@@ -1193,6 +1208,27 @@ function resolveRuleAction(state, target, env, validActions) {
 }
 
 /**
+ * Return the operation-appropriate category list for an affix.
+ * When the affix has `operationCategories[operationType]`, that list is returned.
+ * Otherwise falls back to `affix.categories` so fixtures without overrides are unaffected.
+ *
+ * @param {Object|null} affix - Catalogue entry.
+ * @param {string|null} operationType - "add" | "focused" | "chaotic" | "remove" | null.
+ * @returns {string[]}
+ */
+function getAffixCategoriesForOp(affix, operationType) {
+  if (
+    affix
+    && operationType
+    && affix.operationCategories
+    && Array.isArray(affix.operationCategories[operationType])
+  ) {
+    return affix.operationCategories[operationType];
+  }
+  return affix && Array.isArray(affix.categories) ? affix.categories : [];
+}
+
+/**
  * Return affix entries from `state` that are eligible for
  * enchant/remove and belong to `categoryName`.
  * Enchanted slots are excluded (they cannot be re-enchanted).
@@ -1200,10 +1236,11 @@ function resolveRuleAction(state, target, env, validActions) {
  * @param {Object} state
  * @param {Object} env
  * @param {string} categoryName
+ * @param {string|null} [operationType] - "add" | "focused" | "chaotic" | "remove" | null.
  * @returns {Array<{ entry: Object, index: number }>}
  */
-function getEligibleByCategory(state, env, categoryName) {
-  const cacheKey = `${stateKey(state)}|${categoryName}`;
+function getEligibleByCategory(state, env, categoryName, operationType) {
+  const cacheKey = `${stateKey(state)}|${categoryName}|${operationType || ""}`;
   if (env.eligibleByCategoryCache && env.eligibleByCategoryCache.has(cacheKey)) {
     return env.eligibleByCategoryCache.get(cacheKey);
   }
@@ -1215,7 +1252,7 @@ function getEligibleByCategory(state, env, categoryName) {
         return false;
       }
       const affix = env.affixMap[entry.affixId];
-      return affix && affix.categories.includes(categoryName);
+      return affix && getAffixCategoriesForOp(affix, operationType).includes(categoryName);
     });
 
   if (env.eligibleByCategoryCache) {
@@ -1247,18 +1284,20 @@ function getAffixRollWeight(affix) {
  * @param {string} categoryName
  * @returns {number}
  */
-function getCategoryWeightTotal(state, env, categoryName) {
-  const gearSlot = getStateGearSlot(state);
-  if (gearSlot === DEFAULT_GEAR_SLOT) {
-    return env.categoryWeightTotals[categoryName] || 0;
+function getCategoryWeightTotal(state, env, categoryName, operationType) {
+  if (!operationType) {
+    const gearSlot = getStateGearSlot(state);
+    if (gearSlot === DEFAULT_GEAR_SLOT) {
+      return env.categoryWeightTotals[categoryName] || 0;
+    }
+
+    const bySlot = env.categoryWeightTotalsBySlot && env.categoryWeightTotalsBySlot[gearSlot];
+    if (bySlot && Number.isFinite(bySlot[categoryName])) {
+      return bySlot[categoryName];
+    }
   }
 
-  const bySlot = env.categoryWeightTotalsBySlot && env.categoryWeightTotalsBySlot[gearSlot];
-  if (bySlot && Number.isFinite(bySlot[categoryName])) {
-    return bySlot[categoryName];
-  }
-
-  return getCategoryAffixesForState(state, env, categoryName)
+  return getCategoryAffixesForState(state, env, categoryName, operationType)
     .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
 }
 
@@ -1281,12 +1320,12 @@ function getActionOutcomes(state, action, env) {
   const outcomes = [];
 
   if (action.type === "add") {
-    const list = getCategoryAffixesForState(state, env, action.prism);
+    const list = getCategoryAffixesForState(state, env, action.prism, "add");
     if (list.length === 0 || state.affixes.length >= 4) {
       return [];
     }
 
-    const totalWeight = getCategoryWeightTotal(state, env, action.prism);
+    const totalWeight = getCategoryWeightTotal(state, env, action.prism, "add");
     if (totalWeight <= 0) {
       return [];
     }
@@ -1315,7 +1354,7 @@ function getActionOutcomes(state, action, env) {
     if (state.isLegendary) {
       return [];
     }
-    const eligible = getEligibleByCategory(state, env, action.prism);
+    const eligible = getEligibleByCategory(state, env, action.prism, "remove");
     if (eligible.length === 0) {
       return [];
     }
@@ -1334,18 +1373,18 @@ function getActionOutcomes(state, action, env) {
   }
 
   if (action.type === "focused") {
-    const eligible = getEligibleByCategory(state, env, action.prism);
+    const eligible = getEligibleByCategory(state, env, action.prism, "focused");
     if (eligible.length === 0) {
       return [];
     }
 
-    const list = getCategoryAffixesForState(state, env, action.prism);
+    const list = getCategoryAffixesForState(state, env, action.prism, "focused");
     if (list.length === 0) {
       return [];
     }
 
     const sourceP = 1 / eligible.length;
-    const totalWeight = getCategoryWeightTotal(state, env, action.prism);
+    const totalWeight = getCategoryWeightTotal(state, env, action.prism, "focused");
     if (totalWeight <= 0) {
       return [];
     }
@@ -1373,7 +1412,7 @@ function getActionOutcomes(state, action, env) {
   }
 
   if (action.type === "chaotic") {
-    const eligible = getEligibleByCategory(state, env, action.prism);
+    const eligible = getEligibleByCategory(state, env, action.prism, "chaotic");
     if (eligible.length === 0) {
       return [];
     }
@@ -1386,12 +1425,12 @@ function getActionOutcomes(state, action, env) {
 
     for (const { index } of eligible) {
       for (const categoryName of env.categoryNames) {
-        const list = getCategoryAffixesForState(state, env, categoryName);
+        const list = getCategoryAffixesForState(state, env, categoryName, "chaotic");
         if (list.length === 0) {
           continue;
         }
 
-        const totalWeight = getCategoryWeightTotal(state, env, categoryName);
+        const totalWeight = getCategoryWeightTotal(state, env, categoryName, "chaotic");
         if (totalWeight <= 0) {
           continue;
         }
@@ -2369,7 +2408,7 @@ function getActionProbabilityBreakdown(state, action, env) {
       };
     }
 
-    const eligible = getEligibleByCategory(state, env, action.prism);
+    const eligible = getEligibleByCategory(state, env, action.prism, "focused");
     const sources = [];
     if (eligible.length > 0) {
       const sourceMap = Object.create(null);
@@ -2397,7 +2436,7 @@ function getActionProbabilityBreakdown(state, action, env) {
   }
 
   if (action.type === "chaotic") {
-    const eligible = getEligibleByCategory(state, env, action.prism);
+    const eligible = getEligibleByCategory(state, env, action.prism, "chaotic");
     const sources = [];
 
     if (eligible.length > 0) {
@@ -3411,6 +3450,7 @@ if (typeof module !== "undefined" && module.exports) {
     getBestAddActionForAffix,
     resolveRuleAction,
     affixSupportsGearSlot,
+    getAffixCategoriesForOp,
     getCategoryAffixesForState,
     getEligibleByCategory,
     getActionOutcomes,

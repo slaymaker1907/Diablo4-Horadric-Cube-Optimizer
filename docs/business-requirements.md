@@ -25,6 +25,7 @@ For game mechanics (prism categories, cube operations, GA rules, Enchantress beh
 - Concrete gear slots must prune impossible affixes; `Any` preserves the full pool. The legality source of truth is [gear-slot-legality.js](../gear-slot-legality.js).
 - Solver limits must be surfaced honestly. If decomposition or residual solving cannot finish within budget, the product reports that limit explicitly with an approximate best-so-far result where possible.
 - The product must expose structured diagnostics for feasibility, decomposition, ILP, and residual solving so the UI can explain why a recommendation exists or why the solver stopped.
+- Some affixes require **different prisms per operation type** (Add, Focused Reroll, Chaotic Reroll, Remove). The optimizer models per-operation category overrides (`operationCategories` on affix objects) so each operation uses the mechanically correct prism pool. The canonical example is Thorns, which uses Aggressive for Add, Protector for Focused/Chaotic Reroll, and Pragmatic for Remove. See [game-mechanics.md](game-mechanics.md#known-mechanical-edge-cases).
 
 ## Required User-Facing Outputs
 
@@ -40,6 +41,10 @@ For game mechanics (prism categories, cube operations, GA rules, Enchantress beh
 - GA preservation is always-on (`strictMode: true` is always sent from the UI). There is no toggle.
 - Thinking Time widens the residual search budget but is not a wall-clock cutoff for exact routes. `timeMs = 0` uses the largest configured budget.
 - The browser worker contract must remain stable enough that [d4cubeoptimv3.html](../d4cubeoptimv3.html) can render results without special-case interpretation.
+
+## Required User-Facing Warnings
+
+- When a concrete gear slot (anything other than `Any`) is selected, the UI must display a note that affix availability may vary by class. The optimizer models the shared affix pool only; class-specific affixes (such as certain skill ranks) may not appear.
 
 ## Explicit Non-Goals
 

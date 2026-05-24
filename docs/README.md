@@ -4,12 +4,13 @@ This folder is the curated entry point for humans and AIs working on the v3 opti
 
 ## Reading Order
 
-1. [Business Requirements](business-requirements.md)
-2. [Implementation Guide](implementation-guide.md)
-3. [AGENTS.md](../AGENTS.md)
-4. [CHANGES.md](../CHANGES.md)
-5. [Requirement Matrix](../v2-improvement-notes/requirement-matrix.md)
-6. [Open Issues](../v2-improvement-notes/open-issues.md)
+1. [Game Mechanics](game-mechanics.md)
+2. [Business Requirements](business-requirements.md)
+3. [Implementation Guide](implementation-guide.md)
+4. [AGENTS.md](../AGENTS.md)
+5. [CHANGES.md](../CHANGES.md)
+6. [Requirement Matrix](../v2-improvement-notes/requirement-matrix.md)
+7. [Open Issues](../v2-improvement-notes/open-issues.md)
 
 ## What This Product Is
 
@@ -34,7 +35,7 @@ This folder is the curated entry point for humans and AIs working on the v3 opti
 - Exact small ILP engine: [ilp.js](../ilp.js)
 - Slot legality table: [gear-slot-legality.js](../gear-slot-legality.js)
 - Human-readable slot legality source: [gear_to_affix.md](../gear_to_affix.md)
-- Product/domain guide for the broader Horadric Cube system: [Horadric_Cube_D4_Guide.md](../Horadric_Cube_D4_Guide.md)
+- Game mechanics reference (prisms, operations, GA rules): [docs/game-mechanics.md](game-mechanics.md)
 
 ## Validation Shortcuts
 

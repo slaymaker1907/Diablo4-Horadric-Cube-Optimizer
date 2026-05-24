@@ -28,17 +28,19 @@
 - Added a focused regression in [d4cubeoptimv3-worker.test.js](../d4cubeoptimv3-worker.test.js) covering the reproduced four-affix case where decomposition options exist per target but the global ILP assignment is infeasible.
 - Fixed the residual-budget policy in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js) so `timeMs` scales the residual state and iteration caps; the reproduced browser case now stops at `STATE_LIMIT` only under the old base budget and returns an optimal residual recommendation under the default 10-second UI budget.
 - Tuned the residual iteration budget in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js) from concrete-slot benchmarks: the current cap is now `1048576` iterations with a steeper `32768` iterations/second ramp, while the `4096`-state cap stays unchanged because the reproduced Amulet benchmark remained iteration-bound at only `348` abstract states.
+- Relaxed [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js) decomposition option filtering so multi-category targets stay in decomposition when closed-form candidates already pin explicit prisms/actions, including deterministic enchant coverage with no prism token.
 - Updated [d4cubeoptimv3.html](../d4cubeoptimv3.html) so the Thinking Time control and solver-limit diagnostics describe the new residual-budget behavior accurately, and bumped `WORKER_VERSION` so the browser reloads the worker.
 - Added [gear-slot-legality.js](../gear-slot-legality.js) from [gear_to_affix.md](../gear_to_affix.md), applied slot legality narrowing in [d4cubeoptim-worker.js](../d4cubeoptim-worker.js) and [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js), and updated [d4cubeoptim.html](../d4cubeoptim.html), [d4cubeoptimv2.html](../d4cubeoptimv2.html), and [d4cubeoptimv3.html](../d4cubeoptimv3.html) so a concrete gear slot prunes impossible affixes while `Any` preserves the unrestricted pool.
 - Added [requirement-matrix.md](requirement-matrix.md) to map the requested v3 features to implementation files and validation evidence.
 - Reviewed the public strategy and diagnostics labels exposed through [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js) and [d4cubeoptimv3.html](../d4cubeoptimv3.html), and froze the current naming instead of landing a late Phase 8 rename.
 - Added [CHANGES.md](../CHANGES.md).
 - Created the repo-local handoff note set in `v2-improvement-notes`.
+- Added focused regressions in [d4cubeoptimv3-worker.test.js](../d4cubeoptimv3-worker.test.js) for multi-category decomposition routing (explicit-prism add and deterministic-enchant paths).
 
 ### Validation
 
 - `node --test ilp.test.js` passed with 6 tests.
-- `node --test d4cubeoptimv3-worker.test.js` passed with 30 tests.
+- `node --test d4cubeoptimv3-worker.test.js` passed with 32 tests.
 - `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js` passed with 73 tests.
 - Browser smoke test over `python3 -m http.server 8123` passed for:
 	- infeasible typed-family conflict -> `Feasibility Stop` with `F6`.

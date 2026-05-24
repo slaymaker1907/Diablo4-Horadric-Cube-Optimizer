@@ -820,6 +820,79 @@ test("closed-form pool sizes respect slot legality narrowing", { timeout: TEST_T
   approxEqual(plan.expectedSteps, 1);
 });
 
+test("solveDecompositionPlanV3 keeps multi-category add targets in decomposition when the prism is explicit", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { affixes, byName, categories } = buildCatalogFixture({
+    Aggressive: ["Thorns"],
+    Pragmatic: ["Movement Speed", "Maximum Evade Charges", "Thorns"],
+  });
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: [],
+    maxAffixSlots: 1,
+  };
+  const state = buildState([]);
+  const target = buildTarget([
+    { affixId: byName["Thorns"].id, requireGA: false },
+  ]);
+
+  const planInput = worker.buildDecompositionPlanInputV3(state, target, data, {});
+  const solved = worker.solveDecompositionPlanV3(planInput);
+
+  assert.equal(planInput.ok, true);
+  assert.equal(solved.ok, true);
+  assert.equal(solved.selectedOptions.length, 1);
+  assert.equal(solved.selectedOptions[0].caseId, worker.CLOSED_FORM_CASE_IDS.A);
+  assert.equal(solved.selectedOptions[0].prism, "Aggressive");
+  assert.equal(solved.action.type, "add");
+  assert.equal(solved.action.prism, "Aggressive");
+  approxEqual(solved.expectedSteps, 1);
+});
+
+test("optimizeScenarioV3 keeps multi-category deterministic enchant targets in decomposition", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { affixes, byName, categories } = buildCatalogFixture({
+    Aggressive: ["Thorns"],
+    Pragmatic: ["Movement Speed", "Thorns"],
+    Protector: ["Armor"],
+  });
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: [],
+    maxAffixSlots: 1,
+  };
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Thorns"].id, requireGA: false },
+  ]);
+
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+
+  const result = worker.optimizeScenarioV3({
+    state,
+    target,
+    data,
+    gaConfig: {
+      currentGAAffixes: [],
+      unsatisfactoryAffixIds: [],
+      strictMode: false,
+      sacrificeAffixId: "",
+    },
+  });
+
+  assertStableDiagnosticsContract(result, {
+    strategy: worker.DECOMPOSITION_STRATEGY,
+    decompositionStatus: "APPLICABLE",
+    ilpStatus: "OPTIMAL",
+    residualStatus: "NOT_RUN",
+  });
+  assert.equal(result.successProb, 1);
+  assert.equal(result.action.type, "enchant");
+  approxEqual(result.expectedSteps, 1);
+});
+
 test("solveDecompositionPlanV3 matches exhaustive enumeration on a same-category ordering case", { timeout: TEST_TIMEOUT_MS }, () => {
   const { data, byName } = buildOrderingFixture();
   const state = buildState([

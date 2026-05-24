@@ -697,17 +697,20 @@ function getDecompositionOptionActionV3(option) {
 function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candidate, state, env) {
   const hostEntry = getHostEntryV3(state, slotIndex);
   const targetCategories = getAffixCategoriesV3(targetEntry.affixId, env);
+  const requiresConcretePrism = (
+    candidate.caseId === CLOSED_FORM_CASE_IDS.A
+    || candidate.caseId === CLOSED_FORM_CASE_IDS.B
+    || candidate.caseId === CLOSED_FORM_CASE_IDS.C
+    || candidate.caseId === CLOSED_FORM_CASE_IDS.F
+    || candidate.caseId === CLOSED_FORM_CASE_IDS.G
+  );
 
   if (targetEntry.requireGA && candidate.caseId !== CLOSED_FORM_CASE_IDS.D) {
     return null;
   }
 
-  if (targetCategories.length !== 1 && candidate.caseId !== CLOSED_FORM_CASE_IDS.D && candidate.caseId !== CLOSED_FORM_CASE_IDS.E) {
-    return null;
-  }
-
   const prism = candidate.prism || (targetCategories.length === 1 ? targetCategories[0] : "");
-  if ((candidate.caseId === CLOSED_FORM_CASE_IDS.D || candidate.caseId === CLOSED_FORM_CASE_IDS.E) && !prism) {
+  if (requiresConcretePrism && !prism) {
     return null;
   }
 

@@ -40,6 +40,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Fixed a decomposition routing false negative where a globally infeasible ILP host assignment was surfaced as terminal `INFEASIBLE` instead of escalating into the residual solver.
 - Fixed the residual-budget policy so `payload.timeMs` now widens the residual abstract-state and iteration caps instead of leaving every browser run pinned to the 500-state / 4096-iteration defaults.
 - Added shared gear-slot legality tables from [gear_to_affix.md](gear_to_affix.md), applied them to the shared worker and v3 closed-form pool sizes, and wired all browser entry points so a concrete slot prunes impossible affixes while `Any` preserves the full pool.
+- Relaxed the v3 decomposition wrapper so multi-category targets are still routed through ILP when a closed-form candidate already pins an exact prism/action, and deterministic enchant options remain decomposition-safe even without a prism token.
 
 ## Planned Algorithmic Differences
 
@@ -59,7 +60,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 	- infeasible typed-family conflict renders `Feasibility Stop` with `F6` in the UI.
 	- decomposition case renders `Decomposition + ILP` with selected-option details.
 	- residual full-item remove-ambiguity case renders `Residual LAO*` with explicit `State Limit` diagnostics.
-- Current focused v3 worker validation status: 29 tests passing.
+- Current focused v3 worker validation status: 32 tests passing.
 - Current combined regression command: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js`
 - Current combined regression status: 73 tests passing.
 

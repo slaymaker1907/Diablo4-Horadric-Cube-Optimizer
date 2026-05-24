@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const worker = require("./d4cubeoptimv3-worker.js");
+const ilp = require("./ilp.js");
 
 const TEST_TIMEOUT_MS = 1000;
 
@@ -473,6 +474,110 @@ test("optimizeScenarioV3 solves decomposition-eligible cases through the ILP lay
   assert.equal(result.successProb, 1);
   assert.equal(result.action.type, "enchant");
   approxEqual(result.expectedSteps, 1);
+});
+
+test("optimizeScenarioV3 returns an approximate decomposition action when ILP hits a limit with an incumbent", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: true, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: true },
+    { affixId: byName["Maximum Life"].id, requireGA: false },
+  ]);
+
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+
+  const originalSolveILP = ilp.solveILP;
+  ilp.solveILP = (problem) => {
+    const exact = originalSolveILP(problem);
+    return {
+      ...exact,
+      status: "ITERATION_LIMIT",
+      note: "Test override: return incumbent at limit.",
+    };
+  };
+
+  let result;
+  try {
+    result = worker.optimizeScenarioV3({
+      state,
+      target,
+      data,
+      gaConfig: {
+        currentGAAffixes: [byName["Armor"].id],
+        unsatisfactoryAffixIds: [],
+        strictMode: false,
+        sacrificeAffixId: "",
+      },
+    });
+  } finally {
+    ilp.solveILP = originalSolveILP;
+  }
+
+  assertStableDiagnosticsContract(result, {
+    strategy: worker.DECOMPOSITION_STRATEGY,
+    decompositionStatus: "APPROXIMATE_LIMIT",
+    ilpStatus: "ITERATION_LIMIT",
+    residualStatus: "NOT_RUN",
+  });
+  assert.equal(result.approximate, true);
+  assert.equal(result.successProb, 1);
+  assert.equal(result.action.type, "enchant");
+  assert.match(result.diagnostics.reason, /not proven optimal/i);
+});
+
+test("optimizeScenarioV3 compares wide-gap ILP approximations against residual and can prefer residual", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: true, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: true },
+    { affixId: byName["Maximum Life"].id, requireGA: false },
+  ]);
+
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+
+  const originalSolveILP = ilp.solveILP;
+  ilp.solveILP = (problem) => {
+    const exact = originalSolveILP(problem);
+    return {
+      ...exact,
+      status: "ITERATION_LIMIT",
+      bestBound: Number.isFinite(exact.objective) ? exact.objective - 5 : -5,
+      note: "Test override: force a wide incumbent-bound gap.",
+    };
+  };
+
+  let result;
+  try {
+    result = worker.optimizeScenarioV3({
+      state,
+      target,
+      data,
+      gaConfig: {
+        currentGAAffixes: [byName["Armor"].id],
+        unsatisfactoryAffixIds: [],
+        strictMode: false,
+        sacrificeAffixId: "",
+      },
+    });
+  } finally {
+    ilp.solveILP = originalSolveILP;
+  }
+
+  assertStableDiagnosticsContract(result, {
+    strategy: worker.RESIDUAL_STRATEGY,
+    decompositionStatus: "ESCALATED",
+  });
+  assert.equal(result.diagnostics.feasibility.ok, true);
+  assert.match(result.diagnostics.decomposition.reason, /wide-gap approximate ilp incumbent/i);
+  assert.ok(result.action);
+  assert.equal(typeof result.successProb, "number");
+  assert.ok(result.successProb > 0);
 });
 
 test("F1 fails when the source has too few GA slots", { timeout: TEST_TIMEOUT_MS }, () => {
@@ -1010,7 +1115,7 @@ test("optimizePayloadV3 returns a stable diagnostics contract for infeasible inp
   assert.equal(result.diagnostics.feasibility.check, "F1");
 });
 
-test("optimizePayloadV3 returns a stable diagnostics contract for residual iteration-limit failures", { timeout: TEST_TIMEOUT_MS }, () => {
+test("optimizePayloadV3 returns an approximate residual action when iteration limits are reached", { timeout: TEST_TIMEOUT_MS }, () => {
   const { data, byName } = buildFixture();
   const state = buildState([
     { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
@@ -1037,10 +1142,13 @@ test("optimizePayloadV3 returns a stable diagnostics contract for residual itera
     strategy: worker.RESIDUAL_STRATEGY,
     decompositionStatus: "ESCALATED",
     ilpStatus: "NOT_RUN",
-    residualStatus: "ITERATION_LIMIT",
+    residualStatus: "APPROXIMATE_LIMIT",
   });
-  assert.equal(result.action, null);
-  assert.match(result.diagnostics.reason, /without convergence/i);
+  assert.equal(result.approximate, true);
+  assert.ok(result.action);
+  assert.equal(typeof result.successProb, "number");
+  assert.ok(result.successProb > 0);
+  assert.match(result.diagnostics.reason, /best-so-far policy estimate/i);
 });
 
 test("optimizeScenarioV3 escalates decomposition-ILP infeasible cases to the residual solver", { timeout: TEST_TIMEOUT_MS }, () => {

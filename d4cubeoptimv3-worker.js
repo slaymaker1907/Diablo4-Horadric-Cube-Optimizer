@@ -89,6 +89,9 @@ const RESIDUAL_EPSILON = 1e-9;
 const RESIDUAL_ACTION_EPSILON = 1e-8;
 const RESIDUAL_STATE_LIMIT_PER_SECOND = 50;
 const RESIDUAL_MAX_ITERATIONS_PER_SECOND = 32768;
+const APPROX_COMPARE_SUCCESS_EPSILON = 1e-9;
+const APPROX_COMPARE_STEPS_EPSILON = 1e-9;
+const ILP_APPROX_BOUND_GAP_THRESHOLD = 0.25;
 
 function normalizeIdList(list) {
   return Array.from(new Set(
@@ -1174,6 +1177,36 @@ function buildDecompositionScheduleV3(selectedOptions) {
   return steps;
 }
 
+function buildDecompositionSelectionFromILPResultV3(planInput, ilpResult) {
+  const selectedOptions = planInput.options
+    .filter((option) => Number(ilpResult.assignment && ilpResult.assignment[option.pickVarName]) > 0.5)
+    .map((option) => ({ ...option }));
+
+  for (const option of selectedOptions) {
+    if (!option.requiresStage) {
+      option.stage = null;
+      continue;
+    }
+
+    option.stage = option.validStages.find((stage) => Number(ilpResult.assignment[option.stageVarNames[stage]]) > 0.5);
+    if (!Number.isInteger(option.stage)) {
+      option.stage = 0;
+    }
+  }
+
+  const expectedSteps = selectedOptions.reduce((sum, option) => (
+    sum + computeDecompositionOptionExpectedStepsV3(option, Number.isInteger(option.stage) ? option.stage : 0)
+  ), 0);
+  const schedule = buildDecompositionScheduleV3(selectedOptions);
+
+  return {
+    expectedSteps,
+    action: schedule.length > 0 ? schedule[0].action : null,
+    schedule,
+    selectedOptions,
+  };
+}
+
 function solveDecompositionPlanV3(planInput) {
   if (!planInput || !planInput.ok) {
     return {
@@ -1195,7 +1228,13 @@ function solveDecompositionPlanV3(planInput) {
 
   const ilpModel = buildDecompositionILPProblemV3(planInput);
   const ilpResult = ilpWorker.solveILP(ilpModel.problem);
-  if (!ilpResult || ilpResult.status !== "OPTIMAL") {
+  const hasFeasibleIncumbent = !!(
+    ilpResult
+    && ilpResult.assignment
+    && typeof ilpResult.assignment === "object"
+    && ilpResult.status === "ITERATION_LIMIT"
+  );
+  if (!ilpResult || (ilpResult.status !== "OPTIMAL" && !hasFeasibleIncumbent)) {
     return {
       ok: false,
       reason: ilpResult
@@ -1229,10 +1268,14 @@ function solveDecompositionPlanV3(planInput) {
 
   return {
     ok: true,
-    expectedSteps,
+    approximate: ilpResult.status !== "OPTIMAL",
+    reason: ilpResult.status !== "OPTIMAL"
+      ? "Decomposition returned the best feasible ILP incumbent found before the solver limit."
+      : "",
+    expectedSteps: expectedSteps,
     action: schedule.length > 0 ? schedule[0].action : null,
-    schedule,
-    selectedOptions,
+    schedule: schedule,
+    selectedOptions: selectedOptions,
     planInput,
     ilpModel: ilpModel.problem,
     ilpResult,
@@ -1257,6 +1300,7 @@ function buildDecompositionDiagnosticsV3(details = {}) {
 function buildILPDiagnosticsV3(details = {}) {
   return {
     status: typeof details.status === "string" ? details.status : "NOT_RUN",
+    approximate: details.approximate === true,
     objective: Number.isFinite(details.objective) ? details.objective : null,
     bestBound: Number.isFinite(details.bestBound) ? details.bestBound : null,
     nodesVisited: Number.isFinite(details.nodesVisited) ? details.nodesVisited : 0,
@@ -1267,6 +1311,7 @@ function buildILPDiagnosticsV3(details = {}) {
 function buildResidualDiagnosticsV3(details = {}) {
   return {
     status: typeof details.status === "string" ? details.status : "NOT_RUN",
+    approximate: details.approximate === true,
     abstractStates: Number.isFinite(details.abstractStates) ? details.abstractStates : 0,
     deadStates: Number.isFinite(details.deadStates) ? details.deadStates : 0,
     stateLimit: Number.isFinite(details.stateLimit) ? details.stateLimit : RESIDUAL_STATE_LIMIT,
@@ -1314,20 +1359,24 @@ function buildDecompositionResultV3(solution, feasibility) {
     slotIndex: step.slotIndex,
     stage: step.stage,
   }));
-  const reason = solution.action
-    ? "Decomposition solved the instance exactly with the scoped ILP layer."
-    : "Current state already satisfies the target under the decomposition model.";
+  const reason = solution.approximate
+    ? "Decomposition returned the best feasible ILP incumbent found before the solver limit; this action is not proven optimal."
+    : (solution.action
+      ? "Decomposition solved the instance exactly with the scoped ILP layer."
+      : "Current state already satisfies the target under the decomposition model.");
 
   const ilpDiagnostics = {
     status: solution.ilpResult.status,
+    approximate: solution.approximate === true,
     objective: solution.ilpResult.objective,
     bestBound: solution.ilpResult.bestBound,
     nodesVisited: solution.ilpResult.nodesVisited,
     iterations: solution.ilpResult.iterations,
   };
   const decompositionDiagnostics = {
-    status: "APPLICABLE",
+    status: solution.approximate ? "APPROXIMATE_LIMIT" : "APPLICABLE",
     applicable: true,
+    reason: solution.approximate ? reason : "",
     optionCount: solution.planInput.options.length,
     targetCount: solution.planInput.targets.length,
     selectedOptions: solution.selectedOptions.map((option) => ({
@@ -1344,6 +1393,7 @@ function buildDecompositionResultV3(solution, feasibility) {
 
   return {
     iterations: solution.ilpResult.iterations,
+    approximate: solution.approximate === true,
     action: solution.action,
     expectedSteps: solution.expectedSteps,
     variance: null,
@@ -2089,6 +2139,68 @@ function buildResidualResultV3(graph, target, env, residualSolution, feasibility
   };
 }
 
+function buildResidualApproximateResultV3(graph, target, env, residualSolution, feasibility, decompositionInput) {
+  const summary = fallbackWorker.summarizeRootV2(
+    graph,
+    graph.rootKey,
+    env,
+    target,
+    residualSolution.phase1,
+    residualSolution.phase2,
+    { reason: "Residual abstract-state solver returned the best policy found before reaching solver limits." }
+  );
+
+  const phase1Iterations = residualSolution.phase1 ? residualSolution.phase1.iterations : 0;
+  const phase2Iterations = residualSolution.phase2 ? residualSolution.phase2.iterations : 0;
+  const reason = `Residual solver reached ${env.maxIterations} iterations without convergence; returning the best-so-far policy estimate.`;
+
+  return {
+    iterations: phase1Iterations + phase2Iterations,
+    approximate: true,
+    ...summary,
+    diagnostics: buildWorkerDiagnosticsV3(
+      {
+        ...(summary.diagnostics || {}),
+        reason,
+      },
+      {
+        strategy: RESIDUAL_STRATEGY,
+        phase: "phase-5-residual-lao-star",
+        feasibility,
+        decomposition: {
+          status: "ESCALATED",
+          applicable: false,
+          reason: decompositionInput && typeof decompositionInput.reason === "string" ? decompositionInput.reason : "",
+          optionCount: decompositionInput && Array.isArray(decompositionInput.options) ? decompositionInput.options.length : 0,
+          targetCount: decompositionInput && Array.isArray(decompositionInput.targets) ? decompositionInput.targets.length : 0,
+          residualTargets: decompositionInput && Array.isArray(decompositionInput.residualTargets)
+            ? decompositionInput.residualTargets
+            : [],
+        },
+        residual: {
+          status: "APPROXIMATE_LIMIT",
+          approximate: true,
+          abstractStates: graph.nodes.length,
+          deadStates: graph.deadStates,
+          stateLimit: env.stateLimit,
+          phase1Iterations,
+          phase2Iterations,
+          phase1Converged: !!(residualSolution.phase1 && residualSolution.phase1.converged),
+          phase2Converged: !!(residualSolution.phase2 && residualSolution.phase2.converged),
+          phase1Residual: residualSolution.phase1 ? residualSolution.phase1.residual : null,
+          phase2Residual: residualSolution.phase2 ? residualSolution.phase2.residual : null,
+          phase1PolicyStates: residualSolution.phase1 ? residualSolution.phase1.policyStates : 0,
+          phase2PolicyStates: residualSolution.phase2 ? residualSolution.phase2.policyStates : 0,
+          heuristic: "Closed-form lower bound on the hardest unresolved target; success heuristic is optimistic 1.",
+        },
+      }
+    ),
+    tree: null,
+    stoppedByUser: false,
+    elapsedMs: 0,
+  };
+}
+
 function solveResidualPayloadV3(payload, options = {}) {
   const feasibility = options.feasibility || analyzeFeasibilityV3(payload.state, payload.target, payload.data, payload.gaConfig);
   const decompositionInput = options.decompositionInput || buildDecompositionPlanInputV3(
@@ -2136,6 +2248,17 @@ function solveResidualPayloadV3(payload, options = {}) {
     stopView: options.stopView || null,
   });
   if (residualSolution.status !== "OPTIMAL") {
+    if (residualSolution.status === "ITERATION_LIMIT" && residualSolution.phase1) {
+      return buildResidualApproximateResultV3(
+        graph,
+        payload.target,
+        v2Env,
+        residualSolution,
+        feasibility,
+        decompositionInput
+      );
+    }
+
     const phase1Iterations = residualSolution.phase1 ? residualSolution.phase1.iterations : 0;
     const phase2Iterations = residualSolution.phase2 ? residualSolution.phase2.iterations : 0;
     return buildResidualFailureResultV3(
@@ -2344,6 +2467,61 @@ function addDelegationDiagnostics(result, feasibility) {
   };
 }
 
+function shouldCompareApproximateILPWithResidualV3(solution) {
+  if (!solution || !solution.ok || !solution.approximate || !solution.ilpResult) {
+    return false;
+  }
+
+  if (solution.ilpResult.status !== "ITERATION_LIMIT") {
+    return false;
+  }
+
+  const objective = Number(solution.ilpResult.objective);
+  const bestBound = Number(solution.ilpResult.bestBound);
+  if (!Number.isFinite(objective) || !Number.isFinite(bestBound)) {
+    return true;
+  }
+
+  const boundGap = Math.max(0, objective - bestBound);
+  return boundGap > ILP_APPROX_BOUND_GAP_THRESHOLD;
+}
+
+function choosePreferredApproximateResultV3(decompositionResult, residualResult) {
+  const residualSuccess = Number(residualResult && residualResult.successProb);
+  const decompositionSuccess = Number(decompositionResult && decompositionResult.successProb);
+
+  if (Number.isFinite(residualSuccess) && Number.isFinite(decompositionSuccess)) {
+    if (residualSuccess > decompositionSuccess + APPROX_COMPARE_SUCCESS_EPSILON) {
+      return residualResult;
+    }
+    if (decompositionSuccess > residualSuccess + APPROX_COMPARE_SUCCESS_EPSILON) {
+      return decompositionResult;
+    }
+  }
+
+  const residualSteps = Number(residualResult && residualResult.expectedSteps);
+  const decompositionSteps = Number(decompositionResult && decompositionResult.expectedSteps);
+  if (Number.isFinite(residualSteps) && Number.isFinite(decompositionSteps)) {
+    if (residualSteps + APPROX_COMPARE_STEPS_EPSILON < decompositionSteps) {
+      return residualResult;
+    }
+    if (decompositionSteps + APPROX_COMPARE_STEPS_EPSILON < residualSteps) {
+      return decompositionResult;
+    }
+  }
+
+  const residualStatus = residualResult
+    && residualResult.diagnostics
+    && residualResult.diagnostics.residual
+    ? residualResult.diagnostics.residual.status
+    : "";
+  if (residualStatus === "OPTIMAL") {
+    return residualResult;
+  }
+
+  return decompositionResult;
+}
+
 function optimizePayloadV3(payload, options = {}) {
   const feasibility = analyzeFeasibilityV3(payload.state, payload.target, payload.data, payload.gaConfig);
   if (!feasibility.ok) {
@@ -2362,7 +2540,24 @@ function optimizePayloadV3(payload, options = {}) {
   if (decompositionInput.ok) {
     const solution = solveDecompositionPlanV3(decompositionInput);
     if (solution.ok) {
-      return buildDecompositionResultV3(solution, feasibility);
+      const decompositionResult = buildDecompositionResultV3(solution, feasibility);
+      if (!shouldCompareApproximateILPWithResidualV3(solution)) {
+        return decompositionResult;
+      }
+
+      const residualApproxCandidate = solveResidualPayloadV3(payload, {
+        feasibility,
+        decompositionInput: {
+          ...decompositionInput,
+          ok: false,
+          reason: "Decomposition returned only a wide-gap approximate ILP incumbent, so the case was also evaluated by the residual solver.",
+        },
+        stopView: options.stopView || null,
+        residualEnv: options.residualEnv || null,
+        residualEnvOverrides,
+      });
+
+      return choosePreferredApproximateResultV3(decompositionResult, residualApproxCandidate);
     }
     if (solution.ilpResult && solution.ilpResult.status === "INFEASIBLE") {
       return solveResidualPayloadV3(payload, {
@@ -2493,6 +2688,7 @@ if (typeof module !== "undefined" && module.exports) {
     computeResidualHeuristicStepsV3,
     solveResidualExactV3,
     solveResidualLAOStarV3,
+    buildResidualApproximateResultV3,
     solveResidualPayloadV3,
     analyzeFeasibilityV3,
     optimizePayloadV3,

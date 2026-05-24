@@ -1,3 +1,4 @@
 training-data*
 old/
 eval-results.json
+.claude/

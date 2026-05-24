@@ -24,7 +24,7 @@
 - In the current budget policy, `timeMs <= 0` means "use the largest configured residual cap." Do not assume `0` means "minimum search."
 - For residual-limit or performance tuning, benchmark concrete gear slots rather than `Any`.
 - For GA-sensitive residual cases, populate `gaConfig.currentGAAffixes`. The v3 residual environment still inherits `sourceTotalGACount` semantics from `d4cubeoptimv2-worker.js`.
-- Known hard benchmark: the concrete Amulet case `Maximum Life + Damage Reduction + All Damage (GA) + Attack Speed -> Critical Strike Chance + Mainstat + All Damage (Require GA) + Elemental Damage (Physical)` remained iteration-bound at `348` abstract states and still did not converge at `2097152` iterations. Treat that as evidence that future work may need residual-algorithm changes, not just another cap bump.
+- Former hard benchmark: the concrete Amulet case `Maximum Life + Damage Reduction + All Damage (GA) + Attack Speed -> Critical Strike Chance + Mainstat + All Damage (Require GA) + Elemental Damage (Physical)` previously did not converge even at the cap. This was a convergence-condition bug (joint `maxDelta < epsilon AND policy-signature-match` requirement looped forever on tied actions). Fixed in the Phase 1 and Phase 2 solvers; the case now converges to `OPTIMAL` well within the default budget.
 
 ## Build And Test
 

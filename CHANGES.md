@@ -43,6 +43,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Relaxed the v3 decomposition wrapper so multi-category targets are still routed through ILP when a closed-form candidate already pins an exact prism/action, and deterministic enchant options remain decomposition-safe even without a prism token.
 - Added approximate best-so-far fallbacks for solver limits in v3: decomposition now accepts ILP incumbents on `ITERATION_LIMIT`, and residual LAO* now returns a best-so-far policy estimate with explicit `APPROXIMATE_LIMIT` diagnostics instead of returning only a null-action limit failure.
 - Added approximation arbitration rules in v3: decomposition-safe cases still prefer ILP by default, but wide-gap ILP approximations can trigger a residual comparison pass and the final result is chosen lexicographically (success probability first, expected steps second) with confidence tie-breaks.
+- Fixed residual Phase 1 convergence: replaced the joint `maxDelta < epsilon AND policy-signature-match` termination condition with plain `maxDelta < epsilon`, eliminating the policy-oscillation loop where converged values caused repeated policy-signature flips on tied actions. Phase 1 and Phase 2 now both use greedy value iteration from V=0/cost=0 with only the Bellman-residual stopping criterion, matching the v2 exact solver's convergence behavior. A synthetic zero-cost Phase 2 is supplied when Phase 1 hits an iteration budget so the approximate-result path does not crash on null Phase 2.
 
 ## Planned Algorithmic Differences
 
@@ -62,9 +63,9 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 	- infeasible typed-family conflict renders `Feasibility Stop` with `F6` in the UI.
 	- decomposition case renders `Decomposition + ILP` with selected-option details.
 	- residual full-item remove-ambiguity case renders `Residual LAO*` with explicit `State Limit` diagnostics.
-- Current focused v3 worker validation status: 34 tests passing.
+- Current focused v3 worker validation status: 35 tests passing.
 - Current combined regression command: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js`
-- Current combined regression status: 73 tests passing.
+- Current combined regression status: 83 tests passing.
 
 ## Deferred Work
 

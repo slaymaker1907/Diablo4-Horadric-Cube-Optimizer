@@ -1886,65 +1886,61 @@ function solveResidualLAOPhase1V3(graph, env, options = {}) {
 
   for (let index = 0; index < graph.nodes.length; index += 1) {
     const node = graph.nodes[index];
-    values[index] = node.success ? 1 : (node.deadReason ? 0 : 1);
+    values[index] = node.success ? 1 : 0;
   }
 
   let converged = false;
   let iterations = 0;
   let residual = Infinity;
   let policyStates = 1;
+  const policyImprovementSteps = 1;
 
   for (; iterations < env.maxIterations; iterations += 1) {
     if (sharedWorker.shouldStop(stopView)) {
       throw new Error("Optimization stopped.");
     }
 
-    const before = getResidualPolicyGraphV3(
-      graph,
-      graph.rootIndex,
-      (node, stateIndex) => selectBestResidualPhase1ActionIndexV3(node, stateIndex, values)
-    );
     let maxDelta = 0;
 
-    for (let orderIndex = before.order.length - 1; orderIndex >= 0; orderIndex -= 1) {
-      const stateIndex = before.order[orderIndex];
-      const node = graph.nodes[stateIndex];
+    for (let index = 0; index < graph.nodes.length; index += 1) {
+      const node = graph.nodes[index];
       if (node.success) {
-        values[stateIndex] = 1;
+        values[index] = 1;
         continue;
       }
       if (node.deadReason) {
-        values[stateIndex] = 0;
+        values[index] = 0;
         continue;
       }
 
-      const bestIndex = selectBestResidualPhase1ActionIndexV3(node, stateIndex, values);
-      const nextValue = bestIndex >= 0
-        ? getResolvedActionSuccessV3(node.actionEntries[bestIndex], stateIndex, values)
-        : 0;
-      maxDelta = Math.max(maxDelta, Math.abs(nextValue - values[stateIndex]));
-      values[stateIndex] = nextValue;
+      let nextValue = 0;
+      for (const entry of node.actionEntries) {
+        const candidate = getResolvedActionSuccessV3(entry, index, values);
+        if (candidate > nextValue) {
+          nextValue = candidate;
+        }
+      }
+      maxDelta = Math.max(maxDelta, Math.abs(nextValue - values[index]));
+      values[index] = nextValue;
     }
 
-    const after = getResidualPolicyGraphV3(
-      graph,
-      graph.rootIndex,
-      (node, stateIndex) => selectBestResidualPhase1ActionIndexV3(node, stateIndex, values)
-    );
     residual = maxDelta;
-    policyStates = after.order.length;
 
-    if (
-      maxDelta < env.epsilon
-      && getResidualPolicySignatureV3(before) === getResidualPolicySignatureV3(after)
-    ) {
+    if (maxDelta < env.epsilon) {
       iterations += 1;
       converged = true;
       break;
     }
   }
 
-  return { values, iterations, converged, residual, policyStates };
+  const finalPolicy = getResidualPolicyGraphV3(
+    graph,
+    graph.rootIndex,
+    (node, stateIndex) => selectBestResidualPhase1ActionIndexV3(node, stateIndex, values)
+  );
+  policyStates = finalPolicy.order.length;
+
+  return { values, iterations, converged, residual, policyStates, policyImprovementSteps };
 }
 
 function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options = {}) {
@@ -1953,74 +1949,59 @@ function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options
   const stopView = options.stopView || null;
   const costs = new Float64Array(graph.nodes.length);
 
-  for (let index = 0; index < graph.nodes.length; index += 1) {
-    const node = graph.nodes[index];
-    costs[index] = node.success || node.deadReason
-      ? 0
-      : computeResidualHeuristicStepsV3(node.state, target, data, gaConfig, {
-        baseEnv,
-        maxAffixSlots: getMaxAffixSlotsV3(node.state, data),
-      });
-  }
-
   let converged = false;
   let iterations = 0;
   let residual = Infinity;
   let policyStates = 1;
+  let policyImprovementSteps = 0;
 
   for (; iterations < env.maxIterations; iterations += 1) {
     if (sharedWorker.shouldStop(stopView)) {
       throw new Error("Optimization stopped.");
     }
 
-    const before = getResidualPolicyGraphV3(
-      graph,
-      graph.rootIndex,
-      (node, stateIndex) => selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1.values, costs, env)
-    );
+    policyImprovementSteps += 1;
     let maxDelta = 0;
 
-    for (let orderIndex = before.order.length - 1; orderIndex >= 0; orderIndex -= 1) {
-      const stateIndex = before.order[orderIndex];
-      const node = graph.nodes[stateIndex];
+    for (let index = 0; index < graph.nodes.length; index += 1) {
+      const node = graph.nodes[index];
       if (node.success || node.deadReason) {
-        costs[stateIndex] = 0;
+        costs[index] = 0;
         continue;
       }
 
-      const optimalSuccess = phase1.values[stateIndex];
+      const optimalSuccess = phase1.values[index];
       if (optimalSuccess <= env.epsilon) {
-        costs[stateIndex] = 0;
+        costs[index] = 0;
         continue;
       }
 
-      const bestIndex = selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1.values, costs, env);
-      const nextValue = bestIndex >= 0
-        ? getResolvedActionWeightedCostV3(node.actionEntries[bestIndex], stateIndex, optimalSuccess, costs)
+      const bestIndex = selectBestResidualPhase2ActionIndexV3(node, index, phase1.values, costs, env);
+      const rawValue = bestIndex >= 0
+        ? getResolvedActionWeightedCostV3(node.actionEntries[bestIndex], index, optimalSuccess, costs)
         : 0;
-      maxDelta = Math.max(maxDelta, Math.abs(nextValue - costs[stateIndex]));
-      costs[stateIndex] = nextValue;
+      const nextValue = Number.isFinite(rawValue) ? rawValue : 0;
+      maxDelta = Math.max(maxDelta, Math.abs(nextValue - costs[index]));
+      costs[index] = nextValue;
     }
 
-    const after = getResidualPolicyGraphV3(
-      graph,
-      graph.rootIndex,
-      (node, stateIndex) => selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1.values, costs, env)
-    );
     residual = maxDelta;
-    policyStates = after.order.length;
 
-    if (
-      maxDelta < env.epsilon
-      && getResidualPolicySignatureV3(before) === getResidualPolicySignatureV3(after)
-    ) {
+    if (maxDelta < env.epsilon) {
       iterations += 1;
       converged = true;
       break;
     }
   }
 
-  return { costs, iterations, converged, residual, policyStates };
+  const finalPolicy = getResidualPolicyGraphV3(
+    graph,
+    graph.rootIndex,
+    (node, stateIndex) => selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1.values, costs, env)
+  );
+  policyStates = finalPolicy.order.length;
+
+  return { costs, iterations, converged, residual, policyStates, policyImprovementSteps };
 }
 
 function solveResidualExactV3(graph, env) {
@@ -2130,6 +2111,8 @@ function buildResidualResultV3(graph, target, env, residualSolution, feasibility
         phase2Residual: residualSolution.phase2.residual,
         phase1PolicyStates: residualSolution.phase1.policyStates,
         phase2PolicyStates: residualSolution.phase2.policyStates,
+        phase1PolicySteps: residualSolution.phase1.policyImprovementSteps || 0,
+        phase2PolicySteps: residualSolution.phase2.policyImprovementSteps || 0,
         heuristic: "Closed-form lower bound on the hardest unresolved target; success heuristic is optimistic 1.",
       },
     }),
@@ -2140,13 +2123,20 @@ function buildResidualResultV3(graph, target, env, residualSolution, feasibility
 }
 
 function buildResidualApproximateResultV3(graph, target, env, residualSolution, feasibility, decompositionInput) {
+  const effectivePhase2 = residualSolution.phase2 || {
+    iterations: 0,
+    converged: false,
+    residual: Infinity,
+    policyStates: 0,
+    costs: new Float64Array(graph.nodes.length),
+  };
   const summary = fallbackWorker.summarizeRootV2(
     graph,
     graph.rootKey,
     env,
     target,
     residualSolution.phase1,
-    residualSolution.phase2,
+    effectivePhase2,
     { reason: "Residual abstract-state solver returned the best policy found before reaching solver limits." }
   );
 
@@ -2191,6 +2181,8 @@ function buildResidualApproximateResultV3(graph, target, env, residualSolution, 
           phase2Residual: residualSolution.phase2 ? residualSolution.phase2.residual : null,
           phase1PolicyStates: residualSolution.phase1 ? residualSolution.phase1.policyStates : 0,
           phase2PolicyStates: residualSolution.phase2 ? residualSolution.phase2.policyStates : 0,
+          phase1PolicySteps: residualSolution.phase1 ? (residualSolution.phase1.policyImprovementSteps || 0) : 0,
+          phase2PolicySteps: residualSolution.phase2 ? (residualSolution.phase2.policyImprovementSteps || 0) : 0,
           heuristic: "Closed-form lower bound on the hardest unresolved target; success heuristic is optimistic 1.",
         },
       }

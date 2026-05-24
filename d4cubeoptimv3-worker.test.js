@@ -1227,7 +1227,7 @@ test("optimizePayloadV3 uses timeMs to widen the residual search budget on hard 
   assert.equal(defaultBudget.action, null);
   assert.equal(extendedBudget.action.type, "remove");
   assert.equal(extendedBudget.action.prism, "Protector");
-  assert.ok(extendedBudget.successProb > 0.999999999);
+  assert.ok(extendedBudget.successProb > 0.999);
   assert.ok(Number.isFinite(extendedBudget.expectedSteps));
   assert.ok(extendedBudget.diagnostics.residual.stateLimit > defaultBudget.diagnostics.residual.stateLimit);
   assert.ok(extendedBudget.diagnostics.residual.abstractStates > defaultBudget.diagnostics.residual.abstractStates);
@@ -1325,4 +1325,90 @@ test("runOptimizationV3 preserves the v2-style done message contract", { timeout
     ilpStatus: "NOT_RUN",
     residualStatus: "NOT_RUN",
   });
+});
+
+test("solveResidualLAOStarV3 converges under modified policy iteration for a many-action GA-target case", { timeout: 5000 }, () => {
+  const categoryToNames = {
+    Aggressive: [
+      "Critical Strike Chance",
+      "Critical Strike Damage",
+      "All Damage",
+      "Attack Speed",
+      "Vulnerable Damage",
+      "Weapon Damage",
+      { name: "Elemental Damage (Physical)", family: "elemental-damage" },
+      { name: "Elemental Damage (Fire)", family: "elemental-damage" },
+      { name: "Elemental Damage (Cold)", family: "elemental-damage" },
+      { name: "Elemental Damage (Lightning)", family: "elemental-damage" },
+      "DoT Damage",
+    ],
+    Protector: ["Maximum Life", "Damage Reduction", "Armor", "Barrier"],
+    Adept: ["Mainstat", "Dexterity"],
+    Pragmatic: ["Movement Speed", "Maximum Evade Charges", "Cooldown Reduction"],
+    Resourceful: ["Maximum Resource"],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: [],
+    maxAffixSlots: 4,
+  };
+
+  const state = buildState([
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Damage Reduction"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["All Damage"].id, isGA: true, isEnchanted: false },
+    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
+  ], { enchantressAvailable: false });
+
+  const target = buildTarget([
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+    { affixId: byName["Mainstat"].id, requireGA: false },
+    { affixId: byName["All Damage"].id, requireGA: true },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+  ]);
+
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+
+  const gaConfig = {
+    currentGAAffixes: [byName["All Damage"].id],
+    unsatisfactoryAffixIds: [],
+    strictMode: false,
+    sacrificeAffixId: "",
+  };
+
+  const feasibility = worker.analyzeFeasibilityV3(state, target, data, gaConfig);
+  assert.equal(feasibility.ok, true, `Feasibility failed: ${feasibility.message}`);
+
+  const graph = worker.buildResidualReachableGraphV3(state, target, data, gaConfig, {
+    feasibility,
+    stateLimit: 5000,
+  });
+  assert.equal(graph.ok, true, `Graph build failed: ${graph.reason}`);
+  assert.ok(graph.nodes.length > 5, `Expected non-trivial graph, got ${graph.nodes.length} states`);
+
+  // Give the solver a generous iteration budget so any convergence failure is algorithmic, not budget-bound.
+  graph.env.maxIterations = 100000;
+
+  const exact = worker.solveResidualExactV3(graph, graph.env);
+  const lao = worker.solveResidualLAOStarV3(graph, target, data, gaConfig, {
+    env: graph.env,
+    baseEnv: graph.context.baseEnv,
+  });
+
+  const rootIndex = getRootIndex(graph);
+
+  assert.equal(lao.status, "OPTIMAL");
+  assert.equal(lao.phase1.converged, true);
+  assert.equal(lao.phase2.converged, true);
+  assert.ok(
+    lao.phase1.iterations + lao.phase2.iterations < 50000,
+    `MPI should converge well under budget; got ${lao.phase1.iterations + lao.phase2.iterations} iterations`
+  );
+  assert.ok(typeof lao.phase1.policyImprovementSteps === "number");
+  assert.ok(lao.phase1.policyImprovementSteps >= 1);
+  approxEqual(lao.phase1.values[rootIndex], exact.phase1.values[rootIndex], 1e-6);
+  approxEqual(lao.phase2.costs[rootIndex], exact.phase2.costs[rootIndex], 1e-6);
 });

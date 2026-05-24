@@ -663,6 +663,7 @@
 						</div>
 
 						<button id="apply-manual" class="btn warn action-submit">Apply Outcome</button>
+						<button id="apply-then-run" class="btn action-submit">Optimize</button>
 					</div>
 					<p class="legend">
 						Use this after each in-game result so the optimizer can continue from the new state.
@@ -970,6 +971,7 @@
 			manualResult: document.getElementById("manual-result"),
 			manualPrism: document.getElementById("manual-prism"),
 			applyManual: document.getElementById("apply-manual"),
+			applyThenRun: document.getElementById("apply-then-run"),
 
 			resultAction: document.getElementById("result-action"),
 			resultSuccess: document.getElementById("result-success"),
@@ -1114,6 +1116,7 @@
 			});
 
 			els.applyManual.addEventListener("click", applyManualOutcome);
+			els.applyThenRun.addEventListener("click", () => { applyManualOutcome(); startRun(); });
 		}
 
 		function ensureWorker() {
@@ -1316,6 +1319,15 @@
 
 			if (next.mode === "removed" && appState.current.isLegendary) {
 				next.mode = "changed";
+			}
+
+			// Auto-select source when the prism narrows it to exactly one eligible affix.
+			if (!next.sourceIndex && next.prism && next.prism !== "None"
+					&& (next.mode === "changed" || next.mode === "removed")) {
+				const eligible = getManualSourceAffixes(next.mode, next.prism);
+				if (eligible.length === 1) {
+					next.sourceIndex = String(eligible[0].index);
+				}
 			}
 
 			appState.lastAction = next;
@@ -1549,6 +1561,7 @@
 		function setRunButtons() {
 			els.runBtn.disabled = runInProgress;
 			els.stopBtn.disabled = !runInProgress;
+			els.applyThenRun.disabled = runInProgress;
 		}
 
 		function renderStatus(text, className) {
@@ -1912,7 +1925,12 @@
 			});
 			els.manualSource.disabled = mode === "added";
 
-			const savedSource = String(appState.lastAction.sourceIndex || "");
+			// Auto-select when exactly one source is available.
+			if (sourceAffixes.length === 1) {
+				appState.lastAction.sourceIndex = sourceAffixes[0].index;
+			}
+
+			const savedSource = String(appState.lastAction.sourceIndex != null ? appState.lastAction.sourceIndex : "");
 			const sourceValid = Array.from(els.manualSource.options).some((o) => o.value === savedSource && savedSource !== "");
 			els.manualSource.value = sourceValid ? savedSource : "";
 
@@ -1983,8 +2001,8 @@
 
 			appState.lastAction = {
 				mode,
-				sourceIndex: sourceIndex == null ? "" : String(sourceIndex),
-				resultAffixId: resultId,
+				sourceIndex: "",
+				resultAffixId: "",
 				prism: els.manualPrism.value,
 			};
 

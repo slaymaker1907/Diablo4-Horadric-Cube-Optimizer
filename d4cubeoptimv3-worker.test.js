@@ -1660,3 +1660,75 @@ test("Category Skill Ranks is accessible as an enchant target when present in ta
     "Category Skill Ranks must be an available enchant target"
   );
 });
+
+test("isCategoryFocusedBlockedByMatchedTargetV3 detects non-GA target affixes sharing the prism category", () => {
+  const categoryToNames = {
+    Protector: ["All Resistance", "Maximum Life", "Specific Resistance (Cold)", "Armor", "Damage Reduction"],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  const state = buildState([
+    { affixId: byName["Specific Resistance (Cold)"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+  ]);
+
+  const target = buildTarget([
+    { affixId: byName["All Resistance"].id, requireGA: false },
+    { affixId: byName["Maximum Life"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, { strictMode: true }, target);
+
+  // Slot 0 (SR-Cold) is the intended reroll; Maximum Life at slot 1 is a target and Protector.
+  assert.ok(
+    worker.isCategoryFocusedBlockedByMatchedTargetV3(state, "Protector", env, 0),
+    "Should be blocked: Maximum Life (slot 1) is a target and shares Protector category"
+  );
+  // Excluding slot 1 (Maximum Life): SR-Cold at slot 0 is not a target — no block.
+  assert.ok(
+    !worker.isCategoryFocusedBlockedByMatchedTargetV3(state, "Protector", env, 1),
+    "Should not be blocked when excluding the only matched target slot"
+  );
+});
+
+test("Case B is blocked when a non-GA matched target shares the focused prism category", () => {
+  // Reproduce the screenshot bug: naïve Case B for SR-Cold → All Resistance via Protector claimed
+  // expected 14 steps, but Maximum Life (a target) at another slot is also Protector and would be
+  // randomly endangered — the closed-form formula must not be used in that scenario.
+  const categoryToNames = {
+    Protector: ["All Resistance", "Maximum Life", "Specific Resistance (Cold)", "Armor", "Damage Reduction"],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  const state = buildState([
+    { affixId: byName["Specific Resistance (Cold)"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+  ]);
+
+  const target = buildTarget([
+    { affixId: byName["All Resistance"].id, requireGA: false },
+    { affixId: byName["Maximum Life"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, { strictMode: true }, target);
+  const allResTarget = target.affixes.find((e) => e.affixId === byName["All Resistance"].id);
+
+  const candidates = worker.getClosedFormPlanCandidatesV3(state, allResTarget, 0, env, {
+    data,
+    gaConfig: { strictMode: true },
+    target,
+  });
+
+  // Case B must not be generated: Maximum Life (a target) at slot 1 is Protector and would be
+  // at risk of accidental reroll — the optimizer must escalate to the residual solver instead.
+  const caseBCandidates = candidates.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.B);
+  assert.equal(caseBCandidates.length, 0,
+    "Case B must be blocked when a matched target affix shares the focused prism category"
+  );
+});

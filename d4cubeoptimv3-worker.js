@@ -296,6 +296,21 @@ function isCategoryFocusedBlockedByGAV3(state, prism, env) {
   });
 }
 
+// Returns true when any non-enchanted target affix (other than the slot being intentionally
+// rerolled at excludeSlotIndex) shares the prism category for the "focused" operation type.
+// A focused reroll randomly selects from ALL eligible slots, so a matched target in the same
+// category would be endangered — the closed-form formula (which assumes deterministic selection)
+// must not be used in that scenario. Cases B, C, F, G must skip prisms for which this returns true.
+function isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, excludeSlotIndex) {
+  if (!env || !env.targetCounts) { return false; }
+  return getCurrentAffixes(state).some((entry, index) => {
+    if (index === excludeSlotIndex) { return false; }
+    if (entry.isEnchanted) { return false; }
+    if (!(env.targetCounts[entry.affixId] > 0)) { return false; }
+    return affixHasCategoryV3(entry.affixId, prism, env, "focused");
+  });
+}
+
 function isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, operationType) {
   const matches = [];
 
@@ -500,6 +515,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   if (targetEntry.needsImprovement && hostEntry.affixId === targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
+      if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = options.touchOnlyImprovement
         ? 1
@@ -519,6 +535,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   if (sharedCategories.length > 0 && hostEntry.affixId !== targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
+      if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -536,6 +553,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   if (sharedCategories.length > 0 && hostEntry.isGA) {
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
+      if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -557,6 +575,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     for (const removePrism of removableCategories) {
       for (const prism of targetCategoriesFocused) {
         if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
+        if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
         const n = getCategorySuccessDenominatorV3(state, prism, env, { ignoreIndex: slotIndex, operationType: "focused" });
         const expectedSteps = computeCaseCExpectedStepsV3(n);
         if (Number.isFinite(expectedSteps)) {
@@ -2575,6 +2594,8 @@ if (typeof module !== "undefined" && module.exports) {
     getCategoryPoolSizeV3,
     countPresentAffixesInCategoryV3,
     getCategorySuccessDenominatorV3,
+    isCategoryFocusedBlockedByGAV3,
+    isCategoryFocusedBlockedByMatchedTargetV3,
     isUniqueUnlockedCategoryHostV3,
     computeCaseAExpectedStepsV3,
     computeCaseBExpectedStepsV3,

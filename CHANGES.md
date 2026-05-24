@@ -49,6 +49,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Made GA preservation always-on in v3 UI: removed the `Target GA Strict` toggle, `strictMode` is now always `true` in `gaConfig`, `renderSettingsControls` and all toggle state removed; "Eventual Success Probability" label renamed "P(Success, GA Preserved)"; `WORKER_VERSION` bumped to `2026-05-24-v3-ga-always-on`.
 - Fixed Thorns prism mechanics: Thorns now uses the correct prism per operation type (Add=Aggressive, Focused/Chaotic=Protector, Remove=Pragmatic) via a general per-operation category override system (`operationCategories` on affix objects, `OPERATION_CATEGORY_OVERRIDES` in the catalog builder). Added Thorns to the Protector category for Focused/Chaotic eligibility. All affected helpers in the shared worker and v3 worker accept an `operationType` parameter and fall back to `affix.categories` when no override exists, preserving backward compatibility with existing test fixtures. Added gear-slot class-availability warning in the UI. `WORKER_VERSION` bumped to `2026-05-24-v3-thorns-prism-fix`.
 - Split "Skill Ranks" into "Specific Skill Ranks" (individual class skills, Adept prism, cube-modifiable) and "Category Skill Ranks" (+X to All [Class] Skills, enchant-only). "Category Skill Ranks" carries empty `operationCategories` overrides for all cube operations so it is excluded from every cube prism pool while remaining accessible as an Enchantress target. Added `LEGACY_AFFIX_ID_MAP` and `LEGACY_AFFIX_NAME_ALIASES` entries to migrate saved state from the old "Skill Ranks" name. Extracted all hardcoded game-mechanics constants (prism categories, per-operation overrides, legacy maps, damage types) from the HTML into `config.js` (UMD module, same pattern as `gear-slot-legality.js`). `WORKER_VERSION` bumped to `2026-05-24-v3-skill-ranks-split-config-js`.
+- Fixed decomposition matched-target protection gap: added `isCategoryFocusedBlockedByMatchedTargetV3` helper and applied it to Cases B, C, F, G in `getClosedFormPlanCandidatesV3`. When any non-enchanted target affix (other than the slot being intentionally rerolled) shares the prism category, the closed-form formula is skipped and the case escalates to the residual solver. The prior bug caused grossly under-estimated expected steps (e.g., 14 instead of ~119) whenever a matched target affix and an unmatched host both existed in the same prism category, because the formula assumed deterministic source selection while the game randomly selects any eligible slot. `WORKER_VERSION` bumped to `2026-05-24-v3-focused-reroll-target-block`.
 
 ## Planned Algorithmic Differences
 
@@ -68,9 +69,9 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 	- infeasible typed-family conflict renders `Feasibility Stop` with `F6` in the UI.
 	- decomposition case renders `Decomposition + ILP` with selected-option details.
 	- residual full-item remove-ambiguity case renders `Residual LAO*` with explicit `State Limit` diagnostics.
-- Current focused v3 worker validation status: 35 tests passing (includes 3 new Thorns per-operation tests).
+- Current focused v3 worker validation status: 40 tests passing (includes 2 new matched-target-block tests).
 - Current combined regression command: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js`
-- Current combined regression status: 82 tests passing.
+- Current combined regression status: 87 tests passing.
 
 ## Deferred Work
 

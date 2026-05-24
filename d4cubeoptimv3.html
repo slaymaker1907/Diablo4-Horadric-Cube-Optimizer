@@ -82,7 +82,7 @@
 			display: flex;
 			flex-wrap: wrap;
 			gap: 8px;
-			align-items: center;
+			align-items: flex-end;
 		}
 
 		.layout {
@@ -226,15 +226,6 @@
 
 		.control-strip {
 			margin-top: 12px;
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-			gap: 12px;
-		}
-
-		@media (max-width: 980px) {
-			.control-strip {
-				grid-template-columns: 1fr;
-			}
 		}
 
 		.action-grid {
@@ -497,6 +488,51 @@
 			background: #4f1d1d;
 			margin: 10px 0;
 		}
+
+		#help-modal {
+			border: 1px solid var(--edge);
+			background: linear-gradient(180deg, #1e0808, #130505);
+			color: var(--fg);
+			padding: 0;
+			max-width: min(700px, 94vw);
+			max-height: 85vh;
+			width: 100%;
+			overflow: hidden;
+		}
+
+		#help-modal::backdrop {
+			background: rgba(0, 0, 0, 0.75);
+		}
+
+		.modal-inner {
+			display: flex;
+			flex-direction: column;
+			height: 100%;
+			max-height: 85vh;
+		}
+
+		.modal-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 10px 12px;
+			background: linear-gradient(90deg, rgba(130, 25, 25, 0.5), rgba(80, 15, 15, 0.4));
+			border-bottom: 1px solid var(--edge);
+			flex-shrink: 0;
+		}
+
+		.modal-header h2 {
+			margin: 0;
+			font-size: 1rem;
+			letter-spacing: 0.03em;
+			text-transform: uppercase;
+			color: var(--accent);
+		}
+
+		.modal-body {
+			padding: 14px;
+			overflow-y: auto;
+		}
 	</style>
 </head>
 <body>
@@ -510,17 +546,16 @@
 
 		<div class="toolbar">
 			<div class="card group-main">
-				<div style="display:flex;align-items:flex-end;gap:4px;">
-					<div class="field" style="width: 170px;">
-						<label for="thinking-seconds">Thinking Time</label>
-						<input id="thinking-seconds" type="number" min="0" step="1" value="0">
-					</div>
-					<button id="thinking-info-btn" class="btn ghost" style="padding:4px 8px;align-self:flex-end;" title="About Thinking Time">ℹ</button>
+				<div class="field" style="width: 170px;">
+					<label for="thinking-seconds">Thinking Time</label>
+					<input id="thinking-seconds" type="number" min="0" step="1" value="0">
 				</div>
+				<button id="thinking-info-btn" class="btn ghost" title="About Thinking Time">ℹ</button>
 				<button id="run-btn" class="btn">Optimize</button>
 				<button id="stop-btn" class="btn stop" disabled>Stop</button>
 				<button id="reset-btn" class="btn ghost">Reset</button>
-				<div class="status" id="run-status" style="align-self:center;"></div>
+				<button id="help-btn" class="btn ghost">How To Use</button>
+				<div class="status" id="run-status"></div>
 				<div id="thinking-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
 					Higher values allow larger residual searches. 0 = largest residual budget.
 				</div>
@@ -690,47 +725,39 @@
 			</section>
 		</div>
 
-		<section class="panel" style="margin-top: 12px;">
-			<h2>How To Use</h2>
-			<div class="panel-body">
+	</div>
+
+	<dialog id="help-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>How To Use</h2>
+				<button id="help-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
 				<ol class="instructions">
-					<li>Enter current affixes and mark GA and Enchanted flags where applicable.</li>
-					<li>Enter desired target affixes. Require GA is only available for affixes that are already GA on the source item.</li>
-					<li>Set Legendary if removal is unavailable for your item.</li>
-					<li>Thinking Time increases the residual graph and iteration budget. Higher values let harder residual cases search deeper, but it is not a wall-clock cutoff for exact routes.</li>
-					<li>Click Optimize and follow the recommended operation.</li>
-					<li>After each in-game outcome, use Apply Last Outcome to update state and re-run optimization.</li>
-					<li>Target GA requirements are enforced strictly; the optimizer will reject impossible GA targets instead of estimating a success chance.</li>
-					<li>Use Reset to clear local state and restart from scratch.</li>
+					<li>Fill in your item's current affixes. Check <strong>GA</strong> for any Greater Affixes and <strong>Enchanted</strong> for the affix modified by the Enchantress (at most one).</li>
+					<li>Fill in up to 4 target affixes — the affixes you want on the finished item. Check <strong>Needs Improvement</strong> for affixes already present but at an unsatisfactory roll value.</li>
+					<li>GA preservation is automatic: any GA on a current affix that aligns with a target affix is protected throughout optimization. The optimizer will never recommend an action that risks losing it.</li>
+					<li>Check <strong>Legendary</strong> if your item cannot have affixes removed. The Enchantress Available toggle tracks whether the one-time enchant has been used — it resets automatically when an enchanted affix is removed.</li>
+					<li>Set <strong>Gear Slot</strong> to your item type to restrict suggestions to slot-legal affixes and reduce compute time. Leave it at <em>Any</em> to allow all affixes.</li>
+					<li>Click <strong>Optimize</strong>. The recommended cube action appears with success probability and expected steps to a terminal outcome (success or GA loss).</li>
+					<li>Perform the action in-game, then record it with <strong>Apply Last Outcome</strong>: pick the modification type and prism used (pre-filled from the recommendation), select the source affix that changed, and type the new affix that appeared. Click Apply to update state, then Optimize again.</li>
+					<li>Click <strong>Reset</strong> to clear all state and start over.</li>
 				</ol>
 
 				<div class="divider"></div>
 
 				<strong style="color: var(--accent);">Current Limitations</strong>
 				<ul class="limitations">
-					<li>Affix pool is derived from prism categories only, not slot-accurate roll tables.</li>
-					<li>Choosing a specific gear slot narrows the legal affix pool for that item, which blocks impossible rolls and usually reduces compute time. Keep it at Any to preserve the full pool.</li>
-					<li>Affix values or thresholds are not modeled yet (example: minimum 1500 Maximum Life).</li>
-					<li>Gold and crafting materials are not included in objective cost.</li>
-					<li>Residual solving is exact only within the current abstract-state cap and iteration cap; larger residual cases still return explicit solver-limit diagnostics if they exhaust the selected budget.</li>
-					<li>Thinking Time expands the residual solver budget, but it still does not interrupt exact routes on a wall-clock timer.</li>
-				</ul>
-
-				<div class="divider"></div>
-
-				<strong style="color: var(--accent);">Questions To Calibrate Future Versions</strong>
-				<ul class="questions-list">
-					<li>Should each gear slot later use slot-specific roll weights beyond the current legality table?</li>
-					<li>Do you want objective weighting for gold cost versus cube-step count?</li>
-					<li>Should prism category selection be constrained by empirical in-game roll frequencies?</li>
-					<li>Should the optimizer support multiple target templates for different builds?</li>
-					<li>Do you want hard constraints for minimum affix values in the objective?</li>
-					<li>Should we add simulation logs for each recommended action path?</li>
-					<li>Do you want a compare mode showing multiple target plans side by side?</li>
+					<li>Affix pools are based on prism categories. Slot-accurate roll weights and per-affix frequencies are not modeled, so some suggestions may be theoretically possible but practically rare.</li>
+					<li>Affix values and thresholds are not modeled — the optimizer targets affix identity only, not roll quality (e.g. it cannot require at least 1500 Maximum Life).</li>
+					<li>Gold and crafting material costs are not included in the objective. The optimizer minimizes expected cube steps only.</li>
+					<li>Expected Cube Steps counts steps until a terminal outcome — either success (all targets met with GAs preserved) or failure (a protected GA is lost). A lower step count alongside a lower success probability is not a contradiction: most runs end quickly via failure.</li>
+					<li>Residual cases that exceed the abstract-state or iteration budget return an approximate best-so-far result with explicit diagnostics. Increase Thinking Time to expand the budget; 0 uses the largest configured budget.</li>
 				</ul>
 			</div>
-		</section>
-	</div>
+		</div>
+	</dialog>
 
 	<datalist id="affix-options"></datalist>
 	<datalist id="manual-result-options"></datalist>
@@ -864,10 +891,20 @@
 				gearSlot: "Any",
 				isLegendary: false,
 				enchantressAvailable: true,
-				affixes: [],
+				affixes: [
+					{ affixId: "", isGA: false, isEnchanted: false },
+					{ affixId: "", isGA: false, isEnchanted: false },
+					{ affixId: "", isGA: false, isEnchanted: false },
+					{ affixId: "", isGA: false, isEnchanted: false },
+				],
 			},
 			target: {
-				affixes: [],
+				affixes: [
+					{ affixId: "", requireGA: false, needsImprovement: false },
+					{ affixId: "", requireGA: false, needsImprovement: false },
+					{ affixId: "", requireGA: false, needsImprovement: false },
+					{ affixId: "", requireGA: false, needsImprovement: false },
+				],
 			},
 			settings: {
 				thinkingSeconds: 0,
@@ -973,6 +1010,11 @@
 				const box = document.getElementById("thinking-info-box");
 				box.style.display = box.style.display === "none" ? "block" : "none";
 			});
+
+			const helpModal = document.getElementById("help-modal");
+			document.getElementById("help-btn").addEventListener("click", () => helpModal.showModal());
+			document.getElementById("help-modal-close").addEventListener("click", () => helpModal.close());
+			helpModal.addEventListener("click", (e) => { if (e.target === helpModal) { helpModal.close(); } });
 			els.clearHistory.addEventListener("click", () => {
 				appState.history = [];
 				saveState();

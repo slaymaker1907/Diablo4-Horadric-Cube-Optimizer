@@ -767,75 +767,36 @@
 	<datalist id="manual-result-options"></datalist>
 
 	<script src="./gear-slot-legality.js"></script>
+	<script src="./config.js"></script>
 	<script>
-		const DAMAGE_TYPES = ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
+		const _cfg = (typeof d4cubeoptimConfig === "object" && d4cubeoptimConfig) ? d4cubeoptimConfig : {};
+
+		const DAMAGE_TYPES = Array.isArray(_cfg.DAMAGE_TYPES) ? _cfg.DAMAGE_TYPES : ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
 		const ELEMENTAL_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
 			name: `Elemental Damage (${type})`,
-			family: "elemental-damage",
-			rollWeight: 1 / DAMAGE_TYPES.length,
+			family: "",
+			rollWeight: 1,
 		}));
 		const SPECIFIC_RESISTANCE_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
 			name: `Specific Resistance (${type})`,
-			family: "specific-resistance",
-			rollWeight: 1 / DAMAGE_TYPES.length,
+			family: "",
+			rollWeight: 1,
 		}));
 
-		const CATEGORY_TO_AFFIX_NAMES = {
-			"Aggressive": [
-				"Mainstat",
-				"Weapon Damage",
-				"Attack Speed",
-				"Critical Strike Chance",
-				"Critical Strike Damage",
-				"Vulnerable Damage",
-				"DoT Damage",
-				"All Damage",
-				...ELEMENTAL_TYPED_AFFIXES,
-				"Thorns",
-			],
-			"Pragmatic": [
-				"Barrier Generation",
-				"Cooldown Reduction",
-				"Fortify Generation",
-				"Healing Received",
-				"Impairment Reduction",
-				"Life Regeneration",
-				"Lucky Hit Chance",
-				"Movement Speed",
-				"Potion Capacity",
-				"Thorns",
-				"Maximum Evade Charges",
-				"Attacks reduce Evade Cooldown",
-				"Evade grants Movement Speed",
-			],
-			"Protector": [
-				"Armor",
-				"Damage Reduction",
-				"Dodge Chance",
-				"Fortify Generation",
-				"Life on Hit",
-				"Life on Kill",
-				"Life Regeneration",
-				"Maximum Life",
-				"All Resistance",
-				...SPECIFIC_RESISTANCE_TYPED_AFFIXES,
-				"Thorns",
-			],
-			"Resourceful": [
-				"Lucky Hit Chance restore Resource",
-				"Maximum Resource",
-				"Resource Cost Reduction",
-				"Resource on Kill",
-				"Resource Regeneration",
-			],
-			"Adept": [
-				"Mainstat",
-				"Skill Ranks",
-			],
-			"Chromatic": [
-				...SPECIFIC_RESISTANCE_TYPED_AFFIXES,
-			],
-		};
+		function expandTypedAffixSentinels(raw, eleTyped, resTyped) {
+			const result = Object.create(null);
+			for (const [cat, names] of Object.entries(raw)) {
+				result[cat] = names.flatMap((n) =>
+					n === "Elemental Damage" ? eleTyped :
+					n === "Specific Resistance" ? resTyped : [n]
+				);
+			}
+			return result;
+		}
+
+		const CATEGORY_TO_AFFIX_NAMES = _cfg.CATEGORY_TO_AFFIX_NAMES
+			? expandTypedAffixSentinels(_cfg.CATEGORY_TO_AFFIX_NAMES, ELEMENTAL_TYPED_AFFIXES, SPECIFIC_RESISTANCE_TYPED_AFFIXES)
+			: {};
 
 		const slotLegality = typeof d4cubeoptimGearSlotLegality === "object" && d4cubeoptimGearSlotLegality
 			? d4cubeoptimGearSlotLegality
@@ -857,30 +818,19 @@
 				"Shield",
 			];
 
-		// Per-operation category overrides for affixes that use different prisms
-		// per operation type.  Keys are affix names (matched by exact name string).
-		// Each entry may specify: add, focused, chaotic, remove.
-		// When an operation type is not listed here the affix's default categories apply.
-		const OPERATION_CATEGORY_OVERRIDES = {
-			"Thorns": {
-				add:     ["Aggressive"],
-				focused: ["Protector"],
-				chaotic: ["Protector"],
-				remove:  ["Pragmatic"],
-			},
-		};
+		const OPERATION_CATEGORY_OVERRIDES = (_cfg.OPERATION_CATEGORY_OVERRIDES && typeof _cfg.OPERATION_CATEGORY_OVERRIDES === "object")
+			? _cfg.OPERATION_CATEGORY_OVERRIDES
+			: {};
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-24-v3-thorns-prism-fix";
-		const LEGACY_AFFIX_ID_MAP = {
-			"elemental-damage": "elemental-damage-physical",
-			"specific-resistances": "specific-resistance-physical",
-		};
-		const LEGACY_AFFIX_NAME_ALIASES = {
-			"elemental damage": "Elemental Damage (Physical)",
-			"specific resistances": "Specific Resistance (Physical)",
-		};
+		const WORKER_VERSION = "2026-05-24-v3-typed-affix-independent-weight";
+		const LEGACY_AFFIX_ID_MAP = (_cfg.LEGACY_AFFIX_ID_MAP && typeof _cfg.LEGACY_AFFIX_ID_MAP === "object")
+			? _cfg.LEGACY_AFFIX_ID_MAP
+			: {};
+		const LEGACY_AFFIX_NAME_ALIASES = (_cfg.LEGACY_AFFIX_NAME_ALIASES && typeof _cfg.LEGACY_AFFIX_NAME_ALIASES === "object")
+			? _cfg.LEGACY_AFFIX_NAME_ALIASES
+			: {};
 
 		const AFFIXES = buildAffixCatalog(CATEGORY_TO_AFFIX_NAMES, OPERATION_CATEGORY_OVERRIDES);
 		const AFFIX_BY_ID = Object.create(null);

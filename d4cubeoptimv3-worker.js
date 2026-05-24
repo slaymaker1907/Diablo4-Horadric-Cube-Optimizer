@@ -177,7 +177,7 @@ function getMaxAffixSlotsV3(state, data) {
 
 function getAffixFamilyV3(affixId, env) {
   const affix = env && env.affixMap ? env.affixMap[affixId] : null;
-  if (affix && affix.family) {
+  if (affix && affix.family !== undefined) {
     return affix.family;
   }
   if (typeof affixId !== "string") {

@@ -42,7 +42,8 @@
       "Specific Resistance (Lightning)",
       "Specific Resistance (Poison)",
       "Specific Resistance (Shadow)",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Chest: Object.freeze([
       "Mainstat",
@@ -61,7 +62,8 @@
       "Specific Resistance (Lightning)",
       "Specific Resistance (Poison)",
       "Specific Resistance (Shadow)",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Gloves: Object.freeze([
       "Mainstat",
@@ -73,7 +75,8 @@
       "Lucky Hit Chance",
       "Lucky Hit Chance restore Resource",
       "Life on Hit",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Pants: Object.freeze([
       "Mainstat",
@@ -95,7 +98,8 @@
       "Specific Resistance (Lightning)",
       "Specific Resistance (Poison)",
       "Specific Resistance (Shadow)",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Boots: Object.freeze([
       "Mainstat",
@@ -117,7 +121,8 @@
       "Specific Resistance (Lightning)",
       "Specific Resistance (Poison)",
       "Specific Resistance (Shadow)",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Amulet: Object.freeze([
       "Mainstat",
@@ -137,7 +142,8 @@
       "Elemental Damage (Poison)",
       "Elemental Damage (Shadow)",
       "All Resistance",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Ring: Object.freeze([
       "Mainstat",
@@ -177,7 +183,8 @@
       "Life on Hit",
       "Life on Kill",
       "Resource on Kill",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     "2H Weapon": Object.freeze([
       "Mainstat",
@@ -197,7 +204,8 @@
       "Life on Hit",
       "Life on Kill",
       "Resource on Kill",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Offhand: Object.freeze([
       "Mainstat",
@@ -209,7 +217,8 @@
       "Maximum Resource",
       "Resource Cost Reduction",
       "Resource Regeneration",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
     Shield: Object.freeze([
       "Mainstat",
@@ -223,7 +232,8 @@
       "Lucky Hit Chance restore Resource",
       "Resource Cost Reduction",
       "All Resistance",
-      "Skill Ranks",
+      "Specific Skill Ranks",
+      "Category Skill Ranks",
     ]),
   });
 

@@ -48,6 +48,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Fixed decomposition GA-protection gap: added `isCategoryFocusedBlockedByGAV3` helper and applied it to Cases B, C, F, G in `getClosedFormPlanCandidatesV3`. When any protected GA affix (non-enchanted, in `gaRequiredCounts`) shares a prism category with the affix being rerolled, that prism is skipped — preventing the closed-form model from generating plans that would randomly endanger the GA. Such cases now correctly escalate to the residual solver, which blocks dangerous actions via `touchesProtectedGA` under `strictMode: true`.
 - Made GA preservation always-on in v3 UI: removed the `Target GA Strict` toggle, `strictMode` is now always `true` in `gaConfig`, `renderSettingsControls` and all toggle state removed; "Eventual Success Probability" label renamed "P(Success, GA Preserved)"; `WORKER_VERSION` bumped to `2026-05-24-v3-ga-always-on`.
 - Fixed Thorns prism mechanics: Thorns now uses the correct prism per operation type (Add=Aggressive, Focused/Chaotic=Protector, Remove=Pragmatic) via a general per-operation category override system (`operationCategories` on affix objects, `OPERATION_CATEGORY_OVERRIDES` in the catalog builder). Added Thorns to the Protector category for Focused/Chaotic eligibility. All affected helpers in the shared worker and v3 worker accept an `operationType` parameter and fall back to `affix.categories` when no override exists, preserving backward compatibility with existing test fixtures. Added gear-slot class-availability warning in the UI. `WORKER_VERSION` bumped to `2026-05-24-v3-thorns-prism-fix`.
+- Split "Skill Ranks" into "Specific Skill Ranks" (individual class skills, Adept prism, cube-modifiable) and "Category Skill Ranks" (+X to All [Class] Skills, enchant-only). "Category Skill Ranks" carries empty `operationCategories` overrides for all cube operations so it is excluded from every cube prism pool while remaining accessible as an Enchantress target. Added `LEGACY_AFFIX_ID_MAP` and `LEGACY_AFFIX_NAME_ALIASES` entries to migrate saved state from the old "Skill Ranks" name. Extracted all hardcoded game-mechanics constants (prism categories, per-operation overrides, legacy maps, damage types) from the HTML into `config.js` (UMD module, same pattern as `gear-slot-legality.js`). `WORKER_VERSION` bumped to `2026-05-24-v3-skill-ranks-split-config-js`.
 
 ## Planned Algorithmic Differences
 
@@ -60,7 +61,7 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Current focused ILP validation command: `node --test ilp.test.js`
 - Current focused validation command: `node --test d4cubeoptimv3-worker.test.js`
 - Existing v2 regression command remains: `node --test d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js`
-- Phase 3 validation currently passes 6 direct ILP tests in `ilp.test.js`.
+- Combined validation suite: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js` — 85 tests pass.
 - Phase 5 validation currently passes 22 tests in the focused v3 worker suite.
 - Phase 6 validation currently passes 25 tests in the focused v3 worker suite.
 - Phase 7 browser smoke results:

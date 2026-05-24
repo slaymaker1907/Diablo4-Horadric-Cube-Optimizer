@@ -1549,3 +1549,114 @@ test("Thorns can only be removed via Pragmatic prism with operationCategories ov
     "Thorns must not be eligible for Protector remove"
   );
 });
+
+// Helper: build a catalog fixture containing both Specific Skill Ranks (Adept, cube-ok)
+// and Category Skill Ranks (Adept, enchant-only via empty operationCategories overrides).
+function buildSkillRanksFixture() {
+  const categoryToNames = {
+    Adept: ["Mainstat", "Specific Skill Ranks", "Category Skill Ranks"],
+    Protector: ["Armor", "Maximum Life", "Damage Reduction"],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+
+  // Attach empty operation overrides to Category Skill Ranks — mirrors config.js.
+  const categorySkillRanks = byName["Category Skill Ranks"];
+  categorySkillRanks.operationCategories = {
+    add:     [],
+    focused: [],
+    chaotic: [],
+    remove:  [],
+  };
+
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+  return { data, byName };
+}
+
+test("Category Skill Ranks is excluded from all cube operation pools via operationCategories override", () => {
+  const { data, byName } = buildSkillRanksFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const state = buildState([
+    { affixId: byName["Armor"].id },
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Critical Strike Chance"].id },
+  ]);
+
+  const getEligible = (prism, opType) =>
+    worker.getEligibleByCategory(state, env, prism, opType);
+
+  // Category Skill Ranks must not appear in any cube operation pool.
+  assert.ok(
+    !getEligible("Adept", "add").some((e) => e.entry.affixId === byName["Category Skill Ranks"].id),
+    "Category Skill Ranks must not appear in Adept add pool"
+  );
+  assert.ok(
+    !getEligible("Adept", "focused").some((e) => e.entry.affixId === byName["Category Skill Ranks"].id),
+    "Category Skill Ranks must not appear in Adept focused pool"
+  );
+  assert.ok(
+    !getEligible("Adept", "chaotic").some((e) => e.entry.affixId === byName["Category Skill Ranks"].id),
+    "Category Skill Ranks must not appear in Adept chaotic pool"
+  );
+});
+
+test("Specific Skill Ranks remains cube-modifiable and is unaffected by Category Skill Ranks override", () => {
+  const { data, byName } = buildSkillRanksFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const state = buildState([
+    { affixId: byName["Armor"].id },
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Specific Skill Ranks"].id },
+  ]);
+
+  // Specific Skill Ranks must appear in the Adept pool for focused reroll.
+  const focusedEligible = worker.getEligibleByCategory(state, env, "Adept", "focused");
+  assert.ok(
+    focusedEligible.some((e) => e.entry.affixId === byName["Specific Skill Ranks"].id),
+    "Specific Skill Ranks must be eligible for Adept focused reroll"
+  );
+
+  // An Adept add must be able to produce Specific Skill Ranks.
+  const addOutcomes = worker.getActionOutcomes(
+    buildState([{ affixId: byName["Armor"].id }]),
+    { type: "add", prism: "Adept" },
+    env
+  );
+  assert.ok(
+    addOutcomes.some((o) => o.state.affixes.some((a) => a.affixId === byName["Specific Skill Ranks"].id)),
+    "Adept add must be able to produce Specific Skill Ranks"
+  );
+  // Category Skill Ranks must not appear as an Adept add outcome.
+  assert.ok(
+    !addOutcomes.some((o) => o.state.affixes.some((a) => a.affixId === byName["Category Skill Ranks"].id)),
+    "Adept add must not produce Category Skill Ranks"
+  );
+});
+
+test("Category Skill Ranks is accessible as an enchant target when present in target affixes", () => {
+  const { data, byName } = buildSkillRanksFixture();
+
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+  ], { enchantressAvailable: true });
+
+  const target = buildTarget([
+    { affixId: byName["Category Skill Ranks"].id, requireGA: false },
+  ]);
+
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, {}, target);
+  const actions = worker.getValidActions(state, target, env);
+
+  const enchantActions = actions.filter((a) => a.type === "enchant");
+  assert.ok(enchantActions.length > 0, "Expected at least one enchant action");
+  assert.ok(
+    enchantActions.some((a) => a.targetAffixId === byName["Category Skill Ranks"].id),
+    "Category Skill Ranks must be an available enchant target"
+  );
+});

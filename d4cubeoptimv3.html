@@ -78,26 +78,11 @@
 		}
 
 		.toolbar .group-main {
-			grid-column: span 7;
+			grid-column: span 12;
 			display: flex;
 			flex-wrap: wrap;
 			gap: 8px;
 			align-items: center;
-		}
-
-		.toolbar .group-status {
-			grid-column: span 5;
-			display: flex;
-			align-items: center;
-			justify-content: space-between;
-			gap: 8px;
-		}
-
-		@media (max-width: 980px) {
-			.toolbar .group-main,
-			.toolbar .group-status {
-				grid-column: span 12;
-			}
 		}
 
 		.layout {
@@ -184,6 +169,48 @@
 			color: var(--muted);
 		}
 
+		input[type="checkbox"] {
+			appearance: none;
+			-webkit-appearance: none;
+			width: 13px;
+			height: 13px;
+			border: 1.5px solid #5a3232;
+			border-radius: 2px;
+			background: #1e0e0e;
+			cursor: pointer;
+			vertical-align: middle;
+			position: relative;
+			flex-shrink: 0;
+			transition: border-color 0.12s;
+		}
+
+		input[type="checkbox"]:hover {
+			border-color: #8a4a4a;
+		}
+
+		input[type="checkbox"]:checked {
+			background: #111;
+			border-color: #707070;
+		}
+
+		input[type="checkbox"]:checked::after {
+			content: "";
+			position: absolute;
+			left: 2px;
+			top: -1px;
+			width: 5px;
+			height: 8px;
+			border: 1.5px solid #f2e4cc;
+			border-top: none;
+			border-left: none;
+			transform: rotate(45deg);
+		}
+
+		input[type="checkbox"]:focus-visible {
+			outline: 2px solid var(--accent);
+			outline-offset: 2px;
+		}
+
 		.legend {
 			margin: 8px 0 0;
 			font-size: 0.84rem;
@@ -218,36 +245,19 @@
 		}
 
 		.action-grid-manual {
-			grid-template-columns: repeat(5, minmax(0, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 			align-items: end;
 		}
 
 		.action-grid-manual .action-submit {
 			width: 100%;
+			grid-column: span 2;
 			align-self: end;
-		}
-
-		@media (max-width: 1100px) {
-			.action-grid-manual {
-				grid-template-columns: repeat(3, minmax(0, 1fr));
-			}
-
-			.action-grid-manual .action-submit {
-				grid-column: span 3;
-			}
 		}
 
 		@media (max-width: 900px) {
 			.action-grid {
 				grid-template-columns: repeat(2, minmax(0, 1fr));
-			}
-
-			.action-grid-manual {
-				grid-template-columns: repeat(2, minmax(0, 1fr));
-			}
-
-			.action-grid-manual .action-submit {
-				grid-column: span 2;
 			}
 		}
 
@@ -268,9 +278,16 @@
 			margin-bottom: 10px;
 		}
 
+		.results-primary {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+		}
+
 		@media (max-width: 980px) {
 			.results {
 				grid-template-columns: repeat(2, minmax(0, 1fr));
+			}
+			.results-primary {
+				grid-template-columns: repeat(3, minmax(0, 1fr));
 			}
 		}
 
@@ -278,6 +295,42 @@
 			.results {
 				grid-template-columns: 1fr;
 			}
+			.results-primary {
+				grid-template-columns: 1fr;
+			}
+		}
+
+		.debug-accordion {
+			border: 1px solid #3a1515;
+		}
+
+		.debug-accordion summary {
+			padding: 8px 10px;
+			cursor: pointer;
+			font-size: 0.82rem;
+			text-transform: uppercase;
+			letter-spacing: 0.06em;
+			color: var(--accent);
+			user-select: none;
+			list-style: none;
+		}
+
+		.debug-accordion summary::after {
+			content: " ▶";
+			font-size: 0.7rem;
+		}
+
+		.debug-accordion[open] summary::after {
+			content: " ▼";
+		}
+
+		.debug-accordion summary::-webkit-details-marker {
+			display: none;
+		}
+
+		.debug-body {
+			padding: 10px;
+			border-top: 1px solid #3a1515;
 		}
 
 		.metric {
@@ -457,18 +510,20 @@
 
 		<div class="toolbar">
 			<div class="card group-main">
-				<div class="field" style="width: 170px;">
-					<label for="thinking-seconds">Thinking Time</label>
-					<input id="thinking-seconds" type="number" min="0" step="1" value="10">
+				<div style="display:flex;align-items:flex-end;gap:4px;">
+					<div class="field" style="width: 170px;">
+						<label for="thinking-seconds">Thinking Time</label>
+						<input id="thinking-seconds" type="number" min="0" step="1" value="0">
+					</div>
+					<button id="thinking-info-btn" class="btn ghost" style="padding:4px 8px;align-self:flex-end;" title="About Thinking Time">ℹ</button>
 				</div>
-				<button id="strict-toggle" class="toggle">Strict GA: Off</button>
 				<button id="run-btn" class="btn">Optimize</button>
 				<button id="stop-btn" class="btn stop" disabled>Stop</button>
 				<button id="reset-btn" class="btn ghost">Reset</button>
-			</div>
-			<div class="card group-status">
-				<div class="status" id="run-status">Idle</div>
-				<div style="color: var(--muted); font-size: 0.84rem;">Higher values allow larger residual searches. 0s = largest residual budget.</div>
+				<div class="status" id="run-status" style="align-self:center;"></div>
+				<div id="thinking-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
+					Higher values allow larger residual searches. 0 = largest residual budget.
+				</div>
 			</div>
 		</div>
 
@@ -482,6 +537,7 @@
 							<select id="gear-slot"></select>
 						</div>
 						<button id="legendary-toggle" class="toggle">Legendary: No</button>
+						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
 						<button id="enchantress-toggle" class="toggle active">Enchantress Available</button>
 					</div>
 
@@ -499,6 +555,15 @@
 			<section class="panel" id="target-panel">
 				<h2>Target Item</h2>
 				<div class="panel-body">
+					<div class="top-row" aria-hidden="true" style="visibility: hidden; pointer-events: none; user-select: none;">
+						<div class="field" style="width: 200px;">
+							<label>&nbsp;</label>
+							<select disabled></select>
+						</div>
+						<button class="toggle" disabled>&nbsp;</button>
+						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
+						<button class="toggle" disabled>&nbsp;</button>
+					</div>
 					<div class="affix-list" id="target-affixes"></div>
 					<div class="panel-actions">
 						<button id="add-target-affix" class="btn ghost">Add Target Affix</button>
@@ -512,32 +577,51 @@
 
 		<div class="control-strip">
 			<section class="panel">
-				<h2>Apply Last Outcome (Iterative Tracking)</h2>
+				<h2>Optimizer Result</h2>
 				<div class="panel-body">
+					<div class="results results-primary">
+						<div class="metric">
+							<span class="label">Recommended Action</span>
+							<span class="value" id="result-action">-</span>
+						</div>
+						<div class="metric">
+							<span class="label">P(Success, GA Preserved)</span>
+							<span class="value" id="result-success">-</span>
+						</div>
+						<div class="metric">
+							<span class="label">Expected Cube Steps</span>
+							<span class="value" id="result-steps">-</span>
+							<span class="note" style="font-size:0.75em;color:#aaa;display:block">Counts steps until success or GA break</span>
+						</div>
+					</div>
+
+					<div class="divider"></div>
+
+					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Apply Last Outcome</label>
 					<div class="action-grid action-grid-manual">
 						<div class="field">
 							<label for="manual-mode">Modification Type</label>
 							<select id="manual-mode">
 								<option value="added">Added</option>
 								<option value="removed">Removed</option>
-								<option value="changed">Changed</option>
+								<option value="changed">Changed (Cube)</option>
 								<option value="enchanted">Enchanted</option>
 							</select>
 						</div>
 
 						<div class="field">
-							<label for="manual-source">Affix Modified</label>
+							<label for="manual-prism">Prism Used</label>
+							<select id="manual-prism"></select>
+						</div>
+
+						<div class="field">
+							<label for="manual-source">Source Affix</label>
 							<select id="manual-source"></select>
 						</div>
 
 						<div class="field">
 							<label for="manual-result">New Affix</label>
-							<input id="manual-result" type="text" list="affix-options" placeholder="Required for added/changed/enchanted">
-						</div>
-
-						<div class="field">
-							<label for="manual-prism">Prism Used (optional)</label>
-							<select id="manual-prism"></select>
+							<input id="manual-result" type="text" list="manual-result-options" placeholder="Required for added/changed/enchanted">
 						</div>
 
 						<button id="apply-manual" class="btn warn action-submit">Apply Outcome</button>
@@ -545,69 +629,63 @@
 					<p class="legend">
 						Use this after each in-game result so the optimizer can continue from the new state.
 					</p>
-				</div>
-			</section>
 
-			<section class="panel">
-				<h2>Optimizer Result</h2>
-				<div class="panel-body">
-					<div class="results">
-						<div class="metric">
-							<span class="label">Recommended Action</span>
-							<span class="value" id="result-action">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Eventual Success Probability</span>
-							<span class="value" id="result-success">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Expected Cube Steps</span>
-							<span class="value" id="result-steps">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Std Dev (Success Paths)</span>
-							<span class="value" id="result-std">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Strategy</span>
-							<span class="value" id="result-strategy">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Feasibility</span>
-							<span class="value" id="result-feasibility">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Decomposition / ILP</span>
-							<span class="value" id="result-decomposition">-</span>
-						</div>
-						<div class="metric">
-							<span class="label">Residual Status</span>
-							<span class="value" id="result-residual">-</span>
-						</div>
-					</div>
+					<div class="divider"></div>
 
-					<div class="field">
-						<label>Solver Diagnostics</label>
-						<ul class="diagnostic-list" id="diagnostic-list"></ul>
-					</div>
+					<details class="debug-accordion">
+						<summary>Debug &amp; History</summary>
+						<div class="debug-body">
+							<div class="results" style="margin-bottom:10px;">
+								<div class="metric">
+									<span class="label">Std Dev (Success Paths)</span>
+									<span class="value" id="result-std">-</span>
+								</div>
+								<div class="metric">
+									<span class="label">Strategy</span>
+									<span class="value" id="result-strategy">-</span>
+								</div>
+								<div class="metric">
+									<span class="label">Feasibility</span>
+									<span class="value" id="result-feasibility">-</span>
+								</div>
+								<div class="metric">
+									<span class="label">Decomposition / ILP</span>
+									<span class="value" id="result-decomposition">-</span>
+								</div>
+								<div class="metric">
+									<span class="label">Residual Status</span>
+									<span class="value" id="result-residual">-</span>
+								</div>
+								<div class="metric">
+									<span class="label">Solver Iterations</span>
+									<span class="value" id="result-iterations">-</span>
+								</div>
+							</div>
 
-					<div class="field">
-						<label>One-Step Target Loss Risk</label>
-						<ul class="risk-list" id="ga-risk-list"></ul>
-					</div>
+							<div class="field">
+								<label>Solver Diagnostics</label>
+								<ul class="diagnostic-list" id="diagnostic-list"></ul>
+							</div>
 
-					<div class="field">
-						<label>Top Candidate Actions</label>
-						<ul class="candidate-list" id="candidate-list"></ul>
-					</div>
+							<div class="field">
+								<label>One-Step Target Loss Risk</label>
+								<ul class="risk-list" id="ga-risk-list"></ul>
+							</div>
 
-					<div class="field">
-						<label>Run and Action History</label>
-						<ul class="history-list" id="history-list"></ul>
-						<div style="margin-top: 8px;">
-							<button id="clear-history" class="btn ghost">Clear History</button>
+							<div class="field">
+								<label>Top Candidate Actions</label>
+								<ul class="candidate-list" id="candidate-list"></ul>
+							</div>
+
+							<div class="field">
+								<label>Run and Action History</label>
+								<ul class="history-list" id="history-list"></ul>
+								<div style="margin-top: 8px;">
+									<button id="clear-history" class="btn ghost">Clear History</button>
+								</div>
+							</div>
 						</div>
-					</div>
+					</details>
 				</div>
 			</section>
 		</div>
@@ -655,6 +733,7 @@
 	</div>
 
 	<datalist id="affix-options"></datalist>
+	<datalist id="manual-result-options"></datalist>
 
 	<script src="./gear-slot-legality.js"></script>
 	<script>
@@ -748,7 +827,7 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-23-v3-residual-greedy-vi-fix1";
+		const WORKER_VERSION = "2026-05-24-v3-ga-always-on";
 		const LEGACY_AFFIX_ID_MAP = {
 			"elemental-damage": "elemental-damage-physical",
 			"specific-resistances": "specific-resistance-physical",
@@ -791,14 +870,13 @@
 				affixes: [],
 			},
 			settings: {
-				thinkingSeconds: 10,
-				strictMode: false,
+				thinkingSeconds: 0,
 			},
 			lastAction: {
 				mode: "added",
 				sourceIndex: "",
 				resultAffixId: "",
-				prism: PRISMS[0],
+				prism: "None",
 			},
 			history: [],
 		};
@@ -816,7 +894,6 @@
 		let stopSignal = null;
 
 		const els = {
-			strictToggle: document.getElementById("strict-toggle"),
 			runBtn: document.getElementById("run-btn"),
 			stopBtn: document.getElementById("stop-btn"),
 			resetBtn: document.getElementById("reset-btn"),
@@ -847,6 +924,7 @@
 			resultFeasibility: document.getElementById("result-feasibility"),
 			resultDecomposition: document.getElementById("result-decomposition"),
 			resultResidual: document.getElementById("result-residual"),
+			resultIterations: document.getElementById("result-iterations"),
 			diagnosticList: document.getElementById("diagnostic-list"),
 			gaRiskList: document.getElementById("ga-risk-list"),
 			candidateList: document.getElementById("candidate-list"),
@@ -854,6 +932,7 @@
 			clearHistory: document.getElementById("clear-history"),
 
 			affixOptions: document.getElementById("affix-options"),
+			manualResultOptions: document.getElementById("manual-result-options"),
 		};
 
 		init();
@@ -863,6 +942,7 @@
 			bindEvents();
 			renderAll();
 			ensureWorker();
+			window.addEventListener("resize", syncTargetPanelSpacer);
 		}
 
 		function populateStaticLists() {
@@ -877,25 +957,22 @@
 			});
 
 			els.manualPrism.innerHTML = "";
-			PRISMS.forEach((prism) => {
+			["None", ...PRISMS].forEach((prism) => {
 				const option = document.createElement("option");
 				option.value = prism;
-				option.textContent = prism;
+				option.textContent = prism === "None" ? "None (Enchant / Unknown)" : prism;
 				els.manualPrism.appendChild(option);
 			});
 		}
 
 		function bindEvents() {
-			els.strictToggle.addEventListener("click", () => {
-				appState.settings.strictMode = !appState.settings.strictMode;
-				invalidatePolicyCache();
-				saveState();
-				renderSettingsControls();
-			});
-
 			els.runBtn.addEventListener("click", startRun);
 			els.stopBtn.addEventListener("click", stopRun);
 			els.resetBtn.addEventListener("click", resetState);
+			document.getElementById("thinking-info-btn").addEventListener("click", () => {
+				const box = document.getElementById("thinking-info-box");
+				box.style.display = box.style.display === "none" ? "block" : "none";
+			});
 			els.clearHistory.addEventListener("click", () => {
 				appState.history = [];
 				saveState();
@@ -903,7 +980,7 @@
 			});
 
 			els.thinkingSeconds.addEventListener("change", () => {
-				const seconds = clampInt(els.thinkingSeconds.value, 0, 86400, 10);
+				const seconds = clampInt(els.thinkingSeconds.value, 0, 86400, 0);
 				appState.settings.thinkingSeconds = seconds;
 				saveState();
 				renderStatus("Idle", "");
@@ -955,11 +1032,13 @@
 			els.manualMode.addEventListener("change", () => {
 				appState.lastAction.mode = els.manualMode.value;
 				saveState();
+				renderManualControls();
 			});
 
 			els.manualSource.addEventListener("change", () => {
 				appState.lastAction.sourceIndex = els.manualSource.value;
 				saveState();
+				renderManualControls();
 			});
 
 			els.manualResult.addEventListener("change", () => {
@@ -971,6 +1050,7 @@
 			els.manualPrism.addEventListener("change", () => {
 				appState.lastAction.prism = els.manualPrism.value;
 				saveState();
+				renderManualControls();
 			});
 
 			els.applyManual.addEventListener("click", applyManualOutcome);
@@ -1006,10 +1086,7 @@
 						Atomics.store(stopSignal, 0, 0);
 					}
 					applyWorkerResult(message, true);
-					const statusText = message.stoppedByUser
-						? `Stopped at ${message.iterations} iterations`
-						: `Done in ${message.iterations} iterations`;
-					renderStatus(statusText, "done");
+					renderStatus(message.stoppedByUser ? "Stopped." : "Done.", "done");
 					setRunButtons();
 				} else if (message.type === "error") {
 					runInProgress = false;
@@ -1050,7 +1127,7 @@
 				Atomics.store(stopSignal, 0, 0);
 			}
 
-			const thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 10);
+			const thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 			const timeMs = thinkingSeconds === 0 ? 0 : thinkingSeconds * 1000;
 			const currentGA = runState.affixes.filter((entry) => entry.isGA).map((entry) => entry.affixId);
 
@@ -1071,7 +1148,7 @@
 						.filter((entry) => entry.needsImprovement)
 						.map((entry) => entry.affixId),
 					sacrificeAffixId: "",
-					strictMode: !!appState.settings.strictMode,
+					strictMode: true,
 				},
 				timeMs,
 				stopBuffer,
@@ -1120,6 +1197,11 @@
 			els.resultSuccess.textContent = percentOrDash(message.successProb);
 			els.resultSteps.textContent = numberOrDash(message.expectedSteps);
 			els.resultStd.textContent = numberOrDash(message.stdDev);
+			if (Number.isFinite(message.iterations)) {
+				els.resultIterations.textContent = message.stoppedByUser
+					? `${message.iterations} (stopped)`
+					: String(message.iterations);
+			}
 
 			renderSolverDiagnostics(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
@@ -1133,7 +1215,6 @@
 					action: message.action,
 					successProb: message.successProb,
 					expectedSteps: message.expectedSteps,
-					strictMode: !!appState.settings.strictMode,
 					stoppedByUser: !!message.stoppedByUser,
 				});
 				saveState();
@@ -1149,7 +1230,7 @@
 				mode: appState.lastAction.mode,
 				sourceIndex: "",
 				resultAffixId: "",
-				prism: PRISMS.includes(action.prism) ? action.prism : appState.lastAction.prism,
+				prism: PRISMS.includes(action.prism) ? action.prism : (appState.lastAction.prism || "None"),
 			};
 
 			if (action.type === "add") {
@@ -1166,6 +1247,7 @@
 
 			if (action.type === "enchant") {
 				next.mode = "enchanted";
+				next.prism = "None";
 				if (Number.isInteger(action.sourceIndex) && action.sourceIndex >= 0 && action.sourceIndex < appState.current.affixes.length) {
 					next.sourceIndex = String(action.sourceIndex);
 				}
@@ -1198,8 +1280,7 @@
 
 			risks.forEach((risk) => {
 				const li = document.createElement("li");
-				const suffix = risk.requireGA ? " (GA-required target)" : "";
-				li.textContent = `${risk.name}${suffix}: ${(risk.risk * 100).toFixed(2)}% chance to become unsatisfied this step`;
+				li.textContent = `${risk.name}: ${(risk.risk * 100).toFixed(2)}% chance to become unsatisfied this step`;
 				els.gaRiskList.appendChild(li);
 			});
 		}
@@ -1448,10 +1529,17 @@
 			renderStatus("Reset complete.", "done");
 		}
 
+		function syncTargetPanelSpacer() {
+			const realRow = document.querySelector("#current-panel .top-row");
+			const spacer = document.querySelector("#target-panel .top-row[aria-hidden]");
+			if (realRow && spacer) {
+				spacer.style.height = realRow.offsetHeight + "px";
+			}
+		}
+
 		function renderAll() {
 			sanitizeState();
 			renderAffixOptions();
-			renderSettingsControls();
 			renderCurrentControls();
 			renderCurrentAffixes();
 			renderTargetAffixes();
@@ -1461,12 +1549,7 @@
 			renderCandidates(lastDiagnostics);
 			renderHistory();
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
-		}
-
-		function renderSettingsControls() {
-			els.strictToggle.classList.toggle("active", !!appState.settings.strictMode);
-			els.strictToggle.textContent = appState.settings.strictMode ? "Target GA Strict" : "Target GA Flexible";
-			els.strictToggle.disabled = false;
+			requestAnimationFrame(syncTargetPanelSpacer);
 		}
 
 		function renderCurrentControls() {
@@ -1487,7 +1570,7 @@
 				.slice(0, 4)
 				.map((entry) => ({
 					affixId: entry.affixId,
-					requireGA: !!entry.isGA,
+					requireGA: false,
 					needsImprovement: false,
 				}));
 
@@ -1496,7 +1579,6 @@
 			}
 
 			appState.target.affixes = nextTargetAffixes;
-			normalizeTargetGARequirements();
 			saveState();
 			renderTargetAffixes();
 		}
@@ -1597,6 +1679,9 @@
 						appState.current.enchantressAvailable = false;
 					} else {
 						appState.current.affixes[index].isEnchanted = false;
+						if (!appState.current.affixes.some((a) => a.isEnchanted)) {
+							appState.current.enchantressAvailable = true;
+						}
 					}
 					saveState();
 					renderCurrentControls();
@@ -1610,6 +1695,9 @@
 				removeBtn.textContent = "Remove";
 				removeBtn.addEventListener("click", () => {
 					appState.current.affixes.splice(index, 1);
+					if (!appState.current.affixes.some((a) => a.isEnchanted)) {
+						appState.current.enchantressAvailable = true;
+					}
 					normalizeTargetGARequirements();
 					saveState();
 					renderCurrentControls();
@@ -1654,25 +1742,6 @@
 					renderTargetAffixes();
 				});
 
-				const reqWrap = document.createElement("label");
-				reqWrap.className = "checkbox-chip";
-				const req = document.createElement("input");
-				req.type = "checkbox";
-				req.checked = !!entry.requireGA;
-				const canRequireGA = canRequireTargetGA(index, entry.affixId);
-				req.disabled = !entry.requireGA && !canRequireGA;
-				req.addEventListener("change", () => {
-					if (req.checked && !canRequireTargetGA(index, appState.target.affixes[index].affixId)) {
-						req.checked = false;
-						return;
-					}
-					appState.target.affixes[index].requireGA = req.checked;
-					saveState();
-					renderTargetAffixes();
-				});
-				reqWrap.appendChild(req);
-				reqWrap.appendChild(document.createTextNode("Require GA"));
-
 				const improveWrap = document.createElement("label");
 				improveWrap.className = "checkbox-chip";
 				const improve = document.createElement("input");
@@ -1697,13 +1766,40 @@
 				});
 
 				row.appendChild(input);
-				row.appendChild(reqWrap);
 				row.appendChild(improveWrap);
 				row.appendChild(removeBtn);
 				els.targetAffixes.appendChild(row);
 			});
 
 			els.addTargetAffix.disabled = appState.target.affixes.length >= 4;
+		}
+
+		function getManualSourceAffixes(mode, prism) {
+			return appState.current.affixes
+				.map((entry, index) => ({ index, entry }))
+				.filter(({ entry }) => {
+					if (mode === "added") { return false; }
+					if ((mode === "removed" || mode === "changed") && entry.isEnchanted) { return false; }
+					if (prism && prism !== "None" && mode === "changed") {
+						const affix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+						if (!affix || !affix.categories.includes(prism)) { return false; }
+					}
+					return true;
+				});
+		}
+
+		function getManualResultAffixes(mode, prism, sourceIndex) {
+			if (mode === "removed") { return []; }
+			const currentIds = new Set(
+				appState.current.affixes
+					.map((e, i) => (i !== sourceIndex ? e.affixId : null))
+					.filter(Boolean)
+			);
+			let candidates = AFFIXES.filter((a) => isAffixLegalForCurrentSlot(a) && !currentIds.has(a.id));
+			if (prism && prism !== "None" && (mode === "changed" || mode === "added")) {
+				candidates = candidates.filter((a) => a.categories.includes(prism));
+			}
+			return candidates;
 		}
 
 		function renderManualControls() {
@@ -1715,25 +1811,52 @@
 				appState.lastAction.mode = "changed";
 			}
 
-			els.manualMode.value = appState.lastAction.mode;
-			els.manualPrism.value = appState.lastAction.prism;
-			els.manualResult.value = affixName(appState.lastAction.resultAffixId);
+			const mode = appState.lastAction.mode;
 
+			// Lock prism to None for enchanted
+			const isEnchanted = mode === "enchanted";
+			if (isEnchanted) {
+				appState.lastAction.prism = "None";
+			}
+			const prism = appState.lastAction.prism;
+
+			els.manualMode.value = mode;
+			els.manualPrism.value = prism;
+			els.manualPrism.disabled = isEnchanted;
+
+			// Source affix options
+			const sourceAffixes = getManualSourceAffixes(mode, prism);
 			els.manualSource.innerHTML = "";
-			const none = document.createElement("option");
-			none.value = "";
-			none.textContent = "Select affix";
-			els.manualSource.appendChild(none);
-
-			appState.current.affixes.forEach((entry, index) => {
+			const noneOpt = document.createElement("option");
+			noneOpt.value = "";
+			noneOpt.textContent = mode === "added" ? "(not applicable)" : "Select affix";
+			els.manualSource.appendChild(noneOpt);
+			sourceAffixes.forEach(({ index, entry }) => {
 				const option = document.createElement("option");
 				option.value = String(index);
 				option.textContent = `${index + 1}. ${affixName(entry.affixId)}${entry.isGA ? " [GA]" : ""}${entry.isEnchanted ? " [Ench]" : ""}`;
 				els.manualSource.appendChild(option);
 			});
+			els.manualSource.disabled = mode === "added";
 
-			const val = String(appState.lastAction.sourceIndex || "");
-			els.manualSource.value = Array.from(els.manualSource.options).some((option) => option.value === val) ? val : "";
+			const savedSource = String(appState.lastAction.sourceIndex || "");
+			const sourceValid = Array.from(els.manualSource.options).some((o) => o.value === savedSource && savedSource !== "");
+			els.manualSource.value = sourceValid ? savedSource : "";
+
+			const sourceIndex = sourceValid ? Number(savedSource) : null;
+
+			// Result affix datalist
+			const resultAffixes = getManualResultAffixes(mode, prism, sourceIndex);
+			els.manualResultOptions.innerHTML = "";
+			resultAffixes.forEach((affix) => {
+				const opt = document.createElement("option");
+				opt.value = affix.name;
+				els.manualResultOptions.appendChild(opt);
+			});
+
+			const resultNeeded = mode !== "removed";
+			els.manualResult.disabled = !resultNeeded;
+			els.manualResult.value = resultNeeded ? affixName(appState.lastAction.resultAffixId) : "";
 		}
 
 		function applyManualOutcome() {
@@ -1844,9 +1967,8 @@
 				const act = entry.action ? describeAction(entry.action) : "No action";
 				const p = Number.isFinite(entry.successProb) ? `${(entry.successProb * 100).toFixed(1)}%` : "-";
 				const s = Number.isFinite(entry.expectedSteps) ? entry.expectedSteps.toFixed(2) : "-";
-				const mode = entry.strictMode ? "strict" : "flexible";
 				const stopSuffix = entry.stoppedByUser ? " (stopped)" : "";
-				return `${stamp} | run ${mode} | ${act} | p ${p} | steps ${s} | iter ${entry.iterations}${stopSuffix}`;
+				return `${stamp} | run | ${act} | p ${p} | steps ${s} | iter ${entry.iterations}${stopSuffix}`;
 			}
 
 			if (entry.type === "manual") {
@@ -1896,21 +2018,18 @@
 				.slice(0, 4)
 				.map((entry) => ({
 					affixId: normalizeAffixId(entry.affixId),
-					requireGA: !!entry.requireGA,
+					requireGA: false,
 					needsImprovement: !!entry.needsImprovement,
 				}));
 
-			normalizeTargetGARequirements();
-
-			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 10);
-			appState.settings.strictMode = !!appState.settings.strictMode;
+			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 
 			appState.lastAction.mode = ["added", "removed", "changed", "enchanted"].includes(appState.lastAction.mode)
 				? appState.lastAction.mode
 				: "added";
-			appState.lastAction.prism = PRISMS.includes(appState.lastAction.prism)
+			appState.lastAction.prism = ["None", ...PRISMS].includes(appState.lastAction.prism)
 				? appState.lastAction.prism
-				: PRISMS[0];
+				: "None";
 			appState.lastAction.resultAffixId = AFFIX_BY_ID[appState.lastAction.resultAffixId]
 				? appState.lastAction.resultAffixId
 				: normalizeAffixId(appState.lastAction.resultAffixId)
@@ -1944,7 +2063,7 @@
 					.filter((entry) => entry.affixId)
 					.map((entry) => ({
 						affixId: entry.affixId,
-						requireGA: !!entry.requireGA,
+						requireGA: false,
 						needsImprovement: !!entry.needsImprovement,
 					})),
 			};

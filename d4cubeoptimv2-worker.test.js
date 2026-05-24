@@ -107,7 +107,7 @@ function buildOneMissingFixture() {
 
   const target = {
     affixes: [
-      { affixId: byName["Armor"].id, requireGA: true },
+      { affixId: byName["Armor"].id, requireGA: false },
       { affixId: byName["Movement Speed"].id, requireGA: false },
       { affixId: byName["Maximum Evade Charges"].id, requireGA: false },
     ],
@@ -135,7 +135,7 @@ function buildGAEnchantTransferFixture() {
 
   const target = {
     affixes: [
-      { affixId: byName["Movement Speed"].id, requireGA: true },
+      { affixId: byName["Movement Speed"].id, requireGA: false },
       { affixId: byName["Life on Hit"].id, requireGA: false },
     ],
   };
@@ -171,7 +171,7 @@ test("stateKeyV2 is order-independent for affixes and needs-improvement markers"
   assert.equal(worker.stateKeyV2(stateA), worker.stateKeyV2(stateB));
 });
 
-test("enchant outcomes preserve GA while cube-touch outcomes destroy it", () => {
+test("enchant outcomes preserve GA only when the affix does not change, cube-touch outcomes always destroy it", () => {
   const { data, byName } = buildSimpleFixture();
   const target = {
     affixes: [{ affixId: byName["Movement Speed"].id, requireGA: false }],
@@ -189,22 +189,40 @@ test("enchant outcomes preserve GA while cube-touch outcomes destroy it", () => 
     enchantressAvailable: true,
   });
 
-  const enchantOutcomes = worker.getActionOutcomesV2(state, {
+  // Enchanting to a different affix: GA is NOT preserved (affix changes)
+  const enchantChangingOutcomes = worker.getActionOutcomesV2(state, {
     type: "enchant",
     sourceIndex: 0,
     targetAffixId: byName["Movement Speed"].id,
   }, env);
 
-  assert.equal(enchantOutcomes.length, 1);
-  assert.deepEqual(enchantOutcomes[0].state.affixes, [
+  assert.equal(enchantChangingOutcomes.length, 1);
+  assert.deepEqual(enchantChangingOutcomes[0].state.affixes, [
     {
       affixId: byName["Movement Speed"].id,
+      isGA: false,
+      isEnchanted: true,
+    },
+  ]);
+  assert.equal(enchantChangingOutcomes[0].state.enchantressAvailable, false);
+
+  // Enchanting to the same affix: GA IS preserved
+  const enchantSameOutcomes = worker.getActionOutcomesV2(state, {
+    type: "enchant",
+    sourceIndex: 0,
+    targetAffixId: byName["Armor"].id,
+  }, env);
+
+  assert.equal(enchantSameOutcomes.length, 1);
+  assert.deepEqual(enchantSameOutcomes[0].state.affixes, [
+    {
+      affixId: byName["Armor"].id,
       isGA: true,
       isEnchanted: true,
     },
   ]);
-  assert.equal(enchantOutcomes[0].state.enchantressAvailable, false);
 
+  // Cube outcomes always destroy GA
   const cubeOutcomes = worker.getActionOutcomesV2(state, {
     type: "focused",
     prism: "Protector",
@@ -265,10 +283,10 @@ test("v2 defers enchanting while more than one target affix is still unresolved"
   assert.equal(actions.some((action) => action.type === "enchant"), false);
 });
 
-test("v2 allows GA transfer by enchant instead of treating target GA identity as impossible", () => {
+test("v2 can solve a one-missing scenario via enchant when enchantress is available", () => {
   const { data, currentState, target } = buildGAEnchantTransferFixture();
   const env = worker.buildEnvV2(data, {
-    currentGAAffixes: [currentState.affixes[0].affixId],
+    currentGAAffixes: [],
     unsatisfactoryAffixIds: [],
     strictMode: false,
     sacrificeAffixId: "",
@@ -276,26 +294,24 @@ test("v2 allows GA transfer by enchant instead of treating target GA identity as
 
   assert.equal(env.impossibleTargetGAReason, "");
 
-  const actions = worker.getValidActionsV2(currentState, target, env);
-  assert.deepEqual(actions, [{
-    type: "enchant",
-    sourceIndex: 0,
-    targetAffixId: target.affixes[0].affixId,
-  }]);
-
   const result = worker.optimizeScenarioV2({
     state: currentState,
     target,
     data,
     gaConfig: {
-      currentGAAffixes: [currentState.affixes[0].affixId],
+      currentGAAffixes: [],
       unsatisfactoryAffixIds: [],
       strictMode: false,
       sacrificeAffixId: "",
     },
   });
 
-  assert.deepEqual(result.action, actions[0]);
+  // Enchanting armor (index 0) to movement-speed is the optimal one-step solution
+  assert.deepEqual(result.action, {
+    type: "enchant",
+    sourceIndex: 0,
+    targetAffixId: target.affixes[0].affixId,
+  });
   approxEqual(result.successProb, 1);
 });
 

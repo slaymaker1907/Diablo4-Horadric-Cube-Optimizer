@@ -113,8 +113,7 @@ function getCategorySignatureForAffix(affixId, env) {
 }
 
 function getTotalRequiredGACount(env) {
-  return Object.values(env && env.targetGARequired ? env.targetGARequired : {})
-    .reduce((sum, count) => sum + count, 0);
+  return 0;
 }
 
 function getMissingTargetAffixIdsV2(state, env) {
@@ -146,15 +145,7 @@ function getMatchedTargetFlagsV2(state, env) {
 }
 
 function getMissingRequiredGAIdsV2(state, env) {
-  const gaCounts = getAffixCountsV2(state && state.affixes, (entry) => !!entry.isGA);
   const missing = [];
-
-  for (const [affixId, requiredCount] of Object.entries(env && env.targetGARequired ? env.targetGARequired : {})) {
-    const have = gaCounts[affixId] || 0;
-    for (let index = have; index < requiredCount; index += 1) {
-      missing.push(affixId);
-    }
-  }
 
   return missing;
 }
@@ -299,16 +290,12 @@ function isSuccessStateV2(state, target, env) {
   }
 
   const stateCounts = getAffixCountsV2(state && state.affixes);
-  const stateGACounts = getAffixCountsV2(state && state.affixes, (entry) => !!entry.isGA);
 
   for (const requirement of (target && Array.isArray(target.affixes)) ? target.affixes : []) {
     if (!requirement || !requirement.affixId) {
       continue;
     }
     if ((stateCounts[requirement.affixId] || 0) < 1) {
-      return false;
-    }
-    if (requirement.requireGA && (stateGACounts[requirement.affixId] || 0) < 1) {
       return false;
     }
   }
@@ -415,13 +402,8 @@ function isDisposableEnchantSource(state, sourceIndex, env) {
   }
 
   const stateCounts = getAffixCountsV2(state.affixes);
-  const stateGACounts = getAffixCountsV2(state.affixes, (item) => !!item.isGA);
 
   if (((stateCounts[entry.affixId] || 0) - 1) < (env.targetCounts[entry.affixId] || 0)) {
-    return false;
-  }
-
-  if (entry.isGA && ((stateGACounts[entry.affixId] || 0) - 1) < (env.targetGARequired[entry.affixId] || 0)) {
     return false;
   }
 

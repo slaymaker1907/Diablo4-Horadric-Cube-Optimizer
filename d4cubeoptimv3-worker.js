@@ -10,7 +10,7 @@
  *
  * Current implementation status:
  * - Phase 0: worker protocol, diagnostics contract, and module scaffolding.
- * - Phase 1: feasibility checks F1-F7 with structured diagnostics.
+ * - Phase 1: feasibility checks F4-F7 with structured diagnostics (F1-F3 removed: requireGA no longer applies).
  * - Phase 2: closed-form common-case subplan classification and expected-step
  *   formulas for Cases A-G.
  * - Phase 3: scoped exact ILP solver for the assignment and scheduling layer.
@@ -134,25 +134,6 @@ function getCurrentGACountsV3(state) {
 
 function getTotalCurrentGACountV3(state) {
   return getCurrentAffixes(state).filter((entry) => entry.isGA).length;
-}
-
-function getTotalRequiredGACountV3(env) {
-  return Object.values(env && env.targetGARequired ? env.targetGARequired : {})
-    .reduce((sum, count) => sum + count, 0);
-}
-
-function getMissingRequiredGAIdsV3(state, env) {
-  const currentGACounts = getCurrentGACountsV3(state);
-  const missing = [];
-
-  for (const [affixId, requiredCount] of Object.entries(env && env.targetGARequired ? env.targetGARequired : {})) {
-    const have = currentGACounts[affixId] || 0;
-    for (let index = have; index < requiredCount; index += 1) {
-      missing.push(affixId);
-    }
-  }
-
-  return missing;
 }
 
 function getImproveAffixIdsV3(target, gaConfig) {
@@ -279,21 +260,18 @@ function getCategorySuccessDenominatorV3(state, category, env, options = {}) {
   return Math.max(0, poolSize - presentCount);
 }
 
-function getDisposableGADonorIndexesV3(state, env) {
-  const requiredGAIds = new Set(Object.keys(env && env.targetGARequired ? env.targetGARequired : {}));
-  const donors = [];
 
-  getCurrentAffixes(state).forEach((entry, index) => {
-    if (!entry.isGA || entry.isEnchanted) {
-      return;
-    }
-    if (requiredGAIds.has(entry.affixId)) {
-      return;
-    }
-    donors.push(index);
+// Returns true when using `prism` for a focused/chaotic/remove cube action
+// would randomly put a protected GA at risk because that GA's affix is also
+// in the prism's category.  Cases B, C, F, G must skip prisms for which this
+// returns true, routing them to the residual solver instead.
+function isCategoryFocusedBlockedByGAV3(state, prism, env) {
+  if (!env || !env.strictMode || !env.gaRequiredCounts) { return false; }
+  return getCurrentAffixes(state).some((entry) => {
+    if (!entry.isGA || entry.isEnchanted) { return false; }
+    if (!(env.gaRequiredCounts[entry.affixId] > 0)) { return false; }
+    return affixHasCategoryV3(entry.affixId, prism, env);
   });
-
-  return donors;
 }
 
 function isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env) {
@@ -382,21 +360,9 @@ function isDiscretionaryEnchantSlotV3(state, target, gaConfig, slotIndex, env, o
     return false;
   }
 
-  if (hostEntry.isGA && (env.targetGARequired[hostEntry.affixId] || 0) > 0) {
-    return false;
-  }
-
   return true;
 }
 
-function getForcedGAEnchantAffixIdV3(feasibility) {
-  const missing = normalizeIdList(
-    feasibility && feasibility.details && Array.isArray(feasibility.details.missingRequiredGAIds)
-      ? feasibility.details.missingRequiredGAIds
-      : []
-  );
-  return missing.length === 1 ? missing[0] : "";
-}
 
 function getClosedFormResidualReasonV3(state, targetEntry, slotIndex, env, options = {}) {
   const maxAffixSlots = Number.isInteger(options.maxAffixSlots)
@@ -446,34 +412,14 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     : getMaxAffixSlotsV3(state, options.data || null);
   const hostEntry = getHostEntryV3(state, slotIndex);
   const targetCategories = getAffixCategoriesV3(targetEntry.affixId, env);
-  const feasibility = options.feasibility || buildFeasibilitySuccess({});
-  const donorIndexes = feasibility && feasibility.details && Array.isArray(feasibility.details.donorIndexes)
-    ? feasibility.details.donorIndexes
-    : [];
-  const forcedGAEnchantAffixId = getForcedGAEnchantAffixIdV3(feasibility);
 
   if (!Number.isInteger(slotIndex) || slotIndex < 0 || slotIndex >= maxAffixSlots || targetCategories.length === 0) {
     return candidates;
   }
 
-  if (hostEntry && targetEntry.requireGA && forcedGAEnchantAffixId === targetEntry.affixId && donorIndexes.includes(slotIndex)) {
-    candidates.push(createClosedFormCandidateV3(
-      CLOSED_FORM_CASE_IDS.D,
-      slotIndex,
-      targetEntry,
-      computeDeterministicEnchantExpectedStepsV3(),
-      {
-        actionType: "enchant",
-        sourceIndex: slotIndex,
-      }
-    ));
-  }
-
   if (
     hostEntry
-    && !targetEntry.requireGA
     && options.allowDiscretionaryEnchant === true
-    && !forcedGAEnchantAffixId
     && state && state.enchantressAvailable
     && isDiscretionaryEnchantSlotV3(state, options.target || null, options.gaConfig || null, slotIndex, env, options)
   ) {
@@ -519,6 +465,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
 
   if (targetEntry.needsImprovement && hostEntry.affixId === targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
+      if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       const expectedSteps = options.touchOnlyImprovement
         ? 1
         : computeCaseBExpectedStepsV3(getCategorySuccessDenominatorV3(state, prism, env));
@@ -536,6 +483,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
 
   if (sharedCategories.length > 0 && hostEntry.affixId !== targetEntry.affixId && !hostEntry.isGA) {
     for (const prism of sharedCategories) {
+      if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env);
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -550,8 +498,9 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     }
   }
 
-  if (sharedCategories.length > 0 && hostEntry.isGA && !targetEntry.requireGA) {
+  if (sharedCategories.length > 0 && hostEntry.isGA) {
     for (const prism of sharedCategories) {
+      if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env);
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -572,6 +521,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
 
     for (const removePrism of removableCategories) {
       for (const prism of targetCategories) {
+        if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
         const n = getCategorySuccessDenominatorV3(state, prism, env, { ignoreIndex: slotIndex });
         const expectedSteps = computeCaseCExpectedStepsV3(n);
         if (Number.isFinite(expectedSteps)) {
@@ -634,10 +584,6 @@ function buildClosedFormPlanTableV3(state, target, data, gaConfig, options = {})
 function isTargetSatisfiedAtSlotV3(state, targetEntry, slotIndex) {
   const hostEntry = getHostEntryV3(state, slotIndex);
   if (!hostEntry || hostEntry.affixId !== targetEntry.affixId) {
-    return false;
-  }
-
-  if (targetEntry.requireGA && !hostEntry.isGA) {
     return false;
   }
 
@@ -707,10 +653,6 @@ function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candid
     || candidate.caseId === CLOSED_FORM_CASE_IDS.F
     || candidate.caseId === CLOSED_FORM_CASE_IDS.G
   );
-
-  if (targetEntry.requireGA && candidate.caseId !== CLOSED_FORM_CASE_IDS.D) {
-    return null;
-  }
 
   const prism = candidate.prism || (targetCategories.length === 1 ? targetCategories[0] : "");
   if (requiresConcretePrism && !prism) {
@@ -1687,10 +1629,6 @@ function isResidualTargetResolvedV3(state, targetEntry) {
   if (matching.length === 0) {
     return false;
   }
-  if (targetEntry.requireGA && !matching.some((entry) => entry.isGA)) {
-    return false;
-  }
-
   if (targetEntry.needsImprovement) {
     const unsatisfactory = new Set(Array.isArray(state && state.unsatisfactoryAffixIds) ? state.unsatisfactoryAffixIds : []);
     if (unsatisfactory.has(targetEntry.affixId)) {
@@ -2292,57 +2230,10 @@ function analyzeFeasibilityV3(state, target, data, gaConfig) {
   const env = sharedWorker.buildEnv(data || {}, gaConfig || {}, target || {});
   const targetEntries = getTargetEntries(target);
   const maxAffixSlots = getMaxAffixSlotsV3(state, data);
-  const requiredGAIds = Object.keys(env.targetGARequired || {}).sort();
-  const totalRequiredGACount = getTotalRequiredGACountV3(env);
-  const totalCurrentGACount = getTotalCurrentGACountV3(state);
-  const missingRequiredGAIds = getMissingRequiredGAIdsV3(state, env);
-  const donorIndexes = getDisposableGADonorIndexesV3(state, env);
   const improveAffixIds = getImproveAffixIdsV3(target, gaConfig);
   const forbiddenAffixIds = getForbiddenAffixIdsV3(target, gaConfig);
   const protectedAffixIds = getProtectedAffixIdsV3(target, gaConfig);
   const targetIdSet = new Set(targetEntries.map((entry) => entry.affixId));
-
-  if (totalCurrentGACount < totalRequiredGACount) {
-    return buildFeasibilityFailure(
-      "F1",
-      `Initial GA count is too low: need ${totalRequiredGACount}, but the source item only has ${totalCurrentGACount}.`,
-      { totalCurrentGACount, totalRequiredGACount }
-    );
-  }
-
-  if (missingRequiredGAIds.length > 1) {
-    return buildFeasibilityFailure(
-      "F2",
-      `Too many required GA identities are missing from the source item: ${missingRequiredGAIds.join(", ")}.`,
-      { missingRequiredGAIds, donorIndexes }
-    );
-  }
-
-  if (missingRequiredGAIds.length === 1 && donorIndexes.length === 0) {
-    return buildFeasibilityFailure(
-      "F2",
-      `Missing required GA ${sharedWorker.affixName(missingRequiredGAIds[0], env)} cannot be created because no disposable unlocked GA host exists for the one-time enchant.`,
-      { missingRequiredGAIds, donorIndexes }
-    );
-  }
-
-  if (missingRequiredGAIds.length === 1) {
-    const missingTarget = missingRequiredGAIds[0];
-    const conflictingImproveEntry = getCurrentAffixes(state).find((entry) => (
-      entry.isGA && improveAffixIds.has(entry.affixId) && entry.affixId !== missingTarget
-    ));
-
-    if (conflictingImproveEntry) {
-      return buildFeasibilityFailure(
-        "F3",
-        `${sharedWorker.affixName(conflictingImproveEntry.affixId, env)} is GA and marked for improvement, but the one-time enchant is already needed to move GA onto ${sharedWorker.affixName(missingTarget, env)}.`,
-        {
-          missingRequiredGAIds,
-          conflictingImproveAffixId: conflictingImproveEntry.affixId,
-        }
-      );
-    }
-  }
 
   const distinctRequiredTargetCount = targetEntries.length;
   const additionalProtectedCount = Array.from(protectedAffixIds)
@@ -2412,11 +2303,6 @@ function analyzeFeasibilityV3(state, target, data, gaConfig) {
 
   return buildFeasibilitySuccess({
     maxAffixSlots,
-    requiredGAIds,
-    totalCurrentGACount,
-    totalRequiredGACount,
-    missingRequiredGAIds,
-    donorIndexes,
     protectedAffixIds: Array.from(protectedAffixIds),
     forbiddenAffixIds: Array.from(forbiddenAffixIds),
     improveAffixIds: Array.from(improveAffixIds),
@@ -2637,8 +2523,6 @@ if (typeof module !== "undefined" && module.exports) {
     getHostEntryV3,
     getCurrentGACountsV3,
     getTotalCurrentGACountV3,
-    getTotalRequiredGACountV3,
-    getMissingRequiredGAIdsV3,
     getImproveAffixIdsV3,
     getForbiddenAffixIdsV3,
     getProtectedAffixIdsV3,
@@ -2650,7 +2534,6 @@ if (typeof module !== "undefined" && module.exports) {
     getCategoryPoolSizeV3,
     countPresentAffixesInCategoryV3,
     getCategorySuccessDenominatorV3,
-    getDisposableGADonorIndexesV3,
     isUniqueUnlockedCategoryHostV3,
     computeCaseAExpectedStepsV3,
     computeCaseBExpectedStepsV3,
@@ -2658,7 +2541,6 @@ if (typeof module !== "undefined" && module.exports) {
     computeDeterministicEnchantExpectedStepsV3,
     isEmptyHostSlotV3,
     isDiscretionaryEnchantSlotV3,
-    getForcedGAEnchantAffixIdV3,
     getClosedFormResidualReasonV3,
     getClosedFormPlanCandidatesV3,
     chooseBestClosedFormPlanV3,

@@ -592,7 +592,6 @@ function buildEnv(data, gaConfig, target) {
   const wantedByFamily = Object.create(null);
 
   const gaRequiredCounts = Object.create(null);
-  const gaSacrificeId = (gaConfig && gaConfig.sacrificeAffixId) || "";
   const currentGAList = (gaConfig && Array.isArray(gaConfig.currentGAAffixes))
     ? gaConfig.currentGAAffixes
     : [];
@@ -606,7 +605,6 @@ function buildEnv(data, gaConfig, target) {
   }
 
   const targetCounts = Object.create(null);
-  const targetGARequired = Object.create(null);
   const targetAffixes = (target && Array.isArray(target.affixes)) ? target.affixes : [];
 
   for (const req of targetAffixes) {
@@ -620,14 +618,16 @@ function buildEnv(data, gaConfig, target) {
     if (family && !wantedByFamily[family]) {
       wantedByFamily[family] = req.affixId;
     }
-
-    if (req.requireGA) {
-      targetGARequired[req.affixId] = (targetGARequired[req.affixId] || 0) + 1;
-    }
   }
 
-  for (const [affixId, requiredCount] of Object.entries(targetGARequired)) {
-    gaRequiredCounts[affixId] = requiredCount;
+  // Implicit GA protection: any affix that is both a source GA and a target
+  // requirement is implicitly protected. This preserves GAs that already exist
+  // on the item and are needed, without requiring an explicit requireGA flag.
+  for (const [affixId, sourceCount] of Object.entries(sourceGACounts)) {
+    const targetCount = targetCounts[affixId] || 0;
+    if (targetCount > 0) {
+      gaRequiredCounts[affixId] = Math.min(sourceCount, targetCount);
+    }
   }
 
   const familyOtherId = {
@@ -656,7 +656,6 @@ function buildEnv(data, gaConfig, target) {
   }
 
   const impossibleTargetFamilyReason = getImpossibleTargetFamilyReason(targetCounts, affixMap);
-  const impossibleTargetGAReason = impossibleTargetFamilyReason || getImpossibleTargetGAReason(sourceGACounts, targetGARequired, affixMap);
 
   return {
     affixMap,
@@ -668,9 +667,8 @@ function buildEnv(data, gaConfig, target) {
     categoryWeightTotalsBySlot,
     targetAffixSet: new Set(data.targetAffixIds || []),
     gaRequiredCounts,
-    gaSacrificeId,
     sourceGACounts,
-    impossibleTargetGAReason,
+    impossibleTargetGAReason: impossibleTargetFamilyReason,
     validActionsCache: new Map(),
     eligibleByCategoryCache: new Map(),
     actionOutcomeCache: new Map(),
@@ -684,7 +682,6 @@ function buildEnv(data, gaConfig, target) {
     strictMode: !!(gaConfig && gaConfig.strictMode),
     rulesEnabled: !gaConfig || gaConfig.rulesEnabled !== false,
     targetCounts,
-    targetGARequired,
   };
 }
 
@@ -721,29 +718,6 @@ function getCategoryAffixesForState(state, env, categoryName) {
   }
 
   return (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
-}
-
-/**
- * Check whether a GA requirement can be met by the source item.
- * Impossible when the source never had the affix as GA.
- *
- * @param {Object} sourceGACounts   - Map of affixId → GA count on source.
- * @param {Object} targetGARequired - Map of affixId → required GA count.
- * @param {Object} affixMap
- * @returns {string} Non-empty reason string if impossible, otherwise "".
- */
-function getImpossibleTargetGAReason(sourceGACounts, targetGARequired, affixMap) {
-  for (const [affixId, requiredCount] of Object.entries(targetGARequired)) {
-    if ((sourceGACounts[affixId] || 0) >= requiredCount) {
-      continue;
-    }
-
-    const affix = affixMap[affixId];
-    const name = affix ? affix.name : affixId;
-    return `Impossible target: ${name} cannot be required as GA because it was not GA on the source item.`;
-  }
-
-  return "";
 }
 
 /**
@@ -912,13 +886,6 @@ function isTerminal(state, target, env) {
   for (const requirement of target.affixes) {
     if (!stateCounts[requirement.affixId]) {
       return { terminal: false, success: false };
-    }
-
-    if (requirement.requireGA) {
-      const gaCount = state.affixes.filter((entry) => entry.affixId === requirement.affixId && entry.isGA).length;
-      if (gaCount < 1) {
-        return { terminal: false, success: false };
-      }
     }
   }
 
@@ -1471,7 +1438,7 @@ function getActionOutcomes(state, action, env) {
     const next = cloneState(state);
     next.affixes[action.sourceIndex] = {
       affixId: canonicalizeAffixIdForState(action.targetAffixId, env),
-      isGA: !!source.isGA,
+      isGA: action.targetAffixId === source.affixId ? !!source.isGA : false,
       isEnchanted: true,
     };
     next.enchantressAvailable = false;
@@ -2105,16 +2072,14 @@ function getOneStepTargetLossRisk(state, action, env, target) {
   const risks = [];
 
   for (const [affixId, requiredCount] of Object.entries(targetCounts)) {
-    const requiredGA = env.targetGARequired[affixId] || 0;
-    if ((currentCounts[affixId] || 0) < requiredCount || (currentGACounts[affixId] || 0) < requiredGA) {
+    if ((currentCounts[affixId] || 0) < requiredCount) {
       continue;
     }
 
     let risk = 0;
     for (const outcome of outcomes) {
       const nextCounts = getAffixCounts(outcome.state.affixes);
-      const nextGACounts = getAffixCounts(outcome.state.affixes, (entry) => entry.isGA);
-      if ((nextCounts[affixId] || 0) < requiredCount || (nextGACounts[affixId] || 0) < requiredGA) {
+      if ((nextCounts[affixId] || 0) < requiredCount) {
         risk += outcome.probability;
       }
     }
@@ -2123,7 +2088,7 @@ function getOneStepTargetLossRisk(state, action, env, target) {
       risks.push({
         name: affixName(affixId, env),
         risk,
-        requireGA: requiredGA > 0,
+        requireGA: false,
       });
     }
   }
@@ -2801,11 +2766,6 @@ function getGuaranteedFocusedBridgeEstimate(state, target, env) {
       missingAffixIds.push(affixId);
     }
 
-    const requiredGA = env.targetGARequired[affixId] || 0;
-    const currentGA = stateGACounts[affixId] || 0;
-    if (requiredGA > currentGA) {
-      return null;
-    }
   }
 
   if (missingAffixIds.length !== 1) {
@@ -2903,7 +2863,6 @@ function evaluateState(state, target, env) {
   }
 
   const stateCounts = getAffixCounts(state.affixes);
-  const stateGACounts = getAffixCounts(state.affixes, (entry) => entry.isGA);
 
   let score = 0;
   let missing = 0;
@@ -2916,13 +2875,6 @@ function evaluateState(state, target, env) {
       missing += 1;
     }
 
-    if (requirement.requireGA) {
-      if ((stateGACounts[requirement.affixId] || 0) > 0) {
-        score += 16;
-      } else {
-        score -= 28;
-      }
-    }
   }
 
   const targetSet = new Set(target.affixes.map((entry) => entry.affixId));
@@ -3242,14 +3194,12 @@ function getAnalyticalStateEstimate(state, target, env) {
  */
 function computeHeuristicRemainingSteps(state, target, env) {
   const stateCounts = getAffixCounts(state.affixes);
-  const stateGACounts = getAffixCounts(state.affixes, (entry) => entry.isGA);
   const targetCounts = env.targetCounts || getTargetCountsFromTarget(target);
   const matchedFlags = markMatchedTargetAffixes(state, targetCounts);
 
   let openSlots = Math.max(0, 4 - state.affixes.length);
   let extraCount = matchedFlags.reduce((count, matched) => count + (matched ? 0 : 1), 0);
   let total = 0;
-  let missingGA = 0;
 
   for (const [affixId, requiredCount] of Object.entries(targetCounts)) {
     const currentCount = stateCounts[affixId] || 0;
@@ -3265,13 +3215,6 @@ function computeHeuristicRemainingSteps(state, target, env) {
       }
     }
 
-    const requiredGA = env.targetGARequired[affixId] || 0;
-    const currentGA = stateGACounts[affixId] || 0;
-    missingGA += Math.max(0, requiredGA - currentGA);
-  }
-
-  if (missingGA > 0) {
-    total += missingGA * 4.5;
   }
 
   return Math.max(1, total);

@@ -12,7 +12,7 @@ The optimizer models four cube operations plus the Enchantress.
 | **Chaotic Reroll** | Removes a random non-enchanted affix and adds a new one from the chosen prism's category. | Optional |
 | **Focused Reroll** | The player picks which affix to remove; the new affix comes from the same prism category. | Required |
 | **Remove Affix** | Removes a random non-enchanted affix (narrowed to the prism's category if one is used). Not available on Legendary items. | Optional |
-| **Enchant** | The Enchantress replaces one chosen affix with any legal affix. One-time use per item. Produces non-GA output unless the affix is kept (same ID). | None |
+| **Enchant** | The Enchantress replaces one chosen affix with any legal affix that does not duplicate another slot. The targeted slot becomes the item's sticky enchanted slot and can be re-enchanted any number of times (but no other slot can ever be enchanted afterward). Produces non-GA output when the affix changes; same-affix keeps GA (Phase-1 mark). Re-enchanting an enchanted+GA slot is disallowed. | None |
 
 **Material note:** Add Affix uses Coarse Primordial Dust + Raw Primordial Dust. Chaotic Reroll, Focused Reroll, and Remove Affix use Refined Primordial Dust + Raw Primordial Dust. Exact quantities are not modeled by the optimizer.
 
@@ -100,10 +100,13 @@ When a Focused Reroll uses a given prism, it randomly selects from **all non-enc
 
 ## Enchantress
 
-- Each item has one Enchantress use. Once spent, it cannot be reused unless the enchanted affix is removed by the cube.
-- The Enchantress can change any non-locked affix to any other legal affix for that item's slot.
-- The enchanted affix is immune to cube operations (it cannot be randomly selected for removal or reroll).
-- After an enchanted affix is removed (by a cube remove operation), the Enchantress becomes available again.
+- Each item has at most one **enchanted slot**, and it is **sticky**: once any slot becomes enchanted on an item, that slot is the enchanted slot for the rest of the item's life. The Enchantress cannot mark a different slot as enchanted afterward.
+- The enchanted slot can be re-enchanted any number of times, but **only the enchanted slot** is a legal source for further enchant operations once one exists.
+- Re-enchanting a slot whose current affix is GA is **forbidden**: same-affix re-enchant is a no-op, and changing the affix would destroy the GA (GAs can never be acquired through any operation — only preserved).
+- Each enchant chooses a target affix. If the target equals the slot's current affix, the slot is just marked enchanted (Phase 1 only — preserves GA, locks the slot from cube ops). If the target differs, the slot's affix is replaced with the new one and `isGA` is forced to `false`.
+- The new affix can never duplicate another slot's `affixId` on the same item.
+- The enchanted slot is immune to cube operations: focused reroll, chaotic reroll, and remove all skip it.
+- There is no per-item cap on enchant uses; the slot-state encoding above fully determines availability, and the old `enchantressAvailable` flag has been removed from the worker state model.
 
 ---
 

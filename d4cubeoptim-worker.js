@@ -879,7 +879,6 @@ function stateKey(state) {
     .map((entry) => `${entry.affixId}|${entry.isGA ? 1 : 0}|${entry.isEnchanted ? 1 : 0}`);
   return [
     `L${state.isLegendary ? 1 : 0}`,
-    `E${state.enchantressAvailable ? 1 : 0}`,
     `S${state.gearSlot || "any"}`,
     `C${state.class || DEFAULT_CLASS}`,
     tokens.join(","),
@@ -895,7 +894,6 @@ function stateKey(state) {
 function cloneState(state) {
   return {
     isLegendary: !!state.isLegendary,
-    enchantressAvailable: !!state.enchantressAvailable,
     gearSlot: state.gearSlot || "Any",
     class: state.class || DEFAULT_CLASS,
     affixes: (state.affixes || []).map((entry) => ({
@@ -1053,21 +1051,104 @@ function getValidActions(state, target, env) {
     }
   }
 
-  if (state.enchantressAvailable && !state.affixes.some((entry) => entry.isEnchanted)) {
-    const desiredIds = new Set(target.affixes.map((entry) => entry.affixId));
+  // Enchant action generation.
+  //
+  // Rules (see docs/game-mechanics.md):
+  //   * Each item has at most one "enchanted" slot, sticky for its lifetime.
+  //   * If a slot is already enchanted: the only legal enchant source is that
+  //     same slot, and only when it is not GA (changing a GA slot's affix
+  //     would destroy the GA; keeping it the same would be a no-op).
+  //   * If no slot is enchanted yet: any non-empty slot can be the source.
+  //     Enchanting to the same affix preserves GA (Phase-1 mark only);
+  //     enchanting to a different affix loses GA (combined Phase 1+2).
+  //   * The new affix can never duplicate another slot's affixId.
+  //
+  // We further prune the enchant target candidates down to "useful" ones:
+  // currently-missing target affixes, plus the source's own affix when that
+  // source slot is unsatisfactory (a re-enchant to the same affix wipes the
+  // unsatisfactory marker). For fresh enchant, the source's own affix is
+  // also included as the GA-preserve "Phase-1 mark" move. Enchanting from
+  // one already-satisfied target affix to another already-satisfied target
+  // affix would just shuffle coverage between slots and is never strictly
+  // useful in this lexicographic objective — pruning these candidates
+  // prevents otherwise-explosive enchant cycles in the value iteration
+  // without losing any optimal policy.
+  const targetIds = new Set(target.affixes.map((entry) => entry.affixId).filter(Boolean));
+  const currentAffixIds = new Set();
+  for (const entry of state.affixes) {
+    if (entry && entry.affixId) {
+      currentAffixIds.add(entry.affixId);
+    }
+  }
+  const unsatisfactoryIds = new Set(
+    Array.isArray(state.unsatisfactoryAffixIds) ? state.unsatisfactoryAffixIds : []
+  );
+  const enchantedIndex = state.affixes.findIndex((entry) => entry.isEnchanted);
 
-    state.affixes.forEach((entry, index) => {
-      desiredIds.add(entry.affixId);
-      for (const targetAffixId of desiredIds) {
-        if (env.strictMode && isProtectedGA(entry, env) && targetAffixId !== entry.affixId) {
-          continue;
-        }
-        actions.push({
-          type: "enchant",
-          sourceIndex: index,
-          targetAffixId,
-        });
+  function buildEnchantTargetCandidates(sourceEntry, includeSameAffix) {
+    const candidates = new Set();
+    for (const tid of targetIds) {
+      if (!currentAffixIds.has(tid) || unsatisfactoryIds.has(tid)) {
+        candidates.add(tid);
       }
+    }
+    if (includeSameAffix && sourceEntry.affixId) {
+      candidates.add(sourceEntry.affixId);
+    }
+    return candidates;
+  }
+
+  function pushEnchantActionsForSlot(sourceIndex, sourceEntry, includeSameAffix) {
+    const otherAffixIds = new Set();
+    state.affixes.forEach((other, idx) => {
+      if (idx !== sourceIndex && other.affixId) {
+        otherAffixIds.add(other.affixId);
+      }
+    });
+    // If the source already holds a target affix that is satisfactorily
+    // present, enchant-changing it would only swap one missing target for
+    // another (the source target becomes missing, the destination satisfied)
+    // — never net progress in this lexicographic objective. Drop the
+    // change-action class entirely for such sources, keeping only the
+    // same-affix Phase-1 mark when allowed.
+    const sourceInTarget = sourceEntry && sourceEntry.affixId && targetIds.has(sourceEntry.affixId);
+    const sourceUnsatisfactory = sourceEntry && unsatisfactoryIds.has(sourceEntry.affixId);
+    const allowChangeFromThisSource = !sourceInTarget || sourceUnsatisfactory;
+    for (const targetAffixId of buildEnchantTargetCandidates(sourceEntry, includeSameAffix)) {
+      if (otherAffixIds.has(targetAffixId)) {
+        continue;
+      }
+      if (!allowChangeFromThisSource && targetAffixId !== sourceEntry.affixId) {
+        continue;
+      }
+      if (env.strictMode && isProtectedGA(sourceEntry, env) && targetAffixId !== sourceEntry.affixId) {
+        continue;
+      }
+      actions.push({
+        type: "enchant",
+        sourceIndex,
+        targetAffixId,
+      });
+    }
+  }
+
+  if (enchantedIndex >= 0) {
+    const enchantedEntry = state.affixes[enchantedIndex];
+    if (enchantedEntry.affixId && !enchantedEntry.isGA) {
+      // Re-enchant: same-affix is a no-op unless this slot is unsatisfactory
+      // (in which case the same-affix re-enchant clears the unsatisfactory
+      // marker). buildEnchantTargetCandidates handles that case.
+      const includeSame = unsatisfactoryIds.has(enchantedEntry.affixId);
+      pushEnchantActionsForSlot(enchantedIndex, enchantedEntry, includeSame);
+    }
+  } else {
+    state.affixes.forEach((entry, index) => {
+      if (!entry.affixId) {
+        return;
+      }
+      // Fresh enchant: include same-affix as a legitimate Phase-1-only mark
+      // (preserves GA, locks the slot from cube ops).
+      pushEnchantActionsForSlot(index, entry, true);
     });
   }
 
@@ -1590,9 +1671,6 @@ function getActionOutcomes(state, action, env) {
   }
 
   if (action.type === "enchant") {
-    if (!state.enchantressAvailable || state.affixes.some((entry) => entry.isEnchanted)) {
-      return [];
-    }
     if (!Number.isInteger(action.sourceIndex) || action.sourceIndex < 0 || action.sourceIndex >= state.affixes.length) {
       return [];
     }
@@ -1601,8 +1679,29 @@ function getActionOutcomes(state, action, env) {
     }
 
     const source = state.affixes[action.sourceIndex];
-    if (source.isEnchanted) {
+    if (!source || !source.affixId) {
       return [];
+    }
+
+    // Sticky enchanted-slot constraint: if another slot is already enchanted,
+    // the source must be that slot. Re-enchant on an enchanted+GA slot is
+    // disallowed (different-affix would destroy the GA; same-affix is a no-op).
+    const enchantedIndex = state.affixes.findIndex((entry) => entry.isEnchanted);
+    if (enchantedIndex >= 0 && enchantedIndex !== action.sourceIndex) {
+      return [];
+    }
+    if (source.isEnchanted && source.isGA) {
+      return [];
+    }
+
+    // No-duplicate-affix constraint: only enforced when the affix actually changes.
+    if (action.targetAffixId !== source.affixId) {
+      const dupe = state.affixes.some((entry, idx) => (
+        idx !== action.sourceIndex && entry.affixId === action.targetAffixId
+      ));
+      if (dupe) {
+        return [];
+      }
     }
 
     const next = cloneState(state);
@@ -1611,7 +1710,6 @@ function getActionOutcomes(state, action, env) {
       isGA: action.targetAffixId === source.affixId ? !!source.isGA : false,
       isEnchanted: true,
     };
-    next.enchantressAvailable = false;
 
     if (violatesFamilyUniqueness(next, env)) {
       return [];
@@ -1669,6 +1767,29 @@ function mergeOutcomes(outcomes) {
  */
 function isCubeAction(action) {
   return action.type === "add" || action.type === "remove" || action.type === "chaotic" || action.type === "focused";
+}
+
+// Tie-break cost charged to re-enchant actions (enchanting a slot that is
+// already enchanted) in the SSP value iteration. Fresh enchants cost 0 per
+// the game model. Re-enchant introduces the possibility of 0-cost cycles
+// (enchant slot to affix A, then back to B, then back to A, forever) which
+// trap Bellman value iteration at a degenerate fixed point with apparent
+// expected steps = 0. A small positive cost per re-enchant guarantees the
+// optimal policy terminates, while staying small enough to be invisible in
+// the UI's two-decimal display for any plausible number of re-enchants.
+const RE_ENCHANT_TIE_BREAK_COST = 0.5;
+
+function actionCost(action, state) {
+  if (isCubeAction(action)) {
+    return 1;
+  }
+  if (action && action.type === "enchant" && state && Array.isArray(state.affixes)) {
+    const source = state.affixes[action.sourceIndex];
+    if (source && source.isEnchanted) {
+      return RE_ENCHANT_TIE_BREAK_COST;
+    }
+  }
+  return 0;
 }
 
 /**
@@ -3151,7 +3272,7 @@ function getExactSmallStateSummary(state, target, env) {
 
       actionEntries.push({
         action,
-        cubeCost: isCubeAction(action) ? 1 : 0,
+        cubeCost: actionCost(action, current),
         transitions,
       });
     }
@@ -3593,6 +3714,8 @@ if (typeof module !== "undefined" && module.exports) {
     getActionOutcomes,
     mergeOutcomes,
     isCubeAction,
+    actionCost,
+    RE_ENCHANT_TIE_BREAK_COST,
     simulateFromNode,
     rollout,
     chooseRolloutAction,

@@ -39,6 +39,7 @@ if (typeof module !== "undefined" && module.exports) {
     affixName,
     shouldStop: typeof shouldStop === "function" ? shouldStop : null,
     isCubeAction: typeof isCubeAction === "function" ? isCubeAction : null,
+    actionCost: typeof actionCost === "function" ? actionCost : null,
     actionKey: typeof actionKey === "function" ? actionKey : null,
   };
   fallbackWorker = {
@@ -506,10 +507,16 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     return candidates;
   }
 
+  // A discretionary "preserve" enchant is only available when no slot is
+  // already enchanted (sticky-slot rule); the existing enchanted slot is
+  // covered by re-enchant actions generated elsewhere.
+  const hasEnchantedSlot = !!(state && Array.isArray(state.affixes)
+    && state.affixes.some((entry) => entry && entry.isEnchanted));
+
   if (
     hostEntry
     && options.allowDiscretionaryEnchant === true
-    && state && state.enchantressAvailable
+    && !hasEnchantedSlot
     && isDiscretionaryEnchantSlotV3(state, options.target || null, options.gaConfig || null, slotIndex, env, options)
   ) {
     candidates.push(createClosedFormCandidateV3(
@@ -1549,7 +1556,6 @@ function residualStateKeyV3(state, context) {
 
   return [
     `L${state && state.isLegendary ? 1 : 0}`,
-    `E${state && state.enchantressAvailable ? 1 : 0}`,
     `S${(state && state.gearSlot) || "Any"}`,
     `C${(state && state.class) || "Any"}`,
     `A${tokens.join(",")}`,
@@ -1708,7 +1714,7 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
 
       actionEntries.push({
         action,
-        cubeCost: sharedWorker.isCubeAction(action) ? 1 : 0,
+        cubeCost: sharedWorker.actionCost(action, node.state),
         transitions,
       });
     }

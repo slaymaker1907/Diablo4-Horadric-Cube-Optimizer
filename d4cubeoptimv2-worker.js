@@ -22,6 +22,7 @@ if (typeof module !== "undefined" && module.exports) {
     getValidActions,
     getActionOutcomes,
     isCubeAction,
+    actionCost,
     getOneStepTargetLossRisk,
     getActionProbabilityBreakdown,
     affixName,
@@ -183,7 +184,6 @@ function stateKeyV2(state, env = null) {
     : "";
   return [
     `L${state && state.isLegendary ? 1 : 0}`,
-    `E${state && state.enchantressAvailable ? 1 : 0}`,
     `S${(state && state.gearSlot) || "Any"}`,
     `C${(state && state.class) || "Any"}`,
     `A${tokens.join(",")}`,
@@ -324,20 +324,13 @@ function classifyDeadReason(state, target, env) {
 
   const missingRequiredGAIds = getMissingRequiredGAIdsV2(state, env);
   if (missingRequiredGAIds.length > 0) {
-    if (!state.enchantressAvailable) {
-      return "A required target GA is missing and enchanting is no longer available.";
-    }
-
-    if (missingRequiredGAIds.length > 1) {
-      return "More than one required GA identity is still missing, but only one enchant remains.";
-    }
-
-    if (getGADonorSourceIndexes(state, env).length === 0) {
-      return "No disposable GA remains to transfer onto the required target affix.";
-    }
+    // Greater Affixes can never be acquired by any cube or enchant operation
+    // (re-enchant produces non-GA when the affix changes; same-affix re-enchant
+    // is a no-op). A missing required GA is therefore unrecoverable.
+    return "A required target GA is missing and cannot be restored by any operation.";
   }
 
-  if (!state.enchantressAvailable && Array.isArray(state.unsatisfactoryAffixIds) && state.unsatisfactoryAffixIds.length > 0) {
+  if (Array.isArray(state.unsatisfactoryAffixIds) && state.unsatisfactoryAffixIds.length > 0) {
     const unsatisfactoryCounts = getUnsatisfactoryCounts(state);
     for (const [affixId, count] of Object.entries(unsatisfactoryCounts)) {
       const hasTarget = target.affixes.some((entry) => entry.affixId === affixId);
@@ -345,7 +338,11 @@ function classifyDeadReason(state, target, env) {
         continue;
       }
       const matchingEntries = state.affixes.filter((entry) => entry.affixId === affixId);
-      const lockedCount = matchingEntries.filter((entry) => entry.isEnchanted).length;
+      // A slot only counts as truly locked when it's enchanted AND GA — that's
+      // the one configuration the new model can't re-roll (re-enchanting an
+      // enchanted+GA slot is forbidden because changing the affix would destroy
+      // the GA, and same-affix re-enchant is a no-op).
+      const lockedCount = matchingEntries.filter((entry) => entry.isEnchanted && entry.isGA).length;
       if (lockedCount >= count) {
         return `${baseWorker.affixName(affixId, env)} still needs improvement but the slot is locked.`;
       }
@@ -429,7 +426,9 @@ function getGADonorSourceIndexes(state, env) {
 }
 
 function getForcedGAEnchantActions(state, env) {
-  if (!state.enchantressAvailable || (state.affixes || []).some((entry) => entry.isEnchanted)) {
+  // Fresh enchant is required to supply a "GA donor" action — once any slot
+  // is enchanted, the sticky-slot rule forbids enchanting a different slot.
+  if ((state.affixes || []).some((entry) => entry.isEnchanted)) {
     return [];
   }
 
@@ -446,7 +445,8 @@ function getForcedGAEnchantActions(state, env) {
 }
 
 function getLateEnchantActions(state, target, env, actions) {
-  if (!state.enchantressAvailable || (state.affixes || []).some((entry) => entry.isEnchanted)) {
+  // Same sticky-slot restriction as getForcedGAEnchantActions.
+  if ((state.affixes || []).some((entry) => entry.isEnchanted)) {
     return [];
   }
 
@@ -533,9 +533,13 @@ function getValidActionsV2(state, target, env) {
         return false;
       }
       const entry = state && Array.isArray(state.affixes) ? state.affixes[action.sourceIndex] : null;
-      if (!entry || entry.isEnchanted) {
+      if (!entry) {
         return false;
       }
+      // Re-enchanting the existing enchanted slot is legal under the new
+      // model as long as it is not GA; the base worker already enforces both
+      // rules in its enchant generation. v2 piggybacks on that and only adds
+      // its own GA-donor/late-enchant supplements below.
       return action.targetAffixId !== entry.affixId;
     });
 
@@ -675,7 +679,7 @@ function expandReachableGraph(rootState, target, env, options = {}) {
 
       actionEntries.push({
         action,
-        cubeCost: baseWorker.isCubeAction(action) ? 1 : 0,
+        cubeCost: baseWorker.actionCost(action, node.state),
         transitions,
       });
     }

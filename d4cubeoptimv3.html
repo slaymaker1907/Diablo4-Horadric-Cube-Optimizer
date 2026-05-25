@@ -167,6 +167,40 @@
 			gap: 5px;
 			font-size: 0.86rem;
 			color: var(--muted);
+			border-radius: 4px;
+			padding: 1px 5px;
+			margin: -1px -5px;
+		}
+
+		.checkbox-chip.disabled {
+			opacity: 0.4;
+			cursor: not-allowed;
+		}
+
+		.checkbox-chip.disabled input[type="checkbox"] {
+			cursor: not-allowed;
+			pointer-events: none;
+		}
+
+		@keyframes ga-cleared-flash {
+			0%   { background: rgba(240, 199, 102, 0); box-shadow: 0 0 0 0 rgba(240, 199, 102, 0); }
+			20%  { background: rgba(240, 199, 102, 0.55); box-shadow: 0 0 6px 1px rgba(240, 199, 102, 0.45); }
+			100% { background: rgba(240, 199, 102, 0); box-shadow: 0 0 0 0 rgba(240, 199, 102, 0); }
+		}
+
+		.checkbox-chip.flash-cleared {
+			animation: ga-cleared-flash 0.9s ease-out;
+		}
+
+		@keyframes duplicate-blocked-flash {
+			0%   { background: rgba(181, 29, 29, 0); box-shadow: 0 0 0 0 rgba(181, 29, 29, 0); }
+			20%  { background: rgba(181, 29, 29, 0.45); box-shadow: 0 0 8px 1px rgba(181, 29, 29, 0.5); }
+			100% { background: rgba(181, 29, 29, 0); box-shadow: 0 0 0 0 rgba(181, 29, 29, 0); }
+		}
+
+		.affix-row.flash-blocked {
+			animation: duplicate-blocked-flash 0.9s ease-out;
+			border-radius: 4px;
 		}
 
 		input[type="checkbox"] {
@@ -576,8 +610,6 @@
 							<select id="character-class"></select>
 						</div>
 						<button id="legendary-toggle" class="toggle">Legendary: No</button>
-						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
-						<button id="enchantress-toggle" class="toggle active">Enchantress Available</button>
 						<p id="class-any-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
 							Class is Any — the rolling pool includes every class's skills. Set Class to your character for accurate probabilities.
 						</p>
@@ -832,7 +864,7 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-25-v3-phase2-rel-epsilon";
+		const WORKER_VERSION = "2026-05-25-v3-reenchant-model";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -871,7 +903,6 @@
 				gearSlot: "Any",
 				class: "Any",
 				isLegendary: false,
-				enchantressAvailable: true,
 				affixes: [
 					{ affixId: "", isGA: false, isEnchanted: false },
 					{ affixId: "", isGA: false, isEnchanted: false },
@@ -922,7 +953,6 @@
 			characterClass: document.getElementById("character-class"),
 			classAnyWarning: document.getElementById("class-any-warning"),
 			legendaryToggle: document.getElementById("legendary-toggle"),
-			enchantressToggle: document.getElementById("enchantress-toggle"),
 
 			currentAffixes: document.getElementById("current-affixes"),
 			targetAffixes: document.getElementById("target-affixes"),
@@ -1035,16 +1065,6 @@
 
 			els.legendaryToggle.addEventListener("click", () => {
 				appState.current.isLegendary = !appState.current.isLegendary;
-				saveState();
-				renderCurrentControls();
-			});
-
-			els.enchantressToggle.addEventListener("click", () => {
-				const hasEnchanted = appState.current.affixes.some((entry) => entry.isEnchanted);
-				if (hasEnchanted) {
-					return;
-				}
-				appState.current.enchantressAvailable = !appState.current.enchantressAvailable;
 				saveState();
 				renderCurrentControls();
 			});
@@ -1612,11 +1632,6 @@
 
 			els.legendaryToggle.classList.toggle("active", appState.current.isLegendary);
 			els.legendaryToggle.textContent = appState.current.isLegendary ? "Legendary: Yes" : "Legendary: No";
-
-			const hasEnchanted = appState.current.affixes.some((entry) => entry.isEnchanted);
-			els.enchantressToggle.classList.toggle("active", appState.current.enchantressAvailable);
-			els.enchantressToggle.textContent = appState.current.enchantressAvailable ? "Enchantress Available" : "Enchantress Spent";
-			els.enchantressToggle.disabled = hasEnchanted;
 		}
 
 		function copyCurrentAffixesToTarget() {
@@ -1634,47 +1649,66 @@
 			}
 
 			appState.target.affixes = nextTargetAffixes;
+			normalizeCurrentGAs();
 			saveState();
 			renderTargetAffixes();
+			renderCurrentAffixes();
 		}
 
-		function getCurrentGAAffixCounts() {
-			const counts = Object.create(null);
-			appState.current.affixes.forEach((entry) => {
-				if (!entry || !entry.affixId || !entry.isGA) {
-					return;
-				}
-				counts[entry.affixId] = (counts[entry.affixId] || 0) + 1;
-			});
-			return counts;
-		}
+		// Track current-affix indices whose GA was just auto-cleared by
+		// normalizeCurrentGAs(); the next renderCurrentAffixes() pass picks
+		// these up and plays a one-shot highlight animation on their GA chip.
+		const pendingGaFlashIndices = new Set();
+		// Same idea for target-side "Needs Improvement" chips auto-cleared
+		// because the matching current affix became GA.
+		const pendingNiFlashIndices = new Set();
+		// Row-level red flashes for rejected duplicate-affix entry attempts.
+		const pendingDuplicateFlashCurrent = new Set();
+		const pendingDuplicateFlashTarget = new Set();
 
-		function canRequireTargetGA(index, affixId) {
+		function currentAffixIdHasTargetMatch(affixId) {
 			if (!affixId) {
 				return false;
 			}
-
-			const available = getCurrentGAAffixCounts();
-			appState.target.affixes.forEach((entry, entryIndex) => {
-				if (entryIndex === index || !entry || !entry.affixId || !entry.requireGA) {
-					return;
-				}
-				available[entry.affixId] = Math.max(0, (available[entry.affixId] || 0) - 1);
-			});
-
-			return (available[affixId] || 0) > 0;
+			return appState.target.affixes.some((entry) => entry && entry.affixId === affixId);
 		}
 
-		function normalizeTargetGARequirements() {
+		function currentHasGAForAffix(affixId) {
+			if (!affixId) {
+				return false;
+			}
+			return appState.current.affixes.some((entry) => entry && entry.affixId === affixId && entry.isGA);
+		}
+
+		function panelHasAffixIdElsewhere(list, affixId, exceptIndex) {
+			if (!affixId) {
+				return false;
+			}
+			return list.some((entry, idx) => idx !== exceptIndex && entry && entry.affixId === affixId);
+		}
+
+		// A GA on the current item only matters to the solver when the same
+		// affix appears as a target (GA preservation works via implicit
+		// protection on target-aligned affixes). Clear any GAs that no
+		// longer have a target match so the run state cannot drift out of
+		// sync with the UI rule.
+		function normalizeCurrentGAs() {
+			appState.current.affixes.forEach((entry, index) => {
+				if (entry && entry.isGA && !currentAffixIdHasTargetMatch(entry.affixId)) {
+					entry.isGA = false;
+					pendingGaFlashIndices.add(index);
+				}
+			});
+		}
+
+		// "Needs Improvement" on a target only makes sense when the matching
+		// current affix is not GA — a GA roll is already top quality, so
+		// asking to improve it is contradictory. Clear stale NI flags.
+		function normalizeTargetNeedsImprovement() {
 			appState.target.affixes.forEach((entry, index) => {
-				if (!entry) {
-					return;
-				}
-				if (!entry.requireGA) {
-					return;
-				}
-				if (!canRequireTargetGA(index, entry.affixId)) {
-					entry.requireGA = false;
+				if (entry && entry.needsImprovement && currentHasGAForAffix(entry.affixId)) {
+					entry.needsImprovement = false;
+					pendingNiFlashIndices.add(index);
 				}
 			});
 		}
@@ -1684,6 +1718,10 @@
 			appState.current.affixes.forEach((entry, index) => {
 				const row = document.createElement("div");
 				row.className = "affix-row";
+				if (pendingDuplicateFlashCurrent.has(index)) {
+					row.classList.add("flash-blocked");
+					pendingDuplicateFlashCurrent.delete(index);
+				}
 				if (entry.isEnchanted) {
 					row.classList.add("locked");
 				}
@@ -1698,8 +1736,16 @@
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
-					appState.current.affixes[index].affixId = affixIdFromText(input.value);
-					normalizeTargetGARequirements();
+					const proposed = affixIdFromText(input.value);
+					if (proposed && panelHasAffixIdElsewhere(appState.current.affixes, proposed, index)) {
+						appState.current.affixes[index].affixId = "";
+						appState.current.affixes[index].isGA = false;
+						pendingDuplicateFlashCurrent.add(index);
+					} else {
+						appState.current.affixes[index].affixId = proposed;
+					}
+					normalizeCurrentGAs();
+					normalizeTargetNeedsImprovement();
 					saveState();
 					renderCurrentAffixes();
 					renderTargetAffixes();
@@ -1711,9 +1757,20 @@
 				const ga = document.createElement("input");
 				ga.type = "checkbox";
 				ga.checked = !!entry.isGA;
+				const gaHasTargetMatch = currentAffixIdHasTargetMatch(entry.affixId);
+				if (!gaHasTargetMatch) {
+					gaWrap.classList.add("disabled");
+					ga.disabled = true;
+					gaWrap.title = "GA only matters when this affix is also a target.";
+				}
+				if (pendingGaFlashIndices.has(index)) {
+					gaWrap.classList.add("flash-cleared");
+					pendingGaFlashIndices.delete(index);
+				}
 				ga.addEventListener("change", () => {
 					appState.current.affixes[index].isGA = ga.checked;
-					normalizeTargetGARequirements();
+					normalizeCurrentGAs();
+					normalizeTargetNeedsImprovement();
 					saveState();
 					renderCurrentAffixes();
 					renderTargetAffixes();
@@ -1728,15 +1785,13 @@
 				ench.checked = !!entry.isEnchanted;
 				ench.addEventListener("change", () => {
 					if (ench.checked) {
+						// Sticky-slot rule: only one slot can ever be the enchanted slot,
+						// so checking Enchanted here unmarks any other slot.
 						appState.current.affixes.forEach((a, idx) => {
 							a.isEnchanted = idx === index;
 						});
-						appState.current.enchantressAvailable = false;
 					} else {
 						appState.current.affixes[index].isEnchanted = false;
-						if (!appState.current.affixes.some((a) => a.isEnchanted)) {
-							appState.current.enchantressAvailable = true;
-						}
 					}
 					saveState();
 					renderCurrentControls();
@@ -1750,10 +1805,8 @@
 				removeBtn.textContent = "Remove";
 				removeBtn.addEventListener("click", () => {
 					appState.current.affixes.splice(index, 1);
-					if (!appState.current.affixes.some((a) => a.isEnchanted)) {
-						appState.current.enchantressAvailable = true;
-					}
-					normalizeTargetGARequirements();
+					normalizeCurrentGAs();
+					normalizeTargetNeedsImprovement();
 					saveState();
 					renderCurrentControls();
 					renderCurrentAffixes();
@@ -1778,6 +1831,10 @@
 			appState.target.affixes.forEach((entry, index) => {
 				const row = document.createElement("div");
 				row.className = "affix-row";
+				if (pendingDuplicateFlashTarget.has(index)) {
+					row.classList.add("flash-blocked");
+					pendingDuplicateFlashTarget.delete(index);
+				}
 
 				const input = document.createElement("input");
 				input.type = "text";
@@ -1789,12 +1846,19 @@
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
-					appState.target.affixes[index].affixId = affixIdFromText(input.value);
-					if (!canRequireTargetGA(index, appState.target.affixes[index].affixId)) {
-						appState.target.affixes[index].requireGA = false;
+					const proposed = affixIdFromText(input.value);
+					if (proposed && panelHasAffixIdElsewhere(appState.target.affixes, proposed, index)) {
+						appState.target.affixes[index].affixId = "";
+						appState.target.affixes[index].needsImprovement = false;
+						pendingDuplicateFlashTarget.add(index);
+					} else {
+						appState.target.affixes[index].affixId = proposed;
 					}
+					normalizeCurrentGAs();
+					normalizeTargetNeedsImprovement();
 					saveState();
 					renderTargetAffixes();
+					renderCurrentAffixes();
 				});
 
 				const improveWrap = document.createElement("label");
@@ -1802,7 +1866,19 @@
 				const improve = document.createElement("input");
 				improve.type = "checkbox";
 				improve.checked = !!entry.needsImprovement;
-				improve.disabled = !entry.affixId;
+				const niBlockedByGA = currentHasGAForAffix(entry.affixId);
+				if (!entry.affixId) {
+					improve.disabled = true;
+					improveWrap.classList.add("disabled");
+				} else if (niBlockedByGA) {
+					improve.disabled = true;
+					improveWrap.classList.add("disabled");
+					improveWrap.title = "Needs Improvement is meaningless for a GA roll — it is already top quality.";
+				}
+				if (pendingNiFlashIndices.has(index)) {
+					improveWrap.classList.add("flash-cleared");
+					pendingNiFlashIndices.delete(index);
+				}
 				improve.addEventListener("change", () => {
 					appState.target.affixes[index].needsImprovement = improve.checked;
 					saveState();
@@ -1816,8 +1892,11 @@
 				removeBtn.textContent = "Remove";
 				removeBtn.addEventListener("click", () => {
 					appState.target.affixes.splice(index, 1);
+					normalizeCurrentGAs();
+					normalizeTargetNeedsImprovement();
 					saveState();
 					renderTargetAffixes();
+					renderCurrentAffixes();
 				});
 
 				row.appendChild(input);
@@ -1974,7 +2053,6 @@
 				});
 				const wasGA = !!cur.affixes[sourceIndex].isGA;
 				cur.affixes[sourceIndex] = { affixId: resultId, isGA: wasGA, isEnchanted: true };
-				cur.enchantressAvailable = false;
 			}
 
 			appState.lastAction = {
@@ -2060,7 +2138,10 @@
 				? appState.current.class
 				: "Any";
 			appState.current.isLegendary = !!appState.current.isLegendary;
-			appState.current.enchantressAvailable = !!appState.current.enchantressAvailable;
+			// `enchantressAvailable` no longer exists in the model; the
+			// available-enchant set is fully derived from the slot state by
+			// the worker. Drop any stale field from older saved states.
+			delete appState.current.enchantressAvailable;
 
 			appState.current.affixes = (appState.current.affixes || [])
 				.slice(0, 4)
@@ -2070,6 +2151,9 @@
 					isEnchanted: !!entry.isEnchanted,
 				}));
 
+			// Sticky-slot rule: only one slot can be Enchanted at a time. If
+			// older state somehow has multiple Enchanted slots, keep the
+			// first and clear the rest.
 			let foundEnchanted = false;
 			appState.current.affixes.forEach((entry) => {
 				if (!entry.isEnchanted) {
@@ -2082,10 +2166,6 @@
 				}
 			});
 
-			if (foundEnchanted) {
-				appState.current.enchantressAvailable = false;
-			}
-
 			appState.target.affixes = (appState.target.affixes || [])
 				.slice(0, 4)
 				.map((entry) => ({
@@ -2093,6 +2173,38 @@
 					requireGA: false,
 					needsImprovement: !!entry.needsImprovement,
 				}));
+
+			// Drop duplicate affixIds in either panel — old saved states
+			// may still hold them. Empty affixIds are not duplicates.
+			const seenCurrent = new Set();
+			appState.current.affixes.forEach((entry) => {
+				if (!entry.affixId) return;
+				if (seenCurrent.has(entry.affixId)) {
+					entry.affixId = "";
+					entry.isGA = false;
+				} else {
+					seenCurrent.add(entry.affixId);
+				}
+			});
+			const seenTarget = new Set();
+			appState.target.affixes.forEach((entry) => {
+				if (!entry.affixId) return;
+				if (seenTarget.has(entry.affixId)) {
+					entry.affixId = "";
+					entry.needsImprovement = false;
+				} else {
+					seenTarget.add(entry.affixId);
+				}
+			});
+
+			// Clear any stale GAs / NI flags left over from a previous edit.
+			// Drain the flash sets — initial load shouldn't animate.
+			normalizeCurrentGAs();
+			normalizeTargetNeedsImprovement();
+			pendingGaFlashIndices.clear();
+			pendingNiFlashIndices.clear();
+			pendingDuplicateFlashCurrent.clear();
+			pendingDuplicateFlashTarget.clear();
 
 			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 
@@ -2119,7 +2231,6 @@
 				gearSlot: appState.current.gearSlot,
 				class: appState.current.class,
 				isLegendary: appState.current.isLegendary,
-				enchantressAvailable: appState.current.enchantressAvailable,
 				affixes: appState.current.affixes
 					.filter((entry) => entry.affixId)
 					.map((entry) => ({

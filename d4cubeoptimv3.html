@@ -203,6 +203,22 @@
 			border-radius: 4px;
 		}
 
+		.affix-row.flash-cleared {
+			animation: ga-cleared-flash 0.9s ease-out;
+			border-radius: 4px;
+		}
+
+		@keyframes change-applied-flash {
+			0%   { background: rgba(181, 225, 132, 0); box-shadow: 0 0 0 0 rgba(181, 225, 132, 0); }
+			20%  { background: rgba(181, 225, 132, 0.45); box-shadow: 0 0 8px 1px rgba(181, 225, 132, 0.45); }
+			100% { background: rgba(181, 225, 132, 0); box-shadow: 0 0 0 0 rgba(181, 225, 132, 0); }
+		}
+
+		.affix-row.flash-applied {
+			animation: change-applied-flash 0.9s ease-out;
+			border-radius: 4px;
+		}
+
 		input[type="checkbox"] {
 			appearance: none;
 			-webkit-appearance: none;
@@ -1050,15 +1066,19 @@
 			});
 
 			els.gearSlot.addEventListener("change", () => {
+				const snapshot = snapshotAffixLegality();
 				appState.current.gearSlot = els.gearSlot.value;
 				invalidatePolicyCache();
+				flashNewlyIllegalAffixes(snapshot);
 				saveState();
 				renderAll();
 			});
 
 			els.characterClass.addEventListener("change", () => {
+				const snapshot = snapshotAffixLegality();
 				appState.current.class = els.characterClass.value;
 				invalidatePolicyCache();
+				flashNewlyIllegalAffixes(snapshot);
 				saveState();
 				renderAll();
 			});
@@ -1649,6 +1669,10 @@
 			}
 
 			appState.target.affixes = nextTargetAffixes;
+			// Acknowledge the copy by flashing every newly-written target row.
+			for (let i = 0; i < nextTargetAffixes.length; i += 1) {
+				pendingChangeAppliedTarget.add(i);
+			}
 			normalizeCurrentGAs();
 			saveState();
 			renderTargetAffixes();
@@ -1662,9 +1686,53 @@
 		// Same idea for target-side "Needs Improvement" chips auto-cleared
 		// because the matching current affix became GA.
 		const pendingNiFlashIndices = new Set();
+		// Indices whose Enchanted checkbox was just unchecked by the
+		// sticky-slot rule (because another slot was marked enchanted).
+		const pendingEnchantedFlashIndices = new Set();
 		// Row-level red flashes for rejected duplicate-affix entry attempts.
 		const pendingDuplicateFlashCurrent = new Set();
 		const pendingDuplicateFlashTarget = new Set();
+		// Row-level green flashes for "this row was just changed by a
+		// user-initiated action whose target slot might be non-obvious"
+		// (manual outcome apply, copy current->target).
+		const pendingChangeAppliedCurrent = new Set();
+		const pendingChangeAppliedTarget = new Set();
+		// Row-level amber flashes for affixes that became newly illegal as
+		// a side effect of changing Gear Slot or Class.
+		const pendingIllegalFlashCurrent = new Set();
+		const pendingIllegalFlashTarget = new Set();
+
+		function snapshotAffixLegality() {
+			return {
+				current: appState.current.affixes.map((entry) => {
+					if (!entry || !entry.affixId) return null;
+					const affix = AFFIX_BY_ID[entry.affixId];
+					return affix ? isAffixLegalForCurrentSlot(affix) : null;
+				}),
+				target: appState.target.affixes.map((entry) => {
+					if (!entry || !entry.affixId) return null;
+					const affix = AFFIX_BY_ID[entry.affixId];
+					return affix ? isAffixLegalForCurrentSlot(affix) : null;
+				}),
+			};
+		}
+
+		function flashNewlyIllegalAffixes(snapshot) {
+			appState.current.affixes.forEach((entry, idx) => {
+				if (!entry || !entry.affixId || snapshot.current[idx] !== true) return;
+				const affix = AFFIX_BY_ID[entry.affixId];
+				if (affix && !isAffixLegalForCurrentSlot(affix)) {
+					pendingIllegalFlashCurrent.add(idx);
+				}
+			});
+			appState.target.affixes.forEach((entry, idx) => {
+				if (!entry || !entry.affixId || snapshot.target[idx] !== true) return;
+				const affix = AFFIX_BY_ID[entry.affixId];
+				if (affix && !isAffixLegalForCurrentSlot(affix)) {
+					pendingIllegalFlashTarget.add(idx);
+				}
+			});
+		}
 
 		function currentAffixIdHasTargetMatch(affixId) {
 			if (!affixId) {
@@ -1721,6 +1789,14 @@
 				if (pendingDuplicateFlashCurrent.has(index)) {
 					row.classList.add("flash-blocked");
 					pendingDuplicateFlashCurrent.delete(index);
+				}
+				if (pendingChangeAppliedCurrent.has(index)) {
+					row.classList.add("flash-applied");
+					pendingChangeAppliedCurrent.delete(index);
+				}
+				if (pendingIllegalFlashCurrent.has(index)) {
+					row.classList.add("flash-cleared");
+					pendingIllegalFlashCurrent.delete(index);
 				}
 				if (entry.isEnchanted) {
 					row.classList.add("locked");
@@ -1783,11 +1859,18 @@
 				const ench = document.createElement("input");
 				ench.type = "checkbox";
 				ench.checked = !!entry.isEnchanted;
+				if (pendingEnchantedFlashIndices.has(index)) {
+					enchWrap.classList.add("flash-cleared");
+					pendingEnchantedFlashIndices.delete(index);
+				}
 				ench.addEventListener("change", () => {
 					if (ench.checked) {
 						// Sticky-slot rule: only one slot can ever be the enchanted slot,
 						// so checking Enchanted here unmarks any other slot.
 						appState.current.affixes.forEach((a, idx) => {
+							if (idx !== index && a.isEnchanted) {
+								pendingEnchantedFlashIndices.add(idx);
+							}
 							a.isEnchanted = idx === index;
 						});
 					} else {
@@ -1834,6 +1917,14 @@
 				if (pendingDuplicateFlashTarget.has(index)) {
 					row.classList.add("flash-blocked");
 					pendingDuplicateFlashTarget.delete(index);
+				}
+				if (pendingChangeAppliedTarget.has(index)) {
+					row.classList.add("flash-applied");
+					pendingChangeAppliedTarget.delete(index);
+				}
+				if (pendingIllegalFlashTarget.has(index)) {
+					row.classList.add("flash-cleared");
+					pendingIllegalFlashTarget.delete(index);
 				}
 
 				const input = document.createElement("input");
@@ -2019,6 +2110,7 @@
 					return;
 				}
 				cur.affixes.push({ affixId: resultId, isGA: false, isEnchanted: false });
+				pendingChangeAppliedCurrent.add(cur.affixes.length - 1);
 			}
 
 			if (mode === "removed") {
@@ -2042,6 +2134,7 @@
 					return;
 				}
 				cur.affixes[sourceIndex] = { affixId: resultId, isGA: false, isEnchanted: false };
+				pendingChangeAppliedCurrent.add(sourceIndex);
 			}
 
 			if (mode === "enchanted") {
@@ -2053,6 +2146,7 @@
 				});
 				const wasGA = !!cur.affixes[sourceIndex].isGA;
 				cur.affixes[sourceIndex] = { affixId: resultId, isGA: wasGA, isEnchanted: true };
+				pendingChangeAppliedCurrent.add(sourceIndex);
 			}
 
 			appState.lastAction = {
@@ -2203,8 +2297,13 @@
 			normalizeTargetNeedsImprovement();
 			pendingGaFlashIndices.clear();
 			pendingNiFlashIndices.clear();
+			pendingEnchantedFlashIndices.clear();
 			pendingDuplicateFlashCurrent.clear();
 			pendingDuplicateFlashTarget.clear();
+			pendingChangeAppliedCurrent.clear();
+			pendingChangeAppliedTarget.clear();
+			pendingIllegalFlashCurrent.clear();
+			pendingIllegalFlashTarget.clear();
 
 			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 

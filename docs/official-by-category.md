@@ -7,6 +7,8 @@
 - Dexterity
 - Thorns
 - All Damage Multiplier
+- Basic Skill Damage Multiplier
+- Core Skill Damage Multiplier
 - Attack Speed
 - Critical Strike Chance
 - Critical Strike Damage Multiplier
@@ -19,6 +21,10 @@
 - Physical Damage Multiplier
 - Poison Damage Multiplier
 - Shadow Damage Multiplier
+
+## Rogue
+
+- Backstab Damage Multiplier
 
 # Defensive
 

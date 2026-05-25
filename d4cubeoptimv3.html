@@ -1001,7 +1001,10 @@
 			manualResultOptions: document.getElementById("manual-result-options"),
 		};
 
-		init();
+		// NOTE: init() is invoked at the bottom of this script, after every
+		// `const` declaration in the file. Calling it here would put the
+		// pendingGaFlashIndices / pendingNiFlashIndices / … Sets in the
+		// temporal dead zone — sanitizeState() reaches them via renderAll().
 
 		function init() {
 			populateStaticLists();
@@ -2708,6 +2711,10 @@
 			}
 			return `${(value * 100).toFixed(2)}%`;
 		}
+
+		// All top-level `const` declarations in this file are now defined;
+		// safe to bootstrap.
+		init();
 	</script>
 </body>
 </html>

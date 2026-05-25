@@ -3,9 +3,8 @@
 ## Scope
 
 - Start with [docs/README.md](docs/README.md), [docs/business-requirements.md](docs/business-requirements.md), and [docs/implementation-guide.md](docs/implementation-guide.md) before diving into the code.
-- Treat v3 as the canonical implementation. Do not spend time extending or polishing the older worker/UI paths unless a v3 change requires shared helper compatibility.
-- The primary files for new work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
-- Legacy files still matter only as dependencies: `d4cubeoptimv3-worker.js` reuses shared transition logic from `d4cubeoptim-worker.js` and residual helper semantics from `d4cubeoptimv2-worker.js`.
+- v3 is the only implementation. The standalone v1 (MCTS) and v2 (exact-SSP) workers have been removed; the shared transition helpers and residual-graph helpers that v3 needs are now inlined in `d4cubeoptimv3-worker.js`.
+- The only files you should edit for solver/UI work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, `config.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
 
 ## Architecture
 
@@ -36,9 +35,9 @@ The "Expected Cube Steps" value shown in the UI (and `result.expectedSteps` in t
 ## Build And Test
 
 - There is no build step, package manager, or bundler. Work directly in the checked-in HTML and JavaScript files.
-- Focused v3 validation: `node --test d4cubeoptimv3-worker.test.js`
-- Focused ILP validation: `node --test ilp.test.js`
-- Full regression when shared helpers or cross-layer behavior changes: `node --test ilp.test.js d4cubeoptim-worker.test.js d4cubeoptimv2-worker.test.js d4cubeoptimv3-worker.test.js`
+- v3 worker validation: `node --test d4cubeoptimv3-worker.test.js`
+- ILP validation: `node --test ilp.test.js`
+- Full regression: `node --test ilp.test.js d4cubeoptimv3-worker.test.js`
 - For browser smoke testing, run `python3 -m http.server 8123` from the repo root and load `d4cubeoptimv3.html`.
 
 ## Source Of Truth

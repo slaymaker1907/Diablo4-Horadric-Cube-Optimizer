@@ -674,7 +674,7 @@ test("Case A closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 1, env, {
     data,
@@ -697,7 +697,7 @@ test("Case B closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 0, env, {
     data,
@@ -717,7 +717,7 @@ test("Case C closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 0, env, {
     data,
@@ -738,7 +738,7 @@ test("Case E closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 0, env, {
     data,
@@ -759,7 +759,7 @@ test("Case F closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false, needsImprovement: true },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {
     unsatisfactoryAffixIds: [byName["Movement Speed"].id],
   }, target);
 
@@ -781,7 +781,7 @@ test("Case G closed-form matches the exact tabular oracle", { timeout: TEST_TIME
   const target = buildTarget([
     { affixId: byName["Maximum Evade Charges"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {
     currentGAAffixes: [byName["Movement Speed"].id],
   }, target);
 
@@ -804,7 +804,7 @@ test("closed-form classifier explains residual-only non-unique remove cases", { 
   const target = buildTarget([
     { affixId: byName["Movement Speed"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 0, env, {
     data,
@@ -855,7 +855,7 @@ test("closed-form pool sizes respect slot legality narrowing", { timeout: TEST_T
   const target = buildTarget([
     { affixId: byName["Critical Strike Chance"].id, requireGA: false },
   ]);
-  const env = require("./d4cubeoptim-worker.js").buildEnv(data, {}, target);
+  const env = require("./d4cubeoptimv3-worker.js").buildEnv(data, {}, target);
 
   const plan = worker.chooseBestClosedFormPlanV3(state, target.affixes[0], 0, env, {
     data,
@@ -1991,7 +1991,7 @@ test("Family-level rolling: skill-multiplier family in Aggressive prism contribu
 test("Class change is reflected in stateKey so cached MCTS nodes do not collide across classes", () => {
   const { data } = buildClassFilteringFixture();
   const env = worker.buildEnv(data, {}, buildTarget([]));
-  const baseWorker = require("./d4cubeoptim-worker.js");
+  const baseWorker = require("./d4cubeoptimv3-worker.js");
 
   const barbState = buildState([], { class: "Barbarian" });
   const druidState = buildState([], { class: "Druid" });

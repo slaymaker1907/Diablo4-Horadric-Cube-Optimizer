@@ -185,6 +185,7 @@ function stateKeyV2(state, env = null) {
     `L${state && state.isLegendary ? 1 : 0}`,
     `E${state && state.enchantressAvailable ? 1 : 0}`,
     `S${(state && state.gearSlot) || "Any"}`,
+    `C${(state && state.class) || "Any"}`,
     `A${tokens.join(",")}`,
     `U${unsatisfactory}`,
   ].join("#");

@@ -216,9 +216,28 @@ function affixHasCategoryV3(affixId, category, env, operationType) {
   return getAffixCategoriesForOpV3(affixId, operationType || null, env).includes(category);
 }
 
+function affixSupportsClassV3(affix, className) {
+  if (!affix) {
+    return false;
+  }
+  if (!className || className === "Any") {
+    return true;
+  }
+  const affixClass = affix.class;
+  if (!affixClass || affixClass === "Any") {
+    return true;
+  }
+  return affixClass === className;
+}
+
 function isAffixLegalForStateV3(affixId, state, env) {
   const affix = env && env.affixMap ? env.affixMap[affixId] : null;
   if (!affix) {
+    return false;
+  }
+
+  const className = (state && state.class) || "Any";
+  if (!affixSupportsClassV3(affix, className)) {
     return false;
   }
 
@@ -233,18 +252,30 @@ function isAffixLegalForStateV3(affixId, state, env) {
 
 function getCategoryAffixesForStateV3(state, category, env, operationType) {
   const gearSlot = (state && state.gearSlot) || "Any";
+  const className = (state && state.class) || "Any";
   let base;
 
-  if (gearSlot === "Any") {
+  const bySlotByClass = env
+    && env.categoryAffixesBySlotByClass
+    && env.categoryAffixesBySlotByClass[gearSlot]
+    && env.categoryAffixesBySlotByClass[gearSlot][className];
+  if (bySlotByClass && Array.isArray(bySlotByClass[category])) {
+    base = bySlotByClass[category];
+  } else if (gearSlot === "Any" && className === "Any") {
     base = env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
   } else {
     const bySlot = env && env.categoryAffixesBySlot ? env.categoryAffixesBySlot[gearSlot] : null;
-    if (bySlot && Array.isArray(bySlot[category])) {
-      base = bySlot[category];
-    } else {
-      const affixes = env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [];
-      base = affixes.filter((affix) => isAffixLegalForStateV3(affix.id, state, env));
-    }
+    const slotBase = bySlot && Array.isArray(bySlot[category])
+      ? bySlot[category]
+      : (env && env.categoryAffixes ? (env.categoryAffixes[category] || []) : [])
+          .filter((affix) => {
+            const legalSlots = Array.isArray(affix.gearSlots) ? affix.gearSlots : null;
+            if (!legalSlots || gearSlot === "Any") {
+              return true;
+            }
+            return legalSlots.includes("Any") || legalSlots.includes(gearSlot);
+          });
+    base = slotBase.filter((affix) => affixSupportsClassV3(affix, className));
   }
 
   if (!operationType) {
@@ -1509,6 +1540,7 @@ function residualStateKeyV3(state, context) {
     `L${state && state.isLegendary ? 1 : 0}`,
     `E${state && state.enchantressAvailable ? 1 : 0}`,
     `S${(state && state.gearSlot) || "Any"}`,
+    `C${(state && state.class) || "Any"}`,
     `A${tokens.join(",")}`,
     `U${unsatisfactory}`,
   ].join("#");
@@ -2316,8 +2348,12 @@ function analyzeFeasibilityV3(state, target, data, gaConfig) {
     if (!isAffixLegalForStateV3(entry.affixId, state, env)) {
       return buildFeasibilityFailure(
         "F5",
-        `Target affix ${sharedWorker.affixName(entry.affixId, env)} is not legal for the current item slot or affix pool.`,
-        { illegalAffixId: entry.affixId, gearSlot: (state && state.gearSlot) || "Any" }
+        `Target affix ${sharedWorker.affixName(entry.affixId, env)} is not legal for the current item slot, class, or affix pool.`,
+        {
+          illegalAffixId: entry.affixId,
+          gearSlot: (state && state.gearSlot) || "Any",
+          class: (state && state.class) || "Any",
+        }
       );
     }
   }
@@ -2635,5 +2671,10 @@ if (typeof module !== "undefined" && module.exports) {
     getActionOutcomes: sharedWorker ? sharedWorker.getActionOutcomes : null,
     getValidActions: sharedWorker ? sharedWorker.getValidActions : null,
     getEligibleByCategory: sharedWorker ? sharedWorker.getEligibleByCategory : null,
+    getCategoryAffixesForState: sharedWorker ? sharedWorker.getCategoryAffixesForState : null,
+    getCategoryWeightTotal: sharedWorker ? sharedWorker.getCategoryWeightTotal : null,
+    affixSupportsClass: sharedWorker ? sharedWorker.affixSupportsClass : null,
+    getEffectiveAffixRollWeight: sharedWorker ? sharedWorker.getEffectiveAffixRollWeight : null,
+    buildFamilyCountsForPool: sharedWorker ? sharedWorker.buildFamilyCountsForPool : null,
   };
 }

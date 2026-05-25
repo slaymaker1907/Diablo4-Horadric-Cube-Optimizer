@@ -22,6 +22,8 @@ function buildCatalogFixture(categoryToNames) {
       const name = typeof entry === "string" ? entry : entry.name;
       const family = typeof entry === "string" ? "" : String(entry.family || "");
       const rollWeight = typeof entry === "string" ? 1 : Number(entry.rollWeight);
+      const familyRollWeight = typeof entry === "string" ? 0 : Number(entry.familyRollWeight);
+      const className = typeof entry === "string" ? "" : String(entry.class || "");
       const id = normalizeName(name);
 
       if (!byId.has(id)) {
@@ -32,6 +34,12 @@ function buildCatalogFixture(categoryToNames) {
           family,
           rollWeight: Number.isFinite(rollWeight) && rollWeight > 0 ? rollWeight : 1,
         });
+        if (Number.isFinite(familyRollWeight) && familyRollWeight > 0) {
+          byId.get(id).familyRollWeight = familyRollWeight;
+        }
+        if (className) {
+          byId.get(id).class = className;
+        }
       }
 
       if (family) {
@@ -39,6 +47,12 @@ function buildCatalogFixture(categoryToNames) {
       }
       if (Number.isFinite(rollWeight) && rollWeight > 0) {
         byId.get(id).rollWeight = rollWeight;
+      }
+      if (Number.isFinite(familyRollWeight) && familyRollWeight > 0) {
+        byId.get(id).familyRollWeight = familyRollWeight;
+      }
+      if (className) {
+        byId.get(id).class = className;
       }
       byId.get(id).categories.push(category);
     }
@@ -127,6 +141,7 @@ function buildExpandedResidualFixture() {
 function buildState(affixes, options = {}) {
   return {
     gearSlot: options.gearSlot || "Any",
+    class: options.class || "Any",
     isLegendary: !!options.isLegendary,
     enchantressAvailable: options.enchantressAvailable !== false,
     affixes: affixes.map((entry) => ({
@@ -1732,3 +1747,255 @@ test("Case B is blocked when a non-GA matched target shares the focused prism ca
     "Case B must be blocked when a matched target affix shares the focused prism category"
   );
 });
+
+// ============================================================================
+// Class-aware skill catalog + family-level rolling weight tests.
+// These cover the new skill multiplier, class-agnostic general, class-specific
+// general, and specific-skill families introduced in config.js, along with the
+// state.class narrowing that flows through env.categoryAffixesBySlotByClass.
+// ============================================================================
+
+function buildClassFilteringFixture() {
+  const categoryToNames = {
+    Adept: [
+      "Mainstat",
+      { name: "to All Skills" },
+      { name: "to Basic Skills", family: "class-agnostic-general", familyRollWeight: 1 },
+      { name: "to Core Skills",  family: "class-agnostic-general", familyRollWeight: 1 },
+      { name: "to Bash",         family: "specific-skill", familyRollWeight: 1, class: "Barbarian" },
+      { name: "to Frenzy",       family: "specific-skill", familyRollWeight: 1, class: "Barbarian" },
+      { name: "to Claw",         family: "specific-skill", familyRollWeight: 1, class: "Druid" },
+      { name: "to Maul",         family: "specific-skill", familyRollWeight: 1, class: "Druid" },
+    ],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+    Protector: ["Maximum Life"],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+
+  // "to All Skills" is enchant-only.
+  byName["to All Skills"].operationCategories = {
+    add:     [],
+    focused: [],
+    chaotic: [],
+    remove:  [],
+  };
+
+  const data = {
+    affixes,
+    categories,
+    targetAffixIds: [],
+    maxAffixSlots: 4,
+    classes: ["Any", "Barbarian", "Druid"],
+  };
+  return { data, byName };
+}
+
+test("Class filter narrows the Adept add pool to that class's specific skills", () => {
+  const { data, byName } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const barbState = buildState([], { class: "Barbarian" });
+  const druidState = buildState([], { class: "Druid" });
+  const anyState = buildState([], { class: "Any" });
+
+  const barbPool = worker.getCategoryAffixesForState(barbState, env, "Adept", "add").map((a) => a.id);
+  const druidPool = worker.getCategoryAffixesForState(druidState, env, "Adept", "add").map((a) => a.id);
+  const anyPool = worker.getCategoryAffixesForState(anyState, env, "Adept", "add").map((a) => a.id);
+
+  assert.ok(barbPool.includes(byName["to Bash"].id), "Barbarian pool must include to Bash");
+  assert.ok(barbPool.includes(byName["to Frenzy"].id), "Barbarian pool must include to Frenzy");
+  assert.ok(!barbPool.includes(byName["to Claw"].id), "Barbarian pool must not include Druid to Claw");
+  assert.ok(!barbPool.includes(byName["to Maul"].id), "Barbarian pool must not include Druid to Maul");
+
+  assert.ok(druidPool.includes(byName["to Claw"].id), "Druid pool must include to Claw");
+  assert.ok(!druidPool.includes(byName["to Bash"].id), "Druid pool must not include Barb to Bash");
+
+  for (const name of ["to Bash", "to Frenzy", "to Claw", "to Maul"]) {
+    assert.ok(anyPool.includes(byName[name].id), `Class=Any pool must include ${name}`);
+  }
+});
+
+test("Class-agnostic general skills appear for every class", () => {
+  const { data, byName } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  for (const className of ["Any", "Barbarian", "Druid"]) {
+    const pool = worker.getCategoryAffixesForState(
+      buildState([], { class: className }), env, "Adept", "add"
+    ).map((a) => a.id);
+
+    assert.ok(pool.includes(byName["to Basic Skills"].id),
+      `Class=${className}: to Basic Skills (class-agnostic) must be present`);
+    assert.ok(pool.includes(byName["to Core Skills"].id),
+      `Class=${className}: to Core Skills (class-agnostic) must be present`);
+    assert.ok(pool.includes(byName["Mainstat"].id),
+      `Class=${className}: Mainstat (no class) must be present`);
+  }
+});
+
+test("Family-level rolling: family contributes weight 1 regardless of member count", () => {
+  const { data, byName } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  // Barbarian Adept add pool: Mainstat (1) + to Basic Skills + to Core Skills (class-agnostic
+  // generals family — 2 members @ familyRollWeight 1 → each effective weight 1/2) + to Bash
+  // + to Frenzy (specific-skill family — 2 Barb members @ familyRollWeight 1 → each 1/2).
+  // "to All Skills" is excluded from add.  Expected category total weight = 1 + 1 + 1 = 3.
+  const barbState = buildState([], { class: "Barbarian" });
+  const barbTotal = worker.getCategoryWeightTotal(barbState, env, "Adept", "add");
+  assert.ok(Math.abs(barbTotal - 3) < 1e-9,
+    `Barbarian Adept add total weight should be 3, got ${barbTotal}`);
+
+  const barbAdd = worker.getActionOutcomes(barbState, { type: "add", prism: "Adept" }, env);
+  const mainstatOutcome = barbAdd.find((o) => o.state.affixes.some((a) => a.affixId === byName["Mainstat"].id));
+  const bashOutcome = barbAdd.find((o) => o.state.affixes.some((a) => a.affixId === byName["to Bash"].id));
+  const basicSkillsOutcome = barbAdd.find((o) => o.state.affixes.some((a) => a.affixId === byName["to Basic Skills"].id));
+
+  assert.ok(mainstatOutcome, "Mainstat outcome must exist");
+  assert.ok(bashOutcome, "to Bash outcome must exist");
+  assert.ok(basicSkillsOutcome, "to Basic Skills outcome must exist");
+
+  // Mainstat is a singleton → effective weight 1, probability 1/3.
+  approxEqual(mainstatOutcome.probability, 1 / 3, 1e-9);
+  // to Bash is one of two Barb specifics in a family with familyRollWeight 1 → effective
+  // weight 1/2, probability (1/2) / 3 = 1/6.
+  approxEqual(bashOutcome.probability, 1 / 6, 1e-9);
+  // to Basic Skills is one of two class-agnostic generals → same probability 1/6.
+  approxEqual(basicSkillsOutcome.probability, 1 / 6, 1e-9);
+});
+
+test("Family-level rolling: Druid pool re-normalizes the specific-skill family to its 2 members", () => {
+  const { data, byName } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const druidState = buildState([], { class: "Druid" });
+  const druidTotal = worker.getCategoryWeightTotal(druidState, env, "Adept", "add");
+  // Mainstat (1) + class-agnostic generals family (1) + specific-skill family (1) = 3.
+  assert.ok(Math.abs(druidTotal - 3) < 1e-9,
+    `Druid Adept add total weight should be 3, got ${druidTotal}`);
+
+  const druidAdd = worker.getActionOutcomes(druidState, { type: "add", prism: "Adept" }, env);
+  const clawOutcome = druidAdd.find((o) => o.state.affixes.some((a) => a.affixId === byName["to Claw"].id));
+  assert.ok(clawOutcome, "to Claw outcome must exist for Druid");
+  approxEqual(clawOutcome.probability, 1 / 6, 1e-9);
+
+  // Bash must NOT appear in Druid pool.
+  const bashOutcome = druidAdd.find((o) => o.state.affixes.some((a) => a.affixId === byName["to Bash"].id));
+  assert.equal(bashOutcome, undefined, "to Bash must not appear in Druid add pool");
+});
+
+test("'to All Skills' is excluded from every cube operation pool", () => {
+  const { data, byName } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  const state = buildState([
+    { affixId: byName["to All Skills"].id },
+  ], { class: "Barbarian" });
+
+  for (const opType of ["add", "focused", "chaotic", "remove"]) {
+    const eligible = worker.getEligibleByCategory(state, env, "Adept", opType);
+    assert.ok(
+      !eligible.some((e) => e.entry.affixId === byName["to All Skills"].id),
+      `'to All Skills' must not appear in Adept ${opType} pool`
+    );
+  }
+
+  const adeptAdd = worker.getActionOutcomes(
+    buildState([], { class: "Barbarian" }),
+    { type: "add", prism: "Adept" },
+    env
+  );
+  assert.ok(
+    !adeptAdd.some((o) => o.state.affixes.some((a) => a.affixId === byName["to All Skills"].id)),
+    "Adept add must never produce 'to All Skills'"
+  );
+});
+
+test("'to All Skills' remains accessible as an enchant target", () => {
+  const { data, byName } = buildClassFilteringFixture();
+
+  const state = buildState([
+    { affixId: byName["Mainstat"].id },
+  ], { class: "Barbarian", enchantressAvailable: true });
+
+  const target = buildTarget([
+    { affixId: byName["to All Skills"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, {}, target);
+  const actions = worker.getValidActions(state, target, env);
+
+  const enchantActions = actions.filter((a) => a.type === "enchant");
+  assert.ok(
+    enchantActions.some((a) => a.targetAffixId === byName["to All Skills"].id),
+    "'to All Skills' must be an available enchant target"
+  );
+});
+
+test("Family-level rolling: skill-multiplier family in Aggressive prism contributes weight 1", () => {
+  const categoryToNames = {
+    Aggressive: [
+      "Mainstat",
+      "Weapon Damage",
+      "Attack Speed",
+      "Critical Strike Chance",
+      "Critical Strike Damage",
+      "Vulnerable Damage",
+      "DoT Damage",
+      "All Damage",
+      { name: "Basic Skill Damage Multiplier",  family: "skill-multiplier", familyRollWeight: 1 },
+      { name: "Core Skill Damage Multiplier",   family: "skill-multiplier", familyRollWeight: 1 },
+      { name: "Backstab Damage Multiplier",     family: "skill-multiplier", familyRollWeight: 1 },
+    ],
+    Protector: ["Maximum Life"],
+  };
+
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+
+  // 8 singletons (weight 1 each) + 1 family (weight 1) = total 9.
+  const state = buildState([]);
+  const total = worker.getCategoryWeightTotal(state, env, "Aggressive", "add");
+  assert.ok(Math.abs(total - 9) < 1e-9,
+    `Aggressive add total weight should be 9 (8 singletons + 1 skill-multiplier family), got ${total}`);
+
+  const outcomes = worker.getActionOutcomes(state, { type: "add", prism: "Aggressive" }, env);
+  const basicOutcome = outcomes.find((o) =>
+    o.state.affixes.some((a) => a.affixId === byName["Basic Skill Damage Multiplier"].id));
+  const mainstatOutcome = outcomes.find((o) =>
+    o.state.affixes.some((a) => a.affixId === byName["Mainstat"].id));
+
+  assert.ok(basicOutcome, "Basic Skill Damage Multiplier outcome must exist");
+  assert.ok(mainstatOutcome, "Mainstat outcome must exist");
+  // Mainstat: 1/9.  Each skill multiplier: (1/3)/9 = 1/27.
+  approxEqual(mainstatOutcome.probability, 1 / 9, 1e-9);
+  approxEqual(basicOutcome.probability, 1 / 27, 1e-9);
+});
+
+test("Class change is reflected in stateKey so cached MCTS nodes do not collide across classes", () => {
+  const { data } = buildClassFilteringFixture();
+  const env = worker.buildEnv(data, {}, buildTarget([]));
+  const baseWorker = require("./d4cubeoptim-worker.js");
+
+  const barbState = buildState([], { class: "Barbarian" });
+  const druidState = buildState([], { class: "Druid" });
+  const anyState = buildState([], { class: "Any" });
+
+  const barbKey = baseWorker.stateKey(barbState);
+  const druidKey = baseWorker.stateKey(druidState);
+  const anyKey = baseWorker.stateKey(anyState);
+
+  assert.notEqual(barbKey, druidKey, "Barb vs Druid state keys must differ");
+  assert.notEqual(barbKey, anyKey, "Barb vs Any state keys must differ");
+  assert.notEqual(druidKey, anyKey, "Druid vs Any state keys must differ");
+
+  // The key must encode the class explicitly.
+  assert.ok(barbKey.includes("CBarbarian"), `barbKey must include CBarbarian, got ${barbKey}`);
+  assert.ok(druidKey.includes("CDruid"), `druidKey must include CDruid, got ${druidKey}`);
+});
+
+// Suppress lint by referencing approxEqual from the existing helper above.
+void approxEqual;

@@ -117,6 +117,7 @@ const FAMILY_OTHER_IDS = {
 };
 
 const DEFAULT_GEAR_SLOT = "Any";
+const DEFAULT_CLASS = "Any";
 
 if (typeof self !== "undefined") {
   self.onmessage = (event) => {
@@ -560,8 +561,7 @@ function buildEnv(data, gaConfig, target) {
     categoryAffixes[categoryName] = (categories[categoryName] || [])
       .map((id) => affixMap[id])
       .filter(Boolean);
-    categoryWeightTotals[categoryName] = categoryAffixes[categoryName]
-      .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
+    categoryWeightTotals[categoryName] = sumEffectiveWeights(categoryAffixes[categoryName]);
   }
 
   const knownGearSlots = Array.isArray(data && data.gearSlots) && data.gearSlots.length > 0
@@ -570,6 +570,11 @@ function buildEnv(data, gaConfig, target) {
       ? gearSlotLegality.GEAR_SLOTS
       : [DEFAULT_GEAR_SLOT]);
   const gearSlots = Array.from(new Set([DEFAULT_GEAR_SLOT].concat(knownGearSlots)));
+
+  const knownClasses = Array.isArray(data && data.classes) && data.classes.length > 0
+    ? data.classes.filter((cls) => typeof cls === "string" && cls)
+    : [DEFAULT_CLASS];
+  const classes = Array.from(new Set([DEFAULT_CLASS].concat(knownClasses)));
 
   categoryAffixesBySlot[DEFAULT_GEAR_SLOT] = categoryAffixes;
   categoryWeightTotalsBySlot[DEFAULT_GEAR_SLOT] = categoryWeightTotals;
@@ -584,8 +589,40 @@ function buildEnv(data, gaConfig, target) {
     for (const categoryName of categoryNames) {
       const filtered = categoryAffixes[categoryName].filter((affix) => affixSupportsGearSlot(affix, gearSlot));
       categoryAffixesBySlot[gearSlot][categoryName] = filtered;
-      categoryWeightTotalsBySlot[gearSlot][categoryName] = filtered
-        .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
+      categoryWeightTotalsBySlot[gearSlot][categoryName] = sumEffectiveWeights(filtered);
+    }
+  }
+
+  // Per-(slot, class) caches.  Class narrowing is independent of slot legality,
+  // so we filter the per-slot list by `affixSupportsClass` and recompute the
+  // effective weight totals (which depend on class-narrowed family sizes).
+  const categoryAffixesBySlotByClass = Object.create(null);
+  const categoryWeightTotalsBySlotByClass = Object.create(null);
+
+  for (const gearSlot of gearSlots) {
+    categoryAffixesBySlotByClass[gearSlot] = Object.create(null);
+    categoryWeightTotalsBySlotByClass[gearSlot] = Object.create(null);
+
+    const slotAffixes = categoryAffixesBySlot[gearSlot] || categoryAffixes;
+    const slotTotals = categoryWeightTotalsBySlot[gearSlot] || categoryWeightTotals;
+
+    for (const className of classes) {
+      categoryAffixesBySlotByClass[gearSlot][className] = Object.create(null);
+      categoryWeightTotalsBySlotByClass[gearSlot][className] = Object.create(null);
+
+      for (const categoryName of categoryNames) {
+        const base = slotAffixes[categoryName] || [];
+        if (className === DEFAULT_CLASS) {
+          categoryAffixesBySlotByClass[gearSlot][className][categoryName] = base;
+          categoryWeightTotalsBySlotByClass[gearSlot][className][categoryName] = Number.isFinite(slotTotals[categoryName])
+            ? slotTotals[categoryName]
+            : sumEffectiveWeights(base);
+        } else {
+          const filtered = base.filter((affix) => affixSupportsClass(affix, className));
+          categoryAffixesBySlotByClass[gearSlot][className][categoryName] = filtered;
+          categoryWeightTotalsBySlotByClass[gearSlot][className][categoryName] = sumEffectiveWeights(filtered);
+        }
+      }
     }
   }
 
@@ -660,11 +697,14 @@ function buildEnv(data, gaConfig, target) {
   return {
     affixMap,
     gearSlots,
+    classes,
     categoryNames,
     categoryAffixes,
     categoryAffixesBySlot,
+    categoryAffixesBySlotByClass,
     categoryWeightTotals,
     categoryWeightTotalsBySlot,
+    categoryWeightTotalsBySlotByClass,
     targetAffixSet: new Set(data.targetAffixIds || []),
     gaRequiredCounts,
     sourceGACounts,
@@ -689,6 +729,10 @@ function getStateGearSlot(state) {
   return (state && state.gearSlot) || DEFAULT_GEAR_SLOT;
 }
 
+function getStateClass(state) {
+  return (state && state.class) || DEFAULT_CLASS;
+}
+
 function affixSupportsGearSlot(affix, gearSlot) {
   if (!affix) {
     return false;
@@ -706,19 +750,39 @@ function affixSupportsGearSlot(affix, gearSlot) {
   return legalSlots.includes(DEFAULT_GEAR_SLOT) || legalSlots.includes(gearSlot);
 }
 
+function affixSupportsClass(affix, className) {
+  if (!affix) {
+    return false;
+  }
+  if (!className || className === DEFAULT_CLASS) {
+    return true;
+  }
+  const affixClass = affix.class;
+  if (!affixClass || affixClass === DEFAULT_CLASS) {
+    return true;
+  }
+  return affixClass === className;
+}
+
 function getCategoryAffixesForState(state, env, categoryName, operationType) {
   const gearSlot = getStateGearSlot(state);
+  const className = getStateClass(state);
 
-  let base;
-  if (gearSlot === DEFAULT_GEAR_SLOT) {
+  let base = null;
+
+  const bySlotByClass = env.categoryAffixesBySlotByClass
+    && env.categoryAffixesBySlotByClass[gearSlot]
+    && env.categoryAffixesBySlotByClass[gearSlot][className];
+  if (bySlotByClass && Array.isArray(bySlotByClass[categoryName])) {
+    base = bySlotByClass[categoryName];
+  } else if (gearSlot === DEFAULT_GEAR_SLOT && className === DEFAULT_CLASS) {
     base = env.categoryAffixes[categoryName] || [];
   } else {
     const bySlot = env.categoryAffixesBySlot && env.categoryAffixesBySlot[gearSlot];
-    if (bySlot && Array.isArray(bySlot[categoryName])) {
-      base = bySlot[categoryName];
-    } else {
-      base = (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
-    }
+    const slotBase = bySlot && Array.isArray(bySlot[categoryName])
+      ? bySlot[categoryName]
+      : (env.categoryAffixes[categoryName] || []).filter((affix) => affixSupportsGearSlot(affix, gearSlot));
+    base = slotBase.filter((affix) => affixSupportsClass(affix, className));
   }
 
   if (!operationType) {
@@ -817,6 +881,7 @@ function stateKey(state) {
     `L${state.isLegendary ? 1 : 0}`,
     `E${state.enchantressAvailable ? 1 : 0}`,
     `S${state.gearSlot || "any"}`,
+    `C${state.class || DEFAULT_CLASS}`,
     tokens.join(","),
   ].join("#");
 }
@@ -832,6 +897,7 @@ function cloneState(state) {
     isLegendary: !!state.isLegendary,
     enchantressAvailable: !!state.enchantressAvailable,
     gearSlot: state.gearSlot || "Any",
+    class: state.class || DEFAULT_CLASS,
     affixes: (state.affixes || []).map((entry) => ({
       affixId: entry.affixId,
       isGA: !!entry.isGA,
@@ -1278,6 +1344,58 @@ function getAffixRollWeight(affix) {
 }
 
 /**
+ * Count family members in a pool (affixes that carry a non-empty `family`).
+ * Returns Map<family, count>.
+ */
+function buildFamilyCountsForPool(pool) {
+  const counts = new Map();
+  for (const affix of pool) {
+    const family = affix && affix.family ? affix.family : "";
+    if (!family) {
+      continue;
+    }
+    counts.set(family, (counts.get(family) || 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Effective roll weight for `affix` within the given pool.
+ *
+ * Family-level rolling: when an affix carries `familyRollWeight`, the family
+ * contributes a single normalized weight (familyRollWeight) regardless of how
+ * many members are present, and each member is equally likely within the
+ * family.  Per-member effective weight = familyRollWeight / count-in-pool.
+ *
+ * Affixes without `familyRollWeight` fall back to their static `rollWeight`,
+ * preserving the existing per-subtype weighting used by Elemental Damage and
+ * Specific Resistance families.
+ */
+function getEffectiveAffixRollWeight(affix, familyCounts) {
+  const familyRollWeight = Number(affix && affix.familyRollWeight);
+  if (Number.isFinite(familyRollWeight) && familyRollWeight > 0 && affix.family) {
+    const count = familyCounts ? (familyCounts.get(affix.family) || 0) : 0;
+    if (count > 0) {
+      return familyRollWeight / count;
+    }
+  }
+  return getAffixRollWeight(affix);
+}
+
+/**
+ * Sum effective roll weights of all affixes in a pool, accounting for
+ * family-level normalization.
+ */
+function sumEffectiveWeights(pool) {
+  const familyCounts = buildFamilyCountsForPool(pool);
+  let total = 0;
+  for (const affix of pool) {
+    total += getEffectiveAffixRollWeight(affix, familyCounts);
+  }
+  return total;
+}
+
+/**
  * Sum the roll weights of all affixes in `categoryName`.
  *
  * @param {Object} env
@@ -1287,18 +1405,28 @@ function getAffixRollWeight(affix) {
 function getCategoryWeightTotal(state, env, categoryName, operationType) {
   if (!operationType) {
     const gearSlot = getStateGearSlot(state);
-    if (gearSlot === DEFAULT_GEAR_SLOT) {
+    const className = getStateClass(state);
+
+    const bySlotByClass = env.categoryWeightTotalsBySlotByClass
+      && env.categoryWeightTotalsBySlotByClass[gearSlot]
+      && env.categoryWeightTotalsBySlotByClass[gearSlot][className];
+    if (bySlotByClass && Number.isFinite(bySlotByClass[categoryName])) {
+      return bySlotByClass[categoryName];
+    }
+
+    if (gearSlot === DEFAULT_GEAR_SLOT && className === DEFAULT_CLASS) {
       return env.categoryWeightTotals[categoryName] || 0;
     }
 
     const bySlot = env.categoryWeightTotalsBySlot && env.categoryWeightTotalsBySlot[gearSlot];
-    if (bySlot && Number.isFinite(bySlot[categoryName])) {
+    if (bySlot && Number.isFinite(bySlot[categoryName]) && className === DEFAULT_CLASS) {
       return bySlot[categoryName];
     }
   }
 
-  return getCategoryAffixesForState(state, env, categoryName, operationType)
-    .reduce((sum, affix) => sum + getAffixRollWeight(affix), 0);
+  return sumEffectiveWeights(
+    getCategoryAffixesForState(state, env, categoryName, operationType)
+  );
 }
 
 /**
@@ -1330,8 +1458,9 @@ function getActionOutcomes(state, action, env) {
       return [];
     }
 
+    const familyCounts = buildFamilyCountsForPool(list);
     for (const affix of list) {
-      const p = getAffixRollWeight(affix) / totalWeight;
+      const p = getEffectiveAffixRollWeight(affix, familyCounts) / totalWeight;
       const next = cloneState(state);
       next.affixes.push({
         affixId: canonicalizeAffixIdForState(affix.id, env),
@@ -1389,9 +1518,10 @@ function getActionOutcomes(state, action, env) {
       return [];
     }
 
+    const familyCounts = buildFamilyCountsForPool(list);
     for (const { index } of eligible) {
       for (const affix of list) {
-        const affixP = getAffixRollWeight(affix) / totalWeight;
+        const affixP = getEffectiveAffixRollWeight(affix, familyCounts) / totalWeight;
         const next = cloneState(state);
         next.affixes[index] = {
           affixId: canonicalizeAffixIdForState(affix.id, env),
@@ -1435,8 +1565,9 @@ function getActionOutcomes(state, action, env) {
           continue;
         }
 
+        const familyCounts = buildFamilyCountsForPool(list);
         for (const affix of list) {
-          const affixP = getAffixRollWeight(affix) / totalWeight;
+          const affixP = getEffectiveAffixRollWeight(affix, familyCounts) / totalWeight;
           const next = cloneState(state);
           next.affixes[index] = {
             affixId: canonicalizeAffixIdForState(affix.id, env),
@@ -3450,8 +3581,14 @@ if (typeof module !== "undefined" && module.exports) {
     getBestAddActionForAffix,
     resolveRuleAction,
     affixSupportsGearSlot,
+    affixSupportsClass,
+    getStateClass,
+    getEffectiveAffixRollWeight,
+    buildFamilyCountsForPool,
+    sumEffectiveWeights,
     getAffixCategoriesForOp,
     getCategoryAffixesForState,
+    getCategoryWeightTotal,
     getEligibleByCategory,
     getActionOutcomes,
     mergeOutcomes,

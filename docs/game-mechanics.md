@@ -55,14 +55,31 @@ Prisms steer random outcomes toward a specific affix category. An affix belongs 
 
 | Prism | Affix Category |
 |---|---|
-| **Aggressive** | Mainstat, Weapon Damage, Attack Speed, Critical Strike Chance, Critical Strike Damage, Vulnerable Damage, DoT Damage, All Damage, Elemental Damage (typed), Thorns *(Add only — see edge cases)* |
+| **Aggressive** | Mainstat, Weapon Damage, Attack Speed, Critical Strike Chance, Critical Strike Damage, Vulnerable Damage, DoT Damage, All Damage, Elemental Damage (typed), Skill Multipliers (family — Basic/Core/Backstab Skill Damage Multiplier), Thorns *(Add only — see edge cases)* |
 | **Pragmatic** | Barrier Generation, Cooldown Reduction, Fortify Generation, Healing Received, Impairment Reduction, Life Regeneration, Lucky Hit Chance, Movement Speed, Potion Capacity, Maximum Evade Charges, Attacks reduce Evade Cooldown, Evade grants Movement Speed, Thorns *(Remove only — see edge cases)* |
 | **Protector** | Armor, Damage Reduction, Dodge Chance, Fortify Generation, Life on Hit, Life on Kill, Life Regeneration, Maximum Life, All Resistance, Specific Resistance (typed), Thorns *(Focused/Chaotic Reroll only — see edge cases)* |
 | **Resourceful** | Lucky Hit Chance restore Resource, Maximum Resource, Resource Cost Reduction, Resource on Kill, Resource Regeneration |
-| **Adept** | Mainstat, Specific Skill Ranks (individual class skills). "Category Skill Ranks" (+X to All [Class] Skills) is in the Adept pool conceptually but is **enchant-only** — see edge cases. |
+| **Adept** | Mainstat; class-agnostic general skills *(family — to Basic / Core / Defensive Skills)*; class-specific general skills *(family, filtered by class — e.g. to Brawling / Wrath / Conjuration Skills)*; specific class skills *(family, filtered by class — e.g. to Bash, to Claw, to Fireball)*; to All Skills *(enchant-only, see edge case 7)*. |
 | **Chromatic** | Specific Resistance (typed) |
 
 For Focused Reroll, a prism is always required.
+
+### Family-Level Rolling
+
+Some affixes are grouped into a **family** that rolls as a single logical entry within its prism category. When the catalog entry carries a `familyRollWeight`, the family contributes that weight at the prism level (once, regardless of how many members are present), and each member is rolled with equal probability within the family. Effective per-member weight is `familyRollWeight / count-of-family-members-in-pool`, so class and slot narrowing automatically renormalize the family.
+
+Families with this treatment:
+
+- **Skill Multipliers** (Aggressive): Basic / Core / Backstab Skill Damage Multiplier.
+- **Class-Agnostic General Skills** (Adept): to Basic / Core / Defensive Skills.
+- **Class-Specific General Skills** (Adept): per-class buckets like to Brawling Skills, to Wrath Skills, to Conjuration Skills. Filtered by class.
+- **Specific Skills** (Adept): per-class single-skill ranks like to Bash, to Claw, to Fireball. Filtered by class.
+
+Families *without* `familyRollWeight` keep their per-subtype weighting — Elemental Damage (typed) and Specific Resistance (typed) currently behave this way, so each typed subtype rolls independently at weight 1.
+
+### Class Scope
+
+`state.class` narrows the Adept pool to a single character class. When set, only skill affixes whose `class` field is empty (class-agnostic — Mainstat, to All Skills, to Basic / Core / Defensive Skills) or matches the chosen class remain in the rolling pool. `Any` keeps every class's skills in the pool — useful for browsing, but the resulting per-skill probabilities are much smaller than what a real character would experience.
 
 ---
 
@@ -129,6 +146,8 @@ The Cube skips enchanted slots entirely. To protect a high-value roll (such as a
 
 After using a Focused Reroll or Remove Affix recipe that results in a UI error ("This material combo could not change the item's affix"), or after stripping an affix you plan to replace, **close the Horadric Cube UI completely** before rolling again. The Cube preserves the item's internal RNG seed within a single UI session. Rapid Remove → Add sequences will repeatedly roll the exact same stat at the exact same numerical value, consuming Refined Primordial Dust for no net change.
 
-### 7. Category Skill Ranks — Enchant Only
+### 7. to All Skills — Enchant Only
 
-"+X to All [Class] Skills" (**Category Skill Ranks** in the optimizer) exists in the gear pool and can appear as an Enchantress target, but it **cannot** be rolled, rerolled, or removed via any Horadric Cube recipe. It is conceptually in the Adept prism pool but has empty operation categories for Add, Focused Reroll, Chaotic Reroll, and Remove — so no cube prism can touch it. The only way to acquire or change this affix is via the Enchantress.
+`to All Skills` is the lone enchant-only skill affix. It exists in the gear pool and can appear as an Enchantress target, but it **cannot** be rolled, rerolled, or removed via any Horadric Cube recipe. It is conceptually in the Adept prism pool but has empty operation categories for Add, Focused Reroll, Chaotic Reroll, and Remove — so no cube prism can touch it. The only way to acquire or change this affix is via the Enchantress.
+
+The per-category general skill ranks — `to Brawling Skills`, `to Wrath Skills`, `to Basic Skills`, etc. — are **not** enchant-only. They are ordinary Adept-prism entries that can be added, focused-rerolled, chaotic-rerolled, and removed like any other affix, subject to family-level rolling and class scope.

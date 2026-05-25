@@ -571,11 +571,15 @@
 							<label for="gear-slot">Gear Slot</label>
 							<select id="gear-slot"></select>
 						</div>
+						<div class="field" style="width: 200px;">
+							<label for="character-class">Class</label>
+							<select id="character-class"></select>
+						</div>
 						<button id="legendary-toggle" class="toggle">Legendary: No</button>
 						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
 						<button id="enchantress-toggle" class="toggle active">Enchantress Available</button>
-						<p id="gear-slot-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
-							Note: affix availability may vary by class. This tool models shared affixes only; some class-specific affixes (e.g. skill ranks) may not appear.
+						<p id="class-any-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
+							Class is Any — the rolling pool includes every class's skills. Set Class to your character for accurate probabilities.
 						</p>
 					</div>
 
@@ -594,6 +598,10 @@
 				<h2>Target Item</h2>
 				<div class="panel-body">
 					<div class="top-row" aria-hidden="true" style="visibility: hidden; pointer-events: none; user-select: none;">
+						<div class="field" style="width: 200px;">
+							<label>&nbsp;</label>
+							<select disabled></select>
+						</div>
 						<div class="field" style="width: 200px;">
 							<label>&nbsp;</label>
 							<select disabled></select>
@@ -743,6 +751,7 @@
 					<li>GA preservation is automatic: any GA on a current affix that aligns with a target affix is protected throughout optimization. The optimizer will never recommend an action that risks losing it.</li>
 					<li>Check <strong>Legendary</strong> if your item cannot have affixes removed. The Enchantress Available toggle tracks whether the one-time enchant has been used — it resets automatically when an enchanted affix is removed.</li>
 					<li>Set <strong>Gear Slot</strong> to your item type to restrict suggestions to slot-legal affixes and reduce compute time. Leave it at <em>Any</em> to allow all affixes.</li>
+					<li>Set <strong>Class</strong> to your character class to narrow the Adept skill pool to that class's skills (plus class-agnostic generals). Leave it at <em>Any</em> to keep every class's skills in the pool — useful for browsing but not realistic for actual crafting.</li>
 					<li>Click <strong>Optimize</strong>. The recommended cube action appears with success probability and expected steps to a terminal outcome (success or GA loss).</li>
 					<li>Perform the action in-game, then record it with <strong>Apply Last Outcome</strong>: pick the modification type and prism used (pre-filled from the recommendation), select the source affix that changed, and type the new affix that appeared. Click Apply to update state, then Optimize again.</li>
 					<li>Click <strong>Reset</strong> to clear all state and start over.</li>
@@ -823,7 +832,11 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-24-v3-focused-reroll-target-block";
+		const WORKER_VERSION = "2026-05-25-v3-class-and-skill-families";
+
+		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
+			? _cfg.CLASSES.slice()
+			: ["Any"];
 		const LEGACY_AFFIX_ID_MAP = (_cfg.LEGACY_AFFIX_ID_MAP && typeof _cfg.LEGACY_AFFIX_ID_MAP === "object")
 			? _cfg.LEGACY_AFFIX_ID_MAP
 			: {};
@@ -856,6 +869,7 @@
 		const defaultState = {
 			current: {
 				gearSlot: "Any",
+				class: "Any",
 				isLegendary: false,
 				enchantressAvailable: true,
 				affixes: [
@@ -905,7 +919,8 @@
 			thinkingSeconds: document.getElementById("thinking-seconds"),
 
 			gearSlot: document.getElementById("gear-slot"),
-			gearSlotWarning: document.getElementById("gear-slot-warning"),
+			characterClass: document.getElementById("character-class"),
+			classAnyWarning: document.getElementById("class-any-warning"),
 			legendaryToggle: document.getElementById("legendary-toggle"),
 			enchantressToggle: document.getElementById("enchantress-toggle"),
 
@@ -961,6 +976,14 @@
 				els.gearSlot.appendChild(option);
 			});
 
+			els.characterClass.innerHTML = "";
+			CLASSES.forEach((cls) => {
+				const option = document.createElement("option");
+				option.value = cls;
+				option.textContent = cls;
+				els.characterClass.appendChild(option);
+			});
+
 			els.manualPrism.innerHTML = "";
 			["None", ...PRISMS].forEach((prism) => {
 				const option = document.createElement("option");
@@ -998,6 +1021,13 @@
 
 			els.gearSlot.addEventListener("change", () => {
 				appState.current.gearSlot = els.gearSlot.value;
+				invalidatePolicyCache();
+				saveState();
+				renderAll();
+			});
+
+			els.characterClass.addEventListener("change", () => {
+				appState.current.class = els.characterClass.value;
 				invalidatePolicyCache();
 				saveState();
 				renderAll();
@@ -1117,7 +1147,7 @@
 			sanitizeState();
 			const illegalSelection = getFirstIllegalAffixSelection();
 			if (illegalSelection) {
-				renderStatus(`${illegalSelection.label} ${illegalSelection.name} is not legal on ${illegalSelection.gearSlot}. Select Any to disable slot narrowing.`, "");
+				renderStatus(`${illegalSelection.label} ${illegalSelection.name} is not legal on ${illegalSelection.gearSlot} for class ${illegalSelection.className}. Set Gear Slot and Class to Any to disable narrowing.`, "");
 				return;
 			}
 			const runState = exportCurrentState();
@@ -1150,6 +1180,7 @@
 					affixes: AFFIXES,
 					categories: CATEGORY_TO_AFFIX_IDS,
 					gearSlots: GEAR_SLOTS,
+					classes: CLASSES,
 					targetAffixIds: runTarget.affixes.map((entry) => entry.affixId),
 				},
 				gaConfig: {
@@ -1573,9 +1604,10 @@
 
 		function renderCurrentControls() {
 			els.gearSlot.value = appState.current.gearSlot;
+			els.characterClass.value = appState.current.class;
 
-			if (els.gearSlotWarning) {
-				els.gearSlotWarning.style.display = appState.current.gearSlot !== "Any" ? "" : "none";
+			if (els.classAnyWarning) {
+				els.classAnyWarning.style.display = appState.current.class === "Any" ? "" : "none";
 			}
 
 			els.legendaryToggle.classList.toggle("active", appState.current.isLegendary);
@@ -2024,6 +2056,9 @@
 			appState.current.gearSlot = GEAR_SLOTS.includes(appState.current.gearSlot)
 				? appState.current.gearSlot
 				: "Any";
+			appState.current.class = CLASSES.includes(appState.current.class)
+				? appState.current.class
+				: "Any";
 			appState.current.isLegendary = !!appState.current.isLegendary;
 			appState.current.enchantressAvailable = !!appState.current.enchantressAvailable;
 
@@ -2082,6 +2117,7 @@
 		function exportCurrentState() {
 			return {
 				gearSlot: appState.current.gearSlot,
+				class: appState.current.class,
 				isLegendary: appState.current.isLegendary,
 				enchantressAvailable: appState.current.enchantressAvailable,
 				affixes: appState.current.affixes
@@ -2252,8 +2288,31 @@
 				: "Any";
 		}
 
-		function isAffixLegalForCurrentSlot(affix, gearSlot = getCurrentGearSlotForFiltering()) {
+		function getCurrentClassForFiltering() {
+			return CLASSES.includes(appState && appState.current && appState.current.class)
+				? appState.current.class
+				: "Any";
+		}
+
+		function affixSupportsClass(affix, className) {
 			if (!affix) {
+				return false;
+			}
+			if (!className || className === "Any") {
+				return true;
+			}
+			const affixClass = affix.class;
+			if (!affixClass || affixClass === "Any") {
+				return true;
+			}
+			return affixClass === className;
+		}
+
+		function isAffixLegalForCurrentSlot(affix, gearSlot = getCurrentGearSlotForFiltering(), className = getCurrentClassForFiltering()) {
+			if (!affix) {
+				return false;
+			}
+			if (!affixSupportsClass(affix, className)) {
 				return false;
 			}
 			if (!gearSlot || gearSlot === "Any") {
@@ -2271,9 +2330,10 @@
 		function renderAffixOptions() {
 			els.affixOptions.innerHTML = "";
 			const gearSlot = getCurrentGearSlotForFiltering();
-			const visibleAffixes = gearSlot === "Any"
+			const className = getCurrentClassForFiltering();
+			const visibleAffixes = (gearSlot === "Any" && className === "Any")
 				? AFFIXES
-				: AFFIXES.filter((affix) => isAffixLegalForCurrentSlot(affix, gearSlot));
+				: AFFIXES.filter((affix) => isAffixLegalForCurrentSlot(affix, gearSlot, className));
 
 			visibleAffixes.forEach((affix) => {
 				const option = document.createElement("option");
@@ -2284,21 +2344,22 @@
 
 		function getFirstIllegalAffixSelection() {
 			const gearSlot = getCurrentGearSlotForFiltering();
-			if (gearSlot === "Any") {
+			const className = getCurrentClassForFiltering();
+			if (gearSlot === "Any" && className === "Any") {
 				return null;
 			}
 
 			for (const entry of appState.current.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot)) {
-					return { label: "Current affix", name: affix.name, gearSlot };
+				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
+					return { label: "Current affix", name: affix.name, gearSlot, className };
 				}
 			}
 
 			for (const entry of appState.target.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot)) {
-					return { label: "Target affix", name: affix.name, gearSlot };
+				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
+					return { label: "Target affix", name: affix.name, gearSlot, className };
 				}
 			}
 
@@ -2357,6 +2418,8 @@
 					const name = typeof entry === "string" ? entry : entry.name;
 					const rollWeight = typeof entry === "string" ? 1 : Number(entry.rollWeight);
 					const family = typeof entry === "string" ? "" : String(entry.family || "");
+					const familyRollWeight = typeof entry === "string" ? 0 : Number(entry.familyRollWeight);
+					const className = typeof entry === "string" ? "" : String(entry.class || "");
 					const gearSlots = slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
 						? slotLegality.getLegalGearSlotsForAffixName(name)
 						: null;
@@ -2370,10 +2433,24 @@
 							family,
 							rollWeight: Number.isFinite(rollWeight) && rollWeight > 0 ? rollWeight : 1,
 						};
+						if (Number.isFinite(familyRollWeight) && familyRollWeight > 0) {
+							map[id].familyRollWeight = familyRollWeight;
+						}
+						if (className) {
+							map[id].class = className;
+						}
 					}
 
 					if (Number.isFinite(rollWeight) && rollWeight > 0) {
 						map[id].rollWeight = rollWeight;
+					}
+
+					if (Number.isFinite(familyRollWeight) && familyRollWeight > 0) {
+						map[id].familyRollWeight = familyRollWeight;
+					}
+
+					if (className) {
+						map[id].class = className;
 					}
 
 					if (family) {

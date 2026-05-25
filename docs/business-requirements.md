@@ -10,7 +10,8 @@ For game mechanics (prism categories, cube operations, GA rules, Enchantress beh
 
 ## Required User Workflow
 
-- The user enters a current item with a concrete gear slot or `Any`, up to four current affixes, Greater Affix (GA) flags, and an Enchanted flag for the enchantress-modified affix.
+- The user enters a current item with a concrete gear slot or `Any`, a concrete character class or `Any`, up to four current affixes, Greater Affix (GA) flags, and an Enchanted flag for the enchantress-modified affix.
+- The Class selector narrows the Adept-prism skill pool to the chosen class's specific and general skills, plus class-agnostic skills (Mainstat, `to All Skills`, `to Basic / Core / Defensive Skills`). `Any` keeps every class's skills in the pool.
 - The user describes a target item with desired affixes and optional `Needs Improvement` flags.
 - The optimizer recommends one next action at a time. The user applies the in-game result manually and reruns.
 - The supported action family is the affix-modification slice only: Add Affix, Remove Affix, Chaotic Reroll, Focused Reroll, and Enchant. These are modeled in [d4cubeoptim-worker.js](../d4cubeoptim-worker.js) and used by v3 in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js).
@@ -44,7 +45,7 @@ For game mechanics (prism categories, cube operations, GA rules, Enchantress beh
 
 ## Required User-Facing Warnings
 
-- When a concrete gear slot (anything other than `Any`) is selected, the UI must display a note that affix availability may vary by class. The optimizer models the shared affix pool only; class-specific affixes (such as certain skill ranks) may not appear.
+- When Class is set to `Any`, the UI must display a note that the rolling pool includes every class's skills and that probabilities are smaller than what a real character would experience. Setting Class to the player's character class narrows the pool to that class's specific and general skills.
 
 ## Explicit Non-Goals
 

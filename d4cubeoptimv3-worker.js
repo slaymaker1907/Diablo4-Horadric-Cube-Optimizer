@@ -86,6 +86,13 @@ const RESIDUAL_STATE_LIMIT_CAP = 4096;
 const RESIDUAL_MAX_ITERATIONS = 4096;
 const RESIDUAL_MAX_ITERATIONS_CAP = 1048576;
 const RESIDUAL_EPSILON = 1e-9;
+// Phase 2 (expected-step value iteration) compares against a *relative*
+// tolerance rather than absolute, because cube-step values can grow into the
+// thousands when low-probability target affixes are involved (e.g. class=Any
+// Adept skill targets at ~1/240 per cube). An absolute 1e-9 demands twelve
+// significant figures of agreement on values of order 10^3 and pushes value
+// iteration into millions of iterations.
+const RESIDUAL_PHASE2_EPSILON = 1e-6;
 const RESIDUAL_ACTION_EPSILON = 1e-8;
 const RESIDUAL_STATE_LIMIT_PER_SECOND = 50;
 const RESIDUAL_MAX_ITERATIONS_PER_SECOND = 32768;
@@ -1573,6 +1580,7 @@ function buildResidualEnvV3(data, gaConfig, target, overrides = {}) {
   env.stateLimit = Number.isFinite(overrides.stateLimit) ? overrides.stateLimit : RESIDUAL_STATE_LIMIT;
   env.maxIterations = Number.isFinite(overrides.maxIterations) ? overrides.maxIterations : RESIDUAL_MAX_ITERATIONS;
   env.epsilon = Number.isFinite(overrides.epsilon) ? overrides.epsilon : RESIDUAL_EPSILON;
+  env.phase2Epsilon = Number.isFinite(overrides.phase2Epsilon) ? overrides.phase2Epsilon : RESIDUAL_PHASE2_EPSILON;
   return env;
 }
 
@@ -1841,21 +1849,63 @@ function selectBestResidualPhase1ActionIndexV3(node, stateIndex, values) {
   return bestIndex;
 }
 
-function selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1Values, costs, env) {
+// For each non-terminal node, pre-filter action entries down to the subset whose
+// Phase-1 success value equals the node's optimal success (within tolerance).
+// Phase 1 values are frozen by the time Phase 2 runs, so this set is invariant
+// across Phase 2 iterations. Recomputing it per iteration was the dominant cost
+// (~60% of wall time in the Class=Any Adept-heavy profile).
+function buildResidualPhase2EligibleActionsV3(graph, phase1Values, env) {
+  const eligible = new Array(graph.nodes.length);
+  const epsilon = Number.isFinite(env && env.epsilon) ? env.epsilon : RESIDUAL_EPSILON;
+
+  for (let stateIndex = 0; stateIndex < graph.nodes.length; stateIndex += 1) {
+    const node = graph.nodes[stateIndex];
+    if (!node || node.success || node.deadReason) {
+      eligible[stateIndex] = null;
+      continue;
+    }
+
+    const optimalSuccess = phase1Values[stateIndex];
+    if (optimalSuccess <= epsilon) {
+      eligible[stateIndex] = null;
+      continue;
+    }
+
+    const indices = [];
+    for (let actionIndex = 0; actionIndex < node.actionEntries.length; actionIndex += 1) {
+      const entry = node.actionEntries[actionIndex];
+      const success = getResolvedActionSuccessV3(entry, stateIndex, phase1Values);
+      if (Math.abs(success - optimalSuccess) <= RESIDUAL_ACTION_EPSILON) {
+        indices.push(actionIndex);
+      }
+    }
+    eligible[stateIndex] = Int32Array.from(indices);
+  }
+
+  return eligible;
+}
+
+function selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1Values, costs, env, eligibleIndices) {
   const optimalSuccess = phase1Values[stateIndex];
   if (optimalSuccess <= env.epsilon) {
     return -1;
   }
 
+  const indices = eligibleIndices || null;
+  const iterCount = indices ? indices.length : node.actionEntries.length;
+
   let bestIndex = -1;
   let bestCost = Infinity;
   let bestKey = "";
 
-  for (let index = 0; index < node.actionEntries.length; index += 1) {
+  for (let i = 0; i < iterCount; i += 1) {
+    const index = indices ? indices[i] : i;
     const entry = node.actionEntries[index];
-    const success = getResolvedActionSuccessV3(entry, stateIndex, phase1Values);
-    if (Math.abs(success - optimalSuccess) > RESIDUAL_ACTION_EPSILON) {
-      continue;
+    if (!indices) {
+      const success = getResolvedActionSuccessV3(entry, stateIndex, phase1Values);
+      if (Math.abs(success - optimalSuccess) > RESIDUAL_ACTION_EPSILON) {
+        continue;
+      }
     }
 
     const candidate = getResolvedActionWeightedCostV3(entry, stateIndex, optimalSuccess, costs);
@@ -1982,6 +2032,11 @@ function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options
   const stopView = options.stopView || null;
   const costs = new Float64Array(graph.nodes.length);
 
+  const eligibleActions = buildResidualPhase2EligibleActionsV3(graph, phase1.values, env);
+
+  const absEpsilon = Number.isFinite(env && env.epsilon) ? env.epsilon : RESIDUAL_EPSILON;
+  const relEpsilon = Number.isFinite(env && env.phase2Epsilon) ? env.phase2Epsilon : RESIDUAL_PHASE2_EPSILON;
+
   let converged = false;
   let iterations = 0;
   let residual = Infinity;
@@ -1995,6 +2050,7 @@ function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options
 
     policyImprovementSteps += 1;
     let maxDelta = 0;
+    let maxAbsValue = 0;
 
     for (let index = 0; index < graph.nodes.length; index += 1) {
       const node = graph.nodes[index];
@@ -2004,23 +2060,33 @@ function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options
       }
 
       const optimalSuccess = phase1.values[index];
-      if (optimalSuccess <= env.epsilon) {
+      if (optimalSuccess <= absEpsilon) {
         costs[index] = 0;
         continue;
       }
 
-      const bestIndex = selectBestResidualPhase2ActionIndexV3(node, index, phase1.values, costs, env);
+      const bestIndex = selectBestResidualPhase2ActionIndexV3(
+        node, index, phase1.values, costs, env, eligibleActions[index]
+      );
       const rawValue = bestIndex >= 0
         ? getResolvedActionWeightedCostV3(node.actionEntries[bestIndex], index, optimalSuccess, costs)
         : 0;
       const nextValue = Number.isFinite(rawValue) ? rawValue : 0;
-      maxDelta = Math.max(maxDelta, Math.abs(nextValue - costs[index]));
+      const delta = Math.abs(nextValue - costs[index]);
+      if (delta > maxDelta) {
+        maxDelta = delta;
+      }
+      const absNext = nextValue < 0 ? -nextValue : nextValue;
+      if (absNext > maxAbsValue) {
+        maxAbsValue = absNext;
+      }
       costs[index] = nextValue;
     }
 
     residual = maxDelta;
 
-    if (maxDelta < env.epsilon) {
+    const scale = maxAbsValue > 1 ? maxAbsValue : 1;
+    if (maxDelta / scale < relEpsilon) {
       iterations += 1;
       converged = true;
       break;
@@ -2030,7 +2096,9 @@ function solveResidualLAOPhase2V3(graph, phase1, target, data, gaConfig, options
   const finalPolicy = getResidualPolicyGraphV3(
     graph,
     graph.rootIndex,
-    (node, stateIndex) => selectBestResidualPhase2ActionIndexV3(node, stateIndex, phase1.values, costs, env)
+    (node, stateIndex) => selectBestResidualPhase2ActionIndexV3(
+      node, stateIndex, phase1.values, costs, env, eligibleActions[stateIndex]
+    )
   );
   policyStates = finalPolicy.order.length;
 
@@ -2172,6 +2240,25 @@ function buildResidualApproximateResultV3(graph, target, env, residualSolution, 
     effectivePhase2,
     { reason: "Residual abstract-state solver returned the best policy found before reaching solver limits." }
   );
+
+  // summarizeRootV2 refuses to report expected-step estimates whenever Phase 2
+  // did not converge. For an approximate result the user has nothing better to
+  // look at than the best-so-far cost — surface it (labelled approximate) so
+  // the UI is not stuck showing only "-".
+  if (
+    summary.expectedSteps == null
+    && residualSolution.phase1
+    && residualSolution.phase1.converged
+    && effectivePhase2.costs
+    && Number.isFinite(graph.rootIndex)
+    && graph.rootIndex >= 0
+  ) {
+    const rootSuccess = residualSolution.phase1.values[graph.rootIndex];
+    const rootCost = effectivePhase2.costs[graph.rootIndex];
+    if (rootSuccess > env.epsilon && Number.isFinite(rootCost)) {
+      summary.expectedSteps = rootCost / rootSuccess;
+    }
+  }
 
   const phase1Iterations = residualSolution.phase1 ? residualSolution.phase1.iterations : 0;
   const phase2Iterations = residualSolution.phase2 ? residualSolution.phase2.iterations : 0;

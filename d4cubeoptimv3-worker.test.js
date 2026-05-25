@@ -1338,11 +1338,12 @@ test("solveResidualLAOStarV3 converges under modified policy iteration for a man
   assert.ok(graph.nodes.length > 5, `Expected non-trivial graph, got ${graph.nodes.length} states`);
 
   // With requireGA removed the abstract state space is larger (~671 nodes). Phase 1 converges
-  // quickly (~500 iterations) but phase 2 has some peripheral states (not on the optimal policy
-  // path) that keep the global maxDelta residual near 1.4e-8, which never drops below the default
-  // 1e-9 epsilon regardless of iteration count. The root-node values, however, converge to within
-  // 2.84e-8 of exact after just ~1000 iterations. We give a modest budget and verify the
-  // root-node values (the meaningful correctness property), not the global convergence flag.
+  // quickly (~500 iterations) and uses the tight absolute epsilon (1e-9). Phase 2 uses a
+  // *relative* convergence criterion (RESIDUAL_PHASE2_EPSILON = 1e-6 against the largest
+  // current value), because absolute-1e-9 against root costs in the tens-to-thousands forced
+  // millions of iterations on real Class=Any cases without changing the answer the UI shows.
+  // The root cost here is ~90, so converged-relative ≈ 1e-4 absolute is the expected agreement
+  // with the exact tabular oracle.
   graph.env.maxIterations = 5000;
 
   const exact = worker.solveResidualExactV3(graph, graph.env);
@@ -1361,11 +1362,14 @@ test("solveResidualLAOStarV3 converges under modified policy iteration for a man
   );
   assert.ok(typeof lao.phase1.policyImprovementSteps === "number");
   assert.ok(lao.phase1.policyImprovementSteps >= 1);
-  // Phase 2 may report ITERATION_LIMIT (global residual is stuck near 1.4e-8 asymptotically)
-  // but the root-node values already match the exact solution to within 1e-6.
+  // Phase 1 keeps absolute 1e-9 epsilon so root probability matches the exact value to ~1e-6.
+  // Phase 2 uses relative 1e-6: residual is ≤ value*1e-6 at termination, but the *accumulated*
+  // bias from value iteration can be a small multiple of that (residual divided by leaveProb).
+  // For this fixture root cost ~90 the LAO* answer lands within ~3e-3 absolute of the exact
+  // tabular oracle — well inside UI precision and the action-tie threshold.
   const phase2 = lao.phase2 !== null ? lao.phase2 : { costs: new Float64Array(graph.nodes.length) };
   approxEqual(lao.phase1.values[rootIndex], exact.phase1.values[rootIndex], 1e-6);
-  approxEqual(phase2.costs[rootIndex], exact.phase2.costs[rootIndex], 1e-6);
+  approxEqual(phase2.costs[rootIndex], exact.phase2.costs[rootIndex], 5e-3);
 });
 
 // Regression: isCategoryFocusedBlockedByGAV3 must prevent the decomposition model

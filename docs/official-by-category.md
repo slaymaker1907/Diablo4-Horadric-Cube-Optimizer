@@ -298,6 +298,7 @@
 ### General
 - to Zealot Skills
 - to Aura Skills
+- to Judicator Skills
 - to Justice Skills
 - to Valor Skills
 - to Disciple Skills
@@ -334,6 +335,8 @@
 - to Demonology Skills
 - to Hellfire Skills
 - to Occult Skills
+- to Archfiend Skills
+- to Sigil Skills
 
 # Resource
 
@@ -350,10 +353,8 @@
 - Mana On Kill
 - Spirit On Kill
 - Vigor On Kill
-- Faith Regeneration
 - Faith On Kill
 - Wrath every 10 Kills
-- Wrath Regeneration
 - Resource Cost Reduction
 - Resource Generation
 - Lucky Hit: Up to a 15% Chance to Restore Primary Resource

@@ -662,8 +662,7 @@
 							<input id="manual-result" type="text" list="manual-result-options" placeholder="Required for added/changed/enchanted">
 						</div>
 
-						<button id="apply-manual" class="btn warn action-submit">Apply Outcome</button>
-						<button id="apply-then-run" class="btn action-submit">Optimize</button>
+						<button id="apply-manual" class="btn action-submit">Apply Outcome and Optimize</button>
 					</div>
 					<p class="legend">
 						Use this after each in-game result so the optimizer can continue from the new state.
@@ -921,7 +920,6 @@
 			manualResult: document.getElementById("manual-result"),
 			manualPrism: document.getElementById("manual-prism"),
 			applyManual: document.getElementById("apply-manual"),
-			applyThenRun: document.getElementById("apply-then-run"),
 
 			resultAction: document.getElementById("result-action"),
 			resultSuccess: document.getElementById("result-success"),
@@ -1065,8 +1063,7 @@
 				renderManualControls();
 			});
 
-			els.applyManual.addEventListener("click", applyManualOutcome);
-			els.applyThenRun.addEventListener("click", () => { applyManualOutcome(); startRun(); });
+			els.applyManual.addEventListener("click", () => { applyManualOutcome(); startRun(); });
 		}
 
 		function ensureWorker() {
@@ -1511,7 +1508,6 @@
 		function setRunButtons() {
 			els.runBtn.disabled = runInProgress;
 			els.stopBtn.disabled = !runInProgress;
-			els.applyThenRun.disabled = runInProgress;
 		}
 
 		function renderStatus(text, className) {

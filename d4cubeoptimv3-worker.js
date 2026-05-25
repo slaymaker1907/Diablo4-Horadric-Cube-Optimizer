@@ -467,6 +467,10 @@ function getClosedFormResidualReasonV3(state, targetEntry, slotIndex, env, optio
     return "Host slot shares a category with the target, but the closed-form assumptions for Cases B, F, or G are not satisfied.";
   }
 
+  if (state.isLegendary) {
+    return "Remove Affix is unavailable on Legendary items, so Case C is not applicable.";
+  }
+
   const removableCategories = getAffixCategoriesForOpV3(hostEntry.affixId, "remove", env)
     .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, "remove"));
   if (removableCategories.length === 0) {
@@ -599,7 +603,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     }
   }
 
-  if (sharedCategories.length === 0) {
+  if (sharedCategories.length === 0 && !state.isLegendary) {
     const removableCategories = getAffixCategoriesForOpV3(hostEntry.affixId, "remove", env)
       .filter((category) => isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, "remove"));
 

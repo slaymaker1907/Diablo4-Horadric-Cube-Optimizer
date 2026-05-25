@@ -1997,5 +1997,72 @@ test("Class change is reflected in stateKey so cached MCTS nodes do not collide 
   assert.ok(druidKey.includes("CDruid"), `druidKey must include CDruid, got ${druidKey}`);
 });
 
+test("Case C is not generated on Legendary items because Remove Affix is unavailable", () => {
+  // Host (Specific Resistance (Cold)) is in Chromatic; target (All Resistance) is Protector only.
+  // Without the legendary check, Case C would emit a "remove via Chromatic then focused-reroll" plan,
+  // but Remove Affix is unavailable on Legendary items per the game-mechanics doc.
+  const categoryToNames = {
+    Protector: ["All Resistance", "Maximum Life", "Armor", "Damage Reduction"],
+    Chromatic: ["Specific Resistance (Cold)"],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  const state = buildState([
+    { affixId: byName["Specific Resistance (Cold)"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ], { isLegendary: true });
+
+  const target = buildTarget([
+    { affixId: byName["All Resistance"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, { strictMode: true }, target);
+  const candidates = worker.getClosedFormPlanCandidatesV3(state, target.affixes[0], 0, env, {
+    data,
+    gaConfig: { strictMode: true },
+    target,
+  });
+
+  const caseCCandidates = candidates.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.C);
+  assert.equal(caseCCandidates.length, 0,
+    "Case C must not be generated on Legendary items (Remove Affix is unavailable)"
+  );
+});
+
+test("Case C is still generated on non-Legendary items so the regression check stays meaningful", () => {
+  const categoryToNames = {
+    Protector: ["All Resistance", "Maximum Life", "Armor", "Damage Reduction"],
+    Chromatic: ["Specific Resistance (Cold)"],
+    Aggressive: ["Critical Strike Chance", "Attack Speed"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  const state = buildState([
+    { affixId: byName["Specific Resistance (Cold)"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ], { isLegendary: false });
+
+  const target = buildTarget([
+    { affixId: byName["All Resistance"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const env = worker.buildEnv(data, { strictMode: true }, target);
+  const candidates = worker.getClosedFormPlanCandidatesV3(state, target.affixes[0], 0, env, {
+    data,
+    gaConfig: { strictMode: true },
+    target,
+  });
+
+  const caseCCandidates = candidates.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.C);
+  assert.ok(caseCCandidates.length > 0,
+    "Case C must still be generated for the equivalent non-Legendary scenario"
+  );
+});
+
 // Suppress lint by referencing approxEqual from the existing helper above.
 void approxEqual;

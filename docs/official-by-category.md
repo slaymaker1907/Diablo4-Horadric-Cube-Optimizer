@@ -46,12 +46,12 @@
 - Fortify Generation
 - Cooldown Reduction
 - Impairment Reduction
+- to All Skills
 
 ## Class Agnostic General Skills
 - to Basic Skills
 - to Core Skills
 - to Defensive Skills
-- to All Skills
 
 ## Barbarian
 

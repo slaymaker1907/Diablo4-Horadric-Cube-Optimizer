@@ -51,6 +51,7 @@
 - to Basic Skills
 - to Core Skills
 - to Defensive Skills
+- to All Skills
 
 ## Barbarian
 
@@ -86,6 +87,8 @@
 - to Dust Devil Skills
 - to Earthquake Skills
 - to Iron Shrapnel Skills
+- to Combat Skills
+- to Martial Skills
 
 ## Druid
 
@@ -120,6 +123,12 @@
 - to Companion Skills
 - to Human Skills
 - to Versatile Skills
+- to Earth Skills
+- to Nature Magic Skills
+- to Shapeshifting Skills
+- to Storm Skills
+- to Werebear Skills
+- to Werewolf Skills
 
 ## Necromancer
 
@@ -141,12 +150,19 @@
 - to Corpse Tendrils
 - to Decrepify
 - to Iron Maiden
+- to Golem
+- to Skeleton Mage
+- to Skeleton Warrior
 
 ### General
 
 - to Corpse Skills
 - to Curse Skills
 - to Macabre Skills
+- to Blood Skills
+- to Bone Skills
+- to Darkness Skills
+- to Minion Skills
 
 ## Rogue
 
@@ -182,6 +198,9 @@
 - to Arrow Storm Skills
 - to Grenade Skills
 - to Shade Skills
+- to Cutthroat Skills
+- to Marksman Skills
+- to Trap Skills
 
 ## Sorceror
 
@@ -215,6 +234,9 @@
 
 - to Conjuration Skills
 - to Mastery Skills
+- to Frost Skills
+- to Pyromancy Skills
+- to Shock Skills
 
 ## Spiritborn
 
@@ -243,6 +265,10 @@
 ### General
 - to Potency Skills
 - to Focus Skills
+- to Centipede Skills
+- to Eagle Skills
+- to Gorilla Skills
+- to Jaguar Skills
 
 ## Paladin
 
@@ -274,6 +300,8 @@
 - to Aura Skills
 - to Justice Skills
 - to Valor Skills
+- to Disciple Skills
+- to Juggernaut Skills
 
 ## Warlock
 
@@ -283,10 +311,6 @@
 - to Doom
 - to Hellion Sting
 - to Molten Bomb
-- to Abyss Skills
-- to Demonology Skills
-- to Hellfire Skills
-- to Occult Skills
 - to Blazing Scream
 - to Bombardment
 - to Dread Claws
@@ -304,36 +328,12 @@
 - to Tyrant's Grasp
 - to Wall of Agony
 
-## Uncategorized
+### General
 
-- to Combat Skills
-- to Martial Skills
-- to Earth Skills
-- to Nature Magic Skills
-- to Shapeshifting Skills
-- to Storm Skills
-- to Werebear Skills
-- to Werewolf Skills
-- to Blood Skills
-- to Bone Skills
-- to Darkness Skills
-- to Minion Skills
-- to Disciple Skills
-- to Juggernaut Skills
-- to Cutthroat Skills
-- to Marksman Skills
-- to Trap Skills
-- to Frost Skills
-- to Pyromancy Skills
-- to Shock Skills
-- to Centipede Skills
-- to Eagle Skills
-- to Gorilla Skills
-- to Jaguar Skills
-- to All Skills
-- to Golem
-- to Skeleton Mage
-- to Skeleton Warrior
+- to Abyss Skills
+- to Demonology Skills
+- to Hellfire Skills
+- to Occult Skills
 
 # Resource
 

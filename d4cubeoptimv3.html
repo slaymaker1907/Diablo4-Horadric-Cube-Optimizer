@@ -1004,10 +1004,27 @@
 	<dialog id="settings-modal">
 		<div class="modal-inner">
 			<div class="modal-header">
-				<h2>Settings — Slot Legality Overrides</h2>
+				<h2>Settings</h2>
 				<button id="settings-modal-close" class="btn ghost">✕</button>
 			</div>
 			<div class="modal-body">
+				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Result Verification</label>
+				<div class="field" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1 1 auto;">
+						<input type="checkbox" id="tighten-steps-toggle">
+						<span>Tighten Steps Estimate <span style="color:var(--muted);font-size:0.85em;">(adaptive, up to 2 min)</span></span>
+					</label>
+					<button id="tighten-steps-info-btn" class="btn ghost" title="About Tighten Steps Estimate" style="flex:0 0 auto;">ℹ</button>
+				</div>
+				<div id="tighten-steps-info-box" style="display:none;font-size:0.84rem;color:var(--muted);margin:6px 0 0;line-height:1.45;">
+					<p style="margin:0 0 8px;">The <strong>Expected Cube Steps</strong> number is the optimizer's best estimate of how many cube actions you'll need on average. For complex starting states it can be loose — sometimes overshooting by 2–3×.</p>
+					<p style="margin:0 0 8px;">When enabled, the optimizer runs simulated playthroughs after computing its initial estimate, and keeps simulating until the result is within ±10% of itself (adaptive mode, up to 2 min). This is the most accurate estimate available.</p>
+					<p style="margin:0;">The recommended action does <em>not</em> change — only the displayed step count. While verification runs, <strong>Optimize</strong> stays disabled and the status shows <em>"Verifying…"</em>; click <strong>Stop</strong> to abort early. The displayed number already includes a one-step refinement that runs automatically regardless of this setting.</p>
+				</div>
+
+				<div class="divider"></div>
+
+				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Slot Legality Overrides</label>
 				<p class="legend" style="margin:0 0 10px;">
 					Add overrides to make an affix legal on a slot that it wouldn't normally appear on.
 					Overrides are additive (allow-only) and survive a main-state Reset.
@@ -1118,6 +1135,8 @@
 		// Separate key for user-defined slot-legality overrides.  Kept apart from
 		// the main state blob so overrides survive a main-state Reset.
 		const OVERRIDES_KEY = "d4cubeoptim_overrides_v3";
+		const TIGHTEN_KEY = "d4cubeoptim_tighten_v3";
+		const TIGHTEN_LEVELS = ["none", "light", "heavy", "adaptive"];
 		const WORKER_VERSION = "2026-05-26-v3-reenchant-closed-form";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
@@ -1187,6 +1206,7 @@
 			history: [],
 			skillFilter: null, // computed on first sanitize
 			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
+			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
 		};
 
 		let appState = loadState();
@@ -1338,6 +1358,18 @@
 				overrideClassSelect.appendChild(opt);
 			});
 
+			// Tighten Steps Estimate toggle + info button (within the Settings modal).
+			const tightenStepsToggle = document.getElementById("tighten-steps-toggle");
+			tightenStepsToggle.addEventListener("change", () => {
+				const lvl = tightenStepsToggle.checked ? "adaptive" : "none";
+				appState.tightenStepsLevel = lvl;
+				saveTightenStepsLevel(lvl);
+			});
+			document.getElementById("tighten-steps-info-btn").addEventListener("click", () => {
+				const box = document.getElementById("tighten-steps-info-box");
+				box.style.display = box.style.display === "none" ? "block" : "none";
+			});
+
 			document.getElementById("settings-btn").addEventListener("click", () => {
 				// Default slot to the current item slot (fall back to Helm if Any).
 				const currentSlot = appState.current.gearSlot;
@@ -1347,6 +1379,8 @@
 				overrideClassSelect.value = "Any";
 				document.getElementById("override-affix-input").value = "";
 				document.getElementById("override-add-error").textContent = "";
+				// Sync the Tighten Steps toggle with current state on each open.
+				tightenStepsToggle.checked = appState.tightenStepsLevel === "adaptive";
 				renderOverridesTable();
 				settingsModal.showModal();
 			});
@@ -1511,6 +1545,16 @@
 				if (message.type === "progress") {
 					applyWorkerResult(message, false);
 					renderStatus("Running...", "running");
+				} else if (message.type === "verifying") {
+					// First verifying message includes the intermediate (Approach 1) result —
+					// render it so the user sees the tightened headline immediately.
+					if (message.intermediateResult) {
+						applyWorkerResult(message.intermediateResult, false);
+					}
+					const total = message.total || 0;
+					const completed = message.completed || 0;
+					const pct = total > 0 ? Math.round(100 * completed / total) : 0;
+					renderStatus(`Verifying (${completed}/${total} rollouts, ${pct}%)…`, "running");
 				} else if (message.type === "done") {
 					runInProgress = false;
 					treeCache = message.tree || treeCache;
@@ -1582,6 +1626,7 @@
 				timeMs,
 				stopBuffer,
 				tree: treeCache,
+				tightenStepsLevel: TIGHTEN_LEVELS.includes(appState.tightenStepsLevel) ? appState.tightenStepsLevel : "none",
 			});
 		}
 
@@ -1798,6 +1843,21 @@
 
 			if (diagnostics.stepEstimateReason) {
 				appendDiagnosticLine(diagnostics.stepEstimateReason);
+			}
+
+			if (diagnostics.refinement && diagnostics.refinement.applied) {
+				appendDiagnosticLine(`Headline tightened from ${numberOrDash(diagnostics.refinement.originalSteps)} to ${numberOrDash(diagnostics.refinement.refinedSteps)} via one-step lookahead (${diagnostics.refinement.outcomeCount} successor${diagnostics.refinement.outcomeCount === 1 ? "" : "s"}).`);
+			}
+
+			if (diagnostics.goldStandard && diagnostics.goldStandard.applied) {
+				const gs = diagnostics.goldStandard;
+				const truncNote = gs.truncatedRolloutCount > 0
+					? ` (${gs.truncatedRolloutCount} truncated)` : "";
+				const adaptiveNote = gs.adaptive
+					? (gs.earlyConverged ? " — adaptive converged early" : " — adaptive hit cap")
+					: "";
+				const abortedNote = gs.aborted ? " (stopped by user)" : "";
+				appendDiagnosticLine(`Gold-standard MC (${gs.level}, ${gs.rollouts} rollouts, ${gs.wallTimeMs}ms${truncNote}${adaptiveNote}${abortedNote}): ${numberOrDash(gs.mean)} ± ${numberOrDash(gs.ci95halfWidth)} (95% CI), σ=${numberOrDash(gs.stdev)}; pre-MC value was ${numberOrDash(gs.intermediateSteps)}.`);
 			}
 
 			function appendDiagnosticLine(text) {
@@ -3176,6 +3236,11 @@
 					return true;
 				});
 			}
+
+			// Sanitize tightenStepsLevel.
+			if (!TIGHTEN_LEVELS.includes(appState.tightenStepsLevel)) {
+				appState.tightenStepsLevel = "none";
+			}
 		}
 
 		function exportCurrentState() {
@@ -3282,6 +3347,23 @@
 			} catch { /* storage full — silently ignore */ }
 		}
 
+		function loadTightenStepsLevel() {
+			try {
+				const raw = localStorage.getItem(TIGHTEN_KEY);
+				if (!raw) return "none";
+				const parsed = JSON.parse(raw);
+				return TIGHTEN_LEVELS.includes(parsed) ? parsed : "none";
+			} catch {
+				return "none";
+			}
+		}
+
+		function saveTightenStepsLevel(level) {
+			try {
+				localStorage.setItem(TIGHTEN_KEY, JSON.stringify(TIGHTEN_LEVELS.includes(level) ? level : "none"));
+			} catch { /* storage full — silently ignore */ }
+		}
+
 		// Returns true when the static legality table already permits affixName on slot,
 		// making any user override for that combination redundant.
 		function isAffixStaticallyLegalOnSlot(affixName, slot) {
@@ -3365,9 +3447,11 @@
 			try {
 				const raw = localStorage.getItem(STORAGE_KEY);
 				const overrides = loadUserOverrides();
+				const tightenStepsLevel = loadTightenStepsLevel();
 				if (!raw) {
 					const s = JSON.parse(JSON.stringify(defaultState));
 					s.userOverrides = overrides;
+					s.tightenStepsLevel = tightenStepsLevel;
 					return s;
 				}
 				const parsed = JSON.parse(raw);
@@ -3379,6 +3463,7 @@
 					history: parsed.history || [],
 					skillFilter: parsed.skillFilter || null,
 					userOverrides: overrides,
+					tightenStepsLevel,
 				};
 			} catch (error) {
 				return JSON.parse(JSON.stringify(defaultState));

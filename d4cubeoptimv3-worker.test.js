@@ -2306,3 +2306,225 @@ test("re-enchant candidate is NOT proposed when enchanted slot's affix is itself
 
 // Suppress lint by referencing approxEqual from the existing helper above.
 void approxEqual;
+
+// ─── Approach 1: one-step refinement of residual headline ────────────────────
+//
+// The residual LAO* solver's abstract value can over-estimate concrete
+// successor values. Approach 1 refines the headline by computing
+// 1 + Σ p_i × V(successor_i) using a recursive (refineDepth:0) optimizer
+// call per outcome. The refinement should never *worsen* the headline.
+
+// Small fixture mirroring the structure that causes loose residual values:
+// a single affix (Mainstat) belonging to TWO categories, with at least one
+// matched-target affix sharing one of those categories. This pattern is
+// what creates abstract-state lumping in LAO* — and is exactly the
+// real-world case from `scripts/diagnose-expected-steps-drop.js`.
+function buildLooseResidualFixture() {
+  const catalog = buildCatalogFixture({
+    Aggressive: [
+      "Mainstat",
+      "Critical Strike Chance",
+      "Critical Strike Damage",
+      "Vulnerable Damage",
+      "Attack Speed",
+      "DoT Damage",
+      { name: "Elemental Damage (Physical)", family: "elemental-damage" },
+      { name: "Elemental Damage (Fire)", family: "elemental-damage" },
+    ],
+    Pragmatic: ["Movement Speed", "Cooldown Reduction"],
+    Protector: ["Armor", "Maximum Life", "All Resistance"],
+    Adept: ["Mainstat"],
+  });
+  return {
+    data: {
+      affixes: catalog.affixes,
+      categories: catalog.categories,
+      targetAffixIds: [],
+      maxAffixSlots: 4,
+    },
+    byName: catalog.byName,
+  };
+}
+
+test("refinement tightens the residual headline when applied", { timeout: TEST_TIMEOUT_MS }, () => {
+  // Mirror of user's Spiritborn-Amulet scenario in a small fixture.
+  // The recommended action is Remove(Adept) which is deterministic
+  // (Mainstat is the only Adept-category affix on the item). Approach 1
+  // should refine the headline to 1 + V(post-Remove state).
+  const { data, byName } = buildLooseResidualFixture();
+  const state = buildState([
+    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Vulnerable Damage"].id, isGA: false, isEnchanted: true },
+    { affixId: byName["Mainstat"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: false },
+    { affixId: byName["Attack Speed"].id, requireGA: false },
+    { affixId: byName["Vulnerable Damage"].id, requireGA: false },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+  ]);
+
+  const refined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
+  const unrefined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 0 });
+
+  assert.equal(refined.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  assert.equal(unrefined.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  assert.ok(refined.diagnostics.refinement, "Expected diagnostics.refinement when refinement applies");
+  assert.equal(refined.diagnostics.refinement.applied, true);
+  approxEqual(refined.diagnostics.refinement.originalSteps, unrefined.expectedSteps, 1e-6);
+  assert.ok(refined.expectedSteps < unrefined.expectedSteps,
+    `Expected refinement to STRICTLY tighten on this fixture; got refined=${refined.expectedSteps}, unrefined=${unrefined.expectedSteps}`);
+  // The recommended action is Remove(Adept), which is deterministic on this
+  // fixture (Mainstat is the only Adept-category affix on the item). So
+  // refined = 1 + V(post-Remove state) by Bellman.
+  assert.equal(refined.action.type, "remove");
+  assert.equal(refined.action.prism, "Adept");
+});
+
+test("refinement is skipped when decomposition wins routing", { timeout: TEST_TIMEOUT_MS }, () => {
+  // Simple add-only scenario — decomposition handles it exactly.
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+
+  const result = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
+  assert.equal(result.diagnostics.strategy, worker.DECOMPOSITION_STRATEGY);
+  // refinement is skipped (only fires on residual strategy).
+  assert.equal(result.diagnostics.refinement, undefined);
+});
+
+test("refinement preserves the recommended action — it only adjusts expectedSteps", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Critical Strike Chance"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Thorns"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+    { affixId: byName["Critical Strike Damage"].id, requireGA: false },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+    { affixId: byName["Thorns"].id, requireGA: false },
+  ]);
+
+  const refined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
+  const unrefined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 0 });
+
+  assert.equal(refined.action.type, unrefined.action.type);
+  assert.equal(refined.action.prism, unrefined.action.prism);
+  assert.equal(refined.successProb, unrefined.successProb);
+});
+
+// ─── Gold-standard MC verification (Tighten Steps Estimate) ──────────────────
+
+test("MC verification light: payload plumbing surfaces goldStandard diagnostics", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+  const payload = {
+    state,
+    target,
+    data,
+    gaConfig: {},
+    tightenStepsLevel: "light",
+    tightenStepsOverrides: { lightRollouts: 5 }, // tiny for test speed
+  };
+
+  const intermediate = worker.optimizePayloadV3(payload);
+  const final = worker.runMCVerificationV3(payload, intermediate);
+
+  assert.ok(final.diagnostics.goldStandard);
+  assert.equal(final.diagnostics.goldStandard.applied, true);
+  assert.equal(final.diagnostics.goldStandard.level, "light");
+  assert.equal(final.diagnostics.goldStandard.rollouts, 5);
+  approxEqual(final.diagnostics.goldStandard.intermediateSteps, intermediate.expectedSteps, 1e-9);
+  // expectedSteps was replaced with the MC mean.
+  assert.ok(Number.isFinite(final.expectedSteps));
+});
+
+test("MC verification honors the stop signal", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+  const payload = {
+    state,
+    target,
+    data,
+    gaConfig: {},
+    tightenStepsLevel: "light",
+    tightenStepsOverrides: { lightRollouts: 50 },
+  };
+
+  // Pre-set stop signal so the MC loop aborts on the first iteration.
+  const sab = new SharedArrayBuffer(4);
+  const view = new Int32Array(sab);
+  Atomics.store(view, 0, 1);
+
+  const intermediate = worker.optimizePayloadV3(payload);
+  const final = worker.runMCVerificationV3(payload, intermediate, { stopView: view });
+
+  assert.equal(final.diagnostics.goldStandard.aborted, true);
+  assert.equal(final.approximate, true);
+  assert.ok(final.diagnostics.goldStandard.rollouts < 50,
+    `Expected early abort but ran ${final.diagnostics.goldStandard.rollouts} rollouts`);
+});
+
+test("MC verification adaptive obeys hard caps", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+  const payload = {
+    state,
+    target,
+    data,
+    gaConfig: {},
+    tightenStepsLevel: "adaptive",
+    tightenStepsOverrides: {
+      adaptiveMaxRollouts: 10,
+      adaptiveWallBudgetMs: 500,
+    },
+  };
+
+  const intermediate = worker.optimizePayloadV3(payload);
+  const final = worker.runMCVerificationV3(payload, intermediate);
+
+  assert.equal(final.diagnostics.goldStandard.adaptive, true);
+  assert.ok(final.diagnostics.goldStandard.rollouts <= 10,
+    `Adaptive must respect max-rollouts cap (got ${final.diagnostics.goldStandard.rollouts})`);
+});
+
+test("computeMCStatsV3 reports mean, stdev, and CI half-width", () => {
+  const stats = worker.computeMCStatsV3([10, 12, 14, 16, 18]);
+  approxEqual(stats.mean, 14, 1e-9);
+  // sample stdev of [10,12,14,16,18] = sqrt((16+4+0+4+16)/4) = sqrt(10)
+  approxEqual(stats.stdev, Math.sqrt(10), 1e-9);
+  // CI half-width = 1.96 × stdev / sqrt(n)
+  approxEqual(stats.ci95halfWidth, 1.96 * Math.sqrt(10) / Math.sqrt(5), 1e-9);
+
+  const single = worker.computeMCStatsV3([42]);
+  approxEqual(single.mean, 42, 1e-9);
+  approxEqual(single.stdev, 0, 1e-9);
+  approxEqual(single.ci95halfWidth, 0, 1e-9);
+});

@@ -5186,6 +5186,21 @@ function choosePreferredApproximateResultV3(decompositionResult, residualResult)
 }
 
 function optimizePayloadV3(payload, options = {}) {
+  // refineDepth controls one-step concrete refinement of residual results.
+  //   1 (default) → apply refinement when the residual layer wins routing.
+  //   0           → skip refinement (used by recursive calls inside refinement
+  //                  and by the MC verification per-step optimizer lookups).
+  const refineDepth = options.refineDepth != null ? options.refineDepth : 1;
+
+  const result = computeOptimizationResultV3(payload, options);
+
+  if (refineDepth > 0 && shouldRefineResultV3(result)) {
+    return applyOneStepRefinementV3(payload, result);
+  }
+  return result;
+}
+
+function computeOptimizationResultV3(payload, options = {}) {
   const feasibility = analyzeFeasibilityV3(payload.state, payload.target, payload.data, payload.gaConfig);
   if (!feasibility.ok) {
     return buildFeasibilityFailureResult(feasibility);
@@ -5249,6 +5264,98 @@ function optimizePayloadV3(payload, options = {}) {
   });
 }
 
+// Approach 1 — one-step concrete refinement of residual headline values.
+//
+// The residual LAO* solver works on an abstract state graph that collapses
+// distinct concrete successor states together. The abstract value at a node
+// is an aggregate that can overshoot the true value of any particular
+// concrete successor — sometimes by 2–3× (e.g. the user-reported 39.61 vs
+// the correct ~14.07 for a deterministic Remove that lands in a
+// decomposition-safe successor).
+//
+// We tighten the headline by performing one Bellman backup in CONCRETE
+// space: for each (probability, successor) outcome of the recommended
+// action, recursively call optimizePayloadV3(successor, { refineDepth: 0 })
+// and use its expectedSteps. The recursive call routes through the
+// decomposition layer when possible (exact), or back through residual
+// (still approximate, but rooted one step deeper).
+//
+// Refinement is a strict improvement: it never worsens the headline.
+// It's skipped when:
+//   - the decomposition layer already produced an exact result, or
+//   - any successor is infeasible / unevaluable (we bail rather than emit
+//     a value built on partially-broken sub-results).
+
+function shouldRefineResultV3(result) {
+  if (!result || !result.diagnostics) return false;
+  if (result.diagnostics.strategy !== RESIDUAL_STRATEGY) return false;
+  if (!result.action) return false;
+  if (!Number.isFinite(result.expectedSteps)) return false;
+  return true;
+}
+
+function applyOneStepRefinementV3(payload, result) {
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const outcomes = getActionOutcomes(payload.state, result.action, env);
+  if (!outcomes || outcomes.length === 0) return result;
+
+  const cache = new Map();
+  let sum = 0;
+  let outcomeCount = 0;
+
+  for (const outcome of outcomes) {
+    const successor = outcome.state;
+    const key = stateKey(successor);
+    let value = cache.get(key);
+    if (value === undefined) {
+      value = computeRefinedSuccessorValueV3(payload, successor, env);
+      cache.set(key, value);
+    }
+    if (!Number.isFinite(value)) {
+      // Unevaluable successor — bail rather than emit a partial refinement.
+      return result;
+    }
+    sum += outcome.probability * value;
+    outcomeCount++;
+  }
+
+  const originalSteps = result.expectedSteps;
+  const refinedSteps = 1 + sum;
+
+  // Only adopt the refinement when it's a strict improvement (the
+  // residual abstract value is an upper bound, so the refinement should
+  // be ≤ original; if it isn't, something is off and we keep the safer
+  // original).
+  if (!(refinedSteps <= originalSteps + 1e-9)) {
+    return result;
+  }
+
+  return {
+    ...result,
+    expectedSteps: refinedSteps,
+    diagnostics: {
+      ...result.diagnostics,
+      refinement: {
+        applied: true,
+        originalSteps,
+        refinedSteps,
+        outcomeCount,
+      },
+    },
+  };
+}
+
+function computeRefinedSuccessorValueV3(payload, successor, env) {
+  const term = isTerminal(successor, payload.target, env);
+  if (term.terminal && term.success) return 0;
+  if (term.terminal && !term.success) return Infinity;
+
+  const successorPayload = { ...payload, state: successor };
+  const subResult = optimizePayloadV3(successorPayload, { refineDepth: 0 });
+  if (!subResult || !Number.isFinite(subResult.expectedSteps)) return NaN;
+  return subResult.expectedSteps;
+}
+
 function optimizeScenarioV3(payload, options = {}) {
   return optimizePayloadV3(payload, {
     stopView: null,
@@ -5256,15 +5363,309 @@ function optimizeScenarioV3(payload, options = {}) {
   });
 }
 
+// ── Gold-standard Monte Carlo verification (Tighten Steps Estimate) ──────────
+//
+// When payload.tightenStepsLevel is "light" | "heavy" | "adaptive", after the
+// regular optimizer result is computed we simulate K full rollouts. At each
+// step of each rollout we call optimizePayloadV3(currentState) (cached by
+// state key) to choose the action, then sample an outcome from
+// getActionOutcomes. Final headline = MC mean ± 95% CI.
+//
+// Goal vs. Approach 1: Approach 1 gives a tight depth-1 backup against the
+// best-of-solvers value at successor states. MC with re-optimization at
+// every step measures what the user will actually experience over many
+// independent crafting attempts (always click "Optimize" between actions).
+// Both should agree when the policy is optimal and decomposition is exact
+// at the successor; disagreement is a useful quality signal.
+
+const MC_LIGHT_ROLLOUTS = 100;
+const MC_HEAVY_ROLLOUTS = 500;
+const MC_ADAPTIVE_MAX_ROLLOUTS = 2000;
+const MC_ADAPTIVE_WALL_BUDGET_MS = 120_000;
+const MC_ADAPTIVE_CHECK_EVERY = 50;       // re-check CI every N rollouts
+const MC_ADAPTIVE_TARGET_REL_HALF_WIDTH = 0.1; // CI half-width ≤ 10% of mean
+const MC_ROLLOUT_STEP_CAP = 1000;
+const MC_PROGRESS_EVERY = 20;
+
+function resolveMCBudgetV3(payload) {
+  const level = payload.tightenStepsLevel;
+  const overrides = payload.tightenStepsOverrides || {};
+  if (level === "light") {
+    const target = overrides.lightRollouts != null ? overrides.lightRollouts : MC_LIGHT_ROLLOUTS;
+    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false };
+  }
+  if (level === "heavy") {
+    const target = overrides.heavyRollouts != null ? overrides.heavyRollouts : MC_HEAVY_ROLLOUTS;
+    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false };
+  }
+  if (level === "adaptive") {
+    const maxR = overrides.adaptiveMaxRollouts != null ? overrides.adaptiveMaxRollouts : MC_ADAPTIVE_MAX_ROLLOUTS;
+    const wall = overrides.adaptiveWallBudgetMs != null ? overrides.adaptiveWallBudgetMs : MC_ADAPTIVE_WALL_BUDGET_MS;
+    return { level, targetRollouts: maxR, maxRollouts: maxR, wallBudgetMs: wall, adaptive: true };
+  }
+  return null;
+}
+
+function computeMCStatsV3(stepCounts) {
+  const n = stepCounts.length;
+  if (n === 0) return { mean: NaN, stdev: NaN, ci95halfWidth: NaN };
+  let sum = 0;
+  for (const x of stepCounts) sum += x;
+  const mean = sum / n;
+  if (n === 1) return { mean, stdev: 0, ci95halfWidth: 0 };
+  let sqSum = 0;
+  for (const x of stepCounts) sqSum += (x - mean) * (x - mean);
+  const stdev = Math.sqrt(sqSum / (n - 1));
+  const ci95halfWidth = 1.96 * stdev / Math.sqrt(n);
+  return { mean, stdev, ci95halfWidth };
+}
+
+function pickWeightedOutcomeV3(outcomes) {
+  // outcomes: Array<{ probability, state }>. Probabilities should sum to ≈1.
+  const r = Math.random();
+  let acc = 0;
+  for (let i = 0; i < outcomes.length; i++) {
+    acc += outcomes[i].probability;
+    if (r <= acc) return outcomes[i];
+  }
+  return outcomes[outcomes.length - 1];
+}
+
+// MC-specific corrections to the worker's outcome generator:
+//
+// 1. `buildEnv` adds family-aggregate "Other" entries to the affix map (e.g.
+//    `elemental-damage-other`, `specific-resistance-other`). These are
+//    modeling abstractions for value computation. The in-game cube always
+//    produces a SPECIFIC subtype, so when MC samples an outcome containing
+//    an "Other" id we expand it back to a uniformly-random non-target
+//    non-duplicate family member.
+//
+// 2. The worker's outcome generator for `add`/`focused`/`chaotic` may produce
+//    outcomes where the same affixId appears in multiple slots. The
+//    optimizer's downstream feasibility check rejects such states and
+//    returns no action — so following them in MC traps the rollout at the
+//    step cap. In D4 the cube never produces duplicates of currently-held
+//    affixes. We filter these out and renormalize, matching in-game
+//    distribution.
+
+function stateHasDuplicateAffixesV3(state) {
+  if (!state || !Array.isArray(state.affixes)) return false;
+  const seen = new Set();
+  for (const entry of state.affixes) {
+    if (!entry || !entry.affixId) continue;
+    if (seen.has(entry.affixId)) return true;
+    seen.add(entry.affixId);
+  }
+  return false;
+}
+
+function filterValidMCOutcomesV3(outcomes) {
+  const valid = outcomes.filter((o) => !stateHasDuplicateAffixesV3(o.state));
+  if (valid.length === 0) return [];
+  const total = valid.reduce((s, o) => s + o.probability, 0);
+  if (total <= 0) return [];
+  return valid.map((o) => ({ probability: o.probability / total, state: o.state }));
+}
+function expandFamilyOtherInStateV3(successor, env, target) {
+  if (!env || !env.familyOtherId) return successor;
+  const otherIds = new Set(Object.values(env.familyOtherId));
+  if (otherIds.size === 0) return successor;
+
+  const targetIds = new Set((target && target.affixes) ? target.affixes.map((e) => e.affixId) : []);
+  const presentIds = new Set(successor.affixes.map((a) => a.affixId));
+
+  let replacedAffixes = null; // copy-on-write
+  for (let i = 0; i < successor.affixes.length; i++) {
+    const entry = successor.affixes[i];
+    if (!otherIds.has(entry.affixId)) continue;
+
+    const family = getAffixFamily(entry.affixId, env.affixMap);
+    if (!family) continue;
+
+    // Find real members of this family that are NOT target, NOT family-other,
+    // NOT already present on the item, AND legal for the gear slot.
+    const candidates = [];
+    for (const affix of Object.values(env.affixMap)) {
+      if (!affix || affix.family !== family) continue;
+      if (otherIds.has(affix.id)) continue;
+      if (targetIds.has(affix.id)) continue;
+      if (presentIds.has(affix.id)) continue;
+      candidates.push(affix);
+    }
+    if (candidates.length === 0) continue;
+
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    if (!replacedAffixes) replacedAffixes = successor.affixes.slice();
+    replacedAffixes[i] = { ...entry, affixId: pick.id };
+    presentIds.delete(entry.affixId);
+    presentIds.add(pick.id);
+  }
+  if (!replacedAffixes) return successor;
+  return { ...successor, affixes: replacedAffixes };
+}
+
+function isStopSignalledV3(stopView) {
+  if (!stopView) return false;
+  try {
+    return Atomics.load(stopView, 0) !== 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function runMCVerificationV3(payload, intermediateResult, options = {}) {
+  const budget = resolveMCBudgetV3(payload);
+  if (!budget) return intermediateResult;
+  if (!intermediateResult || !intermediateResult.action) return intermediateResult;
+  if (!Number.isFinite(intermediateResult.expectedSteps)) return intermediateResult;
+
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
+  const stepCounts = [];
+  let truncatedRolloutCount = 0;
+  const startTime = Date.now();
+
+  if (typeof options.onProgress === "function") {
+    options.onProgress({ completed: 0, total: budget.targetRollouts, intermediateResult });
+  }
+
+  // Seed cache with the headline state's action — the optimizer already
+  // computed it for the displayed recommendation.
+  actionCache.set(stateKey(payload.state), intermediateResult.action);
+
+  let aborted = false;
+  let earlyConverged = false;
+
+  for (let rollout = 0; rollout < budget.maxRollouts; rollout++) {
+    if (isStopSignalledV3(options.stopView)) { aborted = true; break; }
+    if (Date.now() - startTime > budget.wallBudgetMs) { aborted = true; break; }
+
+    let state = payload.state;
+    let steps = 0;
+    let truncated = false;
+
+    while (true) {
+      const term = isTerminal(state, payload.target, env);
+      if (term.terminal) {
+        if (!term.success) {
+          // Dead state encountered mid-rollout (GA broken). Cap as truncated.
+          truncated = true;
+          steps = MC_ROLLOUT_STEP_CAP;
+        }
+        break;
+      }
+      if (steps >= MC_ROLLOUT_STEP_CAP) { truncated = true; break; }
+
+      const key = stateKey(state);
+      let action = actionCache.get(key);
+      if (action === undefined) {
+        const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
+        action = subResult && subResult.action ? subResult.action : null;
+        actionCache.set(key, action);
+      }
+      if (!action) { truncated = true; steps = MC_ROLLOUT_STEP_CAP; break; }
+
+      const rawOutcomes = getActionOutcomes(state, action, env);
+      if (!rawOutcomes || rawOutcomes.length === 0) { truncated = true; break; }
+      const outcomes = filterValidMCOutcomesV3(rawOutcomes);
+      if (outcomes.length === 0) { truncated = true; break; }
+
+      const chosen = pickWeightedOutcomeV3(outcomes);
+      state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
+      steps++;
+    }
+
+    stepCounts.push(steps);
+    if (truncated) truncatedRolloutCount++;
+
+    const completed = stepCounts.length;
+    if (typeof options.onProgress === "function" &&
+        (completed % MC_PROGRESS_EVERY === 0 || completed === budget.maxRollouts)) {
+      const stats = computeMCStatsV3(stepCounts);
+      options.onProgress({
+        completed,
+        total: budget.targetRollouts,
+        intermediateMean: stats.mean,
+      });
+    }
+
+    if (budget.adaptive && completed >= MC_ADAPTIVE_CHECK_EVERY &&
+        completed % MC_ADAPTIVE_CHECK_EVERY === 0) {
+      const stats = computeMCStatsV3(stepCounts);
+      if (Number.isFinite(stats.ci95halfWidth) && Number.isFinite(stats.mean) &&
+          stats.mean > 0 && stats.ci95halfWidth <= MC_ADAPTIVE_TARGET_REL_HALF_WIDTH * stats.mean) {
+        earlyConverged = true;
+        break;
+      }
+    }
+  }
+
+  const stats = computeMCStatsV3(stepCounts);
+  const wallTimeMs = Date.now() - startTime;
+  const completedRollouts = stepCounts.length;
+  const finalApproximate = !!intermediateResult.approximate || aborted ||
+    (budget.adaptive && !earlyConverged && completedRollouts >= budget.maxRollouts);
+
+  return {
+    ...intermediateResult,
+    expectedSteps: Number.isFinite(stats.mean) ? stats.mean : intermediateResult.expectedSteps,
+    approximate: finalApproximate,
+    diagnostics: {
+      ...intermediateResult.diagnostics,
+      goldStandard: {
+        applied: true,
+        level: budget.level,
+        rollouts: completedRollouts,
+        mean: stats.mean,
+        ci95halfWidth: stats.ci95halfWidth,
+        stdev: stats.stdev,
+        intermediateSteps: intermediateResult.expectedSteps,
+        truncatedRolloutCount,
+        wallTimeMs,
+        aborted,
+        earlyConverged,
+        adaptive: budget.adaptive,
+      },
+    },
+  };
+}
+
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
   const result = optimizePayloadV3(payload, { stopView });
-  self.postMessage({
-    type: "done",
-    runId,
-    ...result,
+
+  const wantsVerification = payload.tightenStepsLevel === "light"
+    || payload.tightenStepsLevel === "heavy"
+    || payload.tightenStepsLevel === "adaptive";
+
+  if (!wantsVerification) {
+    self.postMessage({ type: "done", runId, ...result });
+    return;
+  }
+
+  let firstProgressSent = false;
+  const finalResult = runMCVerificationV3(payload, result, {
+    stopView,
+    onProgress: (progress) => {
+      const msg = {
+        type: "verifying",
+        runId,
+        completed: progress.completed,
+        total: progress.total,
+      };
+      if (!firstProgressSent && progress.intermediateResult) {
+        msg.intermediateResult = progress.intermediateResult;
+        firstProgressSent = true;
+      }
+      if (progress.intermediateMean !== undefined) {
+        msg.intermediateMean = progress.intermediateMean;
+      }
+      self.postMessage(msg);
+    },
   });
+
+  self.postMessage({ type: "done", runId, ...finalResult });
 }
 
 if (typeof self !== "undefined") {
@@ -5357,6 +5758,17 @@ if (typeof module !== "undefined" && module.exports) {
     optimizePayloadV3,
     optimizeScenarioV3,
     runOptimizationV3,
+    runMCVerificationV3,
+    computeMCStatsV3,
+    // MC verification budget constants — exposed for tests + benchmarks.
+    MC_LIGHT_ROLLOUTS,
+    MC_HEAVY_ROLLOUTS,
+    MC_ADAPTIVE_MAX_ROLLOUTS,
+    MC_ADAPTIVE_WALL_BUDGET_MS,
+    MC_ADAPTIVE_CHECK_EVERY,
+    MC_ADAPTIVE_TARGET_REL_HALF_WIDTH,
+    MC_ROLLOUT_STEP_CAP,
+    MC_PROGRESS_EVERY,
     // Re-export key base-worker helpers used by tests.
     buildEnv: buildEnv,
     stateKey: stateKey,

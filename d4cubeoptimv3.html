@@ -984,6 +984,9 @@
 					<li>Click <strong>Reset</strong> to clear all state and start over.</li>
 				</ol>
 
+				<p class="legend" style="margin-top:10px;"><strong style="color:var(--accent);">Settings — Slot Legality Overrides</strong><br>
+				If an affix you want to target isn't appearing in the autocomplete (because the built-in slot legality table doesn't list it for your gear slot), click <strong>Settings</strong> in the toolbar to add a custom override. Specify the Slot, an optional Class restriction, and the affix name. The override is saved permanently and takes effect immediately — no page refresh required. Overrides that are already covered by the built-in table are rejected automatically. To remove an override, open Settings and click the × next to it.</p>
+
 				<div class="divider"></div>
 
 				<strong style="color: var(--accent);">Current Limitations</strong>
@@ -1038,7 +1041,7 @@
 					</div>
 					<div class="field">
 						<label for="override-affix-input">Affix</label>
-						<input id="override-affix-input" type="text" list="affix-options" placeholder="Affix name">
+						<input id="override-affix-input" type="text" list="all-affix-options" placeholder="Affix name">
 					</div>
 					<button id="override-add-btn" class="btn action-submit">Add Override</button>
 				</div>
@@ -1048,6 +1051,7 @@
 	</dialog>
 
 	<datalist id="affix-options"></datalist>
+	<datalist id="all-affix-options"></datalist>
 	<datalist id="manual-result-options"></datalist>
 
 	<script src="./gear-slot-legality.js"></script>
@@ -1237,6 +1241,7 @@
 			clearHistory: document.getElementById("clear-history"),
 
 			affixOptions: document.getElementById("affix-options"),
+			allAffixOptions: document.getElementById("all-affix-options"),
 			manualResultOptions: document.getElementById("manual-result-options"),
 
 			settingsModal: document.getElementById("settings-modal"),
@@ -1272,6 +1277,7 @@
 
 		function populateStaticLists() {
 			renderAffixOptions();
+			renderAllAffixOptions();
 
 			els.gearSlot.innerHTML = "";
 			GEAR_SLOTS.forEach((slot) => {
@@ -1333,6 +1339,14 @@
 			});
 
 			document.getElementById("settings-btn").addEventListener("click", () => {
+				// Default slot to the current item slot (fall back to Helm if Any).
+				const currentSlot = appState.current.gearSlot;
+				overrideSlotSelect.value = (currentSlot && currentSlot !== "Any")
+					? currentSlot
+					: "Helm";
+				overrideClassSelect.value = "Any";
+				document.getElementById("override-affix-input").value = "";
+				document.getElementById("override-add-error").textContent = "";
 				renderOverridesTable();
 				settingsModal.showModal();
 			});
@@ -1355,6 +1369,12 @@
 				const affix = AFFIX_BY_NAME[normalized];
 				if (!affix) {
 					errorDiv.textContent = `Affix "${rawName}" not found in the catalog.`;
+					return;
+				}
+
+				// Reject overrides that are already covered by the static legality table.
+				if (isAffixStaticallyLegalOnSlot(affix.name, slot)) {
+					errorDiv.textContent = `"${affix.name}" is already legal on ${slot} — no override needed.`;
 					return;
 				}
 
@@ -3128,15 +3148,27 @@
 				// Drop entries with invalid structure.
 				const validSlots = GEAR_SLOTS.filter((s) => s !== "Any");
 				const validClasses = ["Any", ...CLASSES.filter((c) => c !== "Any")];
-				appState.userOverrides = appState.userOverrides.filter(
-					(o) =>
-						o &&
-						typeof o === "object" &&
-						typeof o.affixId === "string" &&
-						o.affixId &&
-						validSlots.includes(o.slot) &&
-						validClasses.includes(o.class)
-				);
+				appState.userOverrides = appState.userOverrides.filter((o) => {
+					if (
+						!o ||
+						typeof o !== "object" ||
+						typeof o.affixId !== "string" ||
+						!o.affixId ||
+						!validSlots.includes(o.slot) ||
+						!validClasses.includes(o.class)
+					) {
+						return false;
+					}
+					// Drop overrides now made redundant by the static legality table.
+					// This silently prunes stored overrides after a static-list addition
+					// (e.g. if the user had added {Ring, Any, Cooldown Reduction} before
+					// it was added to the built-in table).
+					const affix = AFFIX_BY_ID[o.affixId];
+					if (affix && isAffixStaticallyLegalOnSlot(affix.name, o.slot)) {
+						return false;
+					}
+					return true;
+				});
 			}
 		}
 
@@ -3242,6 +3274,17 @@
 			try {
 				localStorage.setItem(OVERRIDES_KEY, JSON.stringify(overrides));
 			} catch { /* storage full — silently ignore */ }
+		}
+
+		// Returns true when the static legality table already permits affixName on slot,
+		// making any user override for that combination redundant.
+		function isAffixStaticallyLegalOnSlot(affixName, slot) {
+			if (!slotLegality || typeof slotLegality.getLegalGearSlotsForAffixName !== "function") {
+				return false;
+			}
+			const builtIn = slotLegality.getLegalGearSlotsForAffixName(affixName);
+			if (!Array.isArray(builtIn)) return false;
+			return builtIn.includes(slot) || builtIn.includes("Any");
 		}
 
 		// Returns true when any stored override allows affixId on slot for class.
@@ -3517,6 +3560,18 @@
 				const option = document.createElement("option");
 				option.value = affix.name;
 				els.affixOptions.appendChild(option);
+			});
+		}
+
+		// Populates the unfiltered affix datalist used by the Settings modal so
+		// any affix can be typed regardless of the current slot/class selection.
+		function renderAllAffixOptions() {
+			if (!els.allAffixOptions) return;
+			els.allAffixOptions.innerHTML = "";
+			AFFIXES.forEach((affix) => {
+				const option = document.createElement("option");
+				option.value = affix.name;
+				els.allAffixOptions.appendChild(option);
 			});
 		}
 

@@ -290,6 +290,7 @@
       "Lucky Hit Chance",
       "Maximum Resource",
       "Resource Regeneration",
+      "Cooldown Reduction",
       "Life on Hit",
       "All Resistance",
       "Specific Resistance (Physical)",

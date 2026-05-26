@@ -905,17 +905,18 @@ test("Amulet legality additions: Vulnerable Damage, Critical Strike Damage, DoT 
   }
 });
 
-test("Ring legality additions: all 6 Elemental Damage subtypes", () => {
+test("Ring legality additions: all 6 Elemental Damage subtypes and Cooldown Reduction", () => {
   const { isAffixNameLegalForGearSlot } = gearSlotLegality;
-  const elementalDamageAffixes = [
+  const ringAffixes = [
     "Elemental Damage (Physical)",
     "Elemental Damage (Fire)",
     "Elemental Damage (Cold)",
     "Elemental Damage (Lightning)",
     "Elemental Damage (Poison)",
     "Elemental Damage (Shadow)",
+    "Cooldown Reduction",
   ];
-  for (const name of elementalDamageAffixes) {
+  for (const name of ringAffixes) {
     assert.equal(
       isAffixNameLegalForGearSlot(name, "Ring"),
       true,

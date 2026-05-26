@@ -261,6 +261,117 @@
 			outline-offset: 2px;
 		}
 
+		input[type="checkbox"]:indeterminate {
+			background: #111;
+			border-color: #707070;
+		}
+
+		input[type="checkbox"]:indeterminate::after {
+			content: "";
+			position: absolute;
+			left: 2px;
+			top: 4px;
+			width: 7px;
+			height: 1.5px;
+			background: #f2e4cc;
+		}
+
+		/* Skill filter */
+		.skill-filter {
+			margin-top: 10px;
+			border-top: 1px solid var(--edge);
+			padding-top: 6px;
+		}
+
+		.skill-filter details {
+			margin-bottom: 2px;
+		}
+
+		.skill-filter summary {
+			cursor: pointer;
+			list-style: none;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-size: 0.84rem;
+			color: var(--muted);
+			padding: 3px 0;
+			user-select: none;
+		}
+
+		.skill-filter summary::-webkit-details-marker {
+			display: none;
+		}
+
+		.skill-filter summary .sf-arrow {
+			display: inline-block;
+			width: 10px;
+			flex-shrink: 0;
+			font-size: 0.7em;
+			transition: transform 0.15s;
+		}
+
+		.skill-filter details[open] summary .sf-arrow {
+			transform: rotate(90deg);
+		}
+
+		.skill-filter summary .sf-label {
+			flex: 1;
+		}
+
+		.skill-filter-list {
+			max-height: 150px;
+			overflow-y: auto;
+			padding: 3px 0 3px 18px;
+			display: flex;
+			flex-direction: column;
+			gap: 3px;
+		}
+
+		.skill-filter-item {
+			display: flex;
+			align-items: flex-start;
+			gap: 6px;
+			font-size: 0.82rem;
+			color: var(--muted);
+		}
+
+		.skill-filter-item input[type="checkbox"] {
+			margin-top: 2px;
+			flex-shrink: 0;
+		}
+
+		.skill-filter-item span {
+			overflow-wrap: break-word;
+			word-break: break-word;
+		}
+
+		.skill-filter-all-skills {
+			display: flex;
+			align-items: center;
+			gap: 6px;
+			font-size: 0.84rem;
+			color: var(--muted);
+			padding: 3px 0;
+			margin-top: 4px;
+		}
+
+		.skill-filter-all-skills.sf-hidden {
+			display: none;
+		}
+
+		.skill-filter-warning {
+			display: none;
+			font-size: 0.82rem;
+			color: var(--warn);
+			margin-top: 4px;
+			overflow-wrap: break-word;
+		}
+
+		.skill-filter-warning.sf-visible {
+			display: block;
+		}
+
 		.legend {
 			margin: 8px 0 0;
 			font-size: 0.84rem;
@@ -662,6 +773,7 @@
 					<div class="panel-actions">
 						<button id="add-target-affix" class="btn ghost">Add Target Affix</button>
 					</div>
+					<div id="skill-filter-container"></div>
 					<p class="legend">
 						Require GA can only be checked for affixes that are already GA on the source item.
 					</p>
@@ -892,6 +1004,9 @@
 			? _cfg.LEGACY_AFFIX_NAME_ALIASES
 			: {};
 
+		const CLASS_SKILLS = (_cfg.CLASS_SKILLS && typeof _cfg.CLASS_SKILLS === "object") ? _cfg.CLASS_SKILLS : {};
+		const CLASS_AGNOSTIC_GENERAL_SKILLS = Array.isArray(_cfg.CLASS_AGNOSTIC_GENERAL_SKILLS) ? _cfg.CLASS_AGNOSTIC_GENERAL_SKILLS : [];
+
 		const AFFIXES = buildAffixCatalog(CATEGORY_TO_AFFIX_NAMES, OPERATION_CATEGORY_OVERRIDES);
 		const AFFIX_BY_ID = Object.create(null);
 		const AFFIX_BY_NAME = Object.create(null);
@@ -944,6 +1059,7 @@
 				prism: "None",
 			},
 			history: [],
+			skillFilter: null, // computed on first sanitize
 		};
 
 		let appState = loadState();
@@ -1070,18 +1186,24 @@
 
 			els.gearSlot.addEventListener("change", () => {
 				const snapshot = snapshotAffixLegality();
+				const skillSnapshot = snapshotSkillFilterLegality();
 				appState.current.gearSlot = els.gearSlot.value;
+				appState.skillFilter = computeDefaultSkillFilter();
 				invalidatePolicyCache();
 				flashNewlyIllegalAffixes(snapshot);
+				flashNewlyBlockedSkillAffixes(skillSnapshot);
 				saveState();
 				renderAll();
 			});
 
 			els.characterClass.addEventListener("change", () => {
 				const snapshot = snapshotAffixLegality();
+				const skillSnapshot = snapshotSkillFilterLegality();
 				appState.current.class = els.characterClass.value;
+				appState.skillFilter = computeDefaultSkillFilter();
 				invalidatePolicyCache();
 				flashNewlyIllegalAffixes(snapshot);
+				flashNewlyBlockedSkillAffixes(skillSnapshot);
 				saveState();
 				renderAll();
 			});
@@ -1190,7 +1312,7 @@
 			sanitizeState();
 			const illegalSelection = getFirstIllegalAffixSelection();
 			if (illegalSelection) {
-				renderStatus(`${illegalSelection.label} ${illegalSelection.name} is not legal on ${illegalSelection.gearSlot} for class ${illegalSelection.className}. Set Gear Slot and Class to Any to disable narrowing.`, "");
+				renderStatus(illegalSelection.message, "");
 				return;
 			}
 			const runState = exportCurrentState();
@@ -1636,6 +1758,7 @@
 			renderCurrentControls();
 			renderCurrentAffixes();
 			renderTargetAffixes();
+			renderSkillFilter();
 			renderManualControls();
 			renderSolverDiagnostics(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
@@ -1644,6 +1767,394 @@
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
 			requestAnimationFrame(syncTargetPanelSpacer);
 		}
+
+		// ── Skill filter helpers ──────────────────────────────────────────────
+
+		function getSkillCategoriesForClass(className) {
+			const result = CLASS_AGNOSTIC_GENERAL_SKILLS.slice();
+			if (className && className !== "Any") {
+				const cls = CLASS_SKILLS[className];
+				if (cls && Array.isArray(cls.general)) {
+					result.push(...cls.general);
+				}
+			} else {
+				for (const cls of Object.values(CLASS_SKILLS)) {
+					if (Array.isArray(cls.general)) {
+						result.push(...cls.general);
+					}
+				}
+			}
+			return result;
+		}
+
+		function getSpecificSkillsForClass(className) {
+			if (className && className !== "Any") {
+				const cls = CLASS_SKILLS[className];
+				return cls && Array.isArray(cls.specific) ? cls.specific.slice() : [];
+			}
+			const result = [];
+			for (const cls of Object.values(CLASS_SKILLS)) {
+				if (Array.isArray(cls.specific)) {
+					result.push(...cls.specific);
+				}
+			}
+			return result;
+		}
+
+		// Slots where skills default to all-disabled.
+		const SKILL_FILTER_DISABLED_SLOTS = new Set(["Ring", "1H Weapon", "2H Weapon"]);
+
+		function getDefaultSkillFilter(gearSlot, className) {
+			if (SKILL_FILTER_DISABLED_SLOTS.has(gearSlot)) {
+				return { categories: [], specificSkills: [], allSkills: false };
+			}
+			return {
+				categories: getSkillCategoriesForClass(className),
+				specificSkills: getSpecificSkillsForClass(className),
+				allSkills: (gearSlot === "Amulet" || gearSlot === "Any"),
+			};
+		}
+
+		function computeDefaultSkillFilter() {
+			return getDefaultSkillFilter(getCurrentGearSlotForFiltering(), getCurrentClassForFiltering());
+		}
+
+		function arrayContentEqual(a, b) {
+			if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+			const sb = new Set(b);
+			return a.every((x) => sb.has(x)) && b.every((x) => new Set(a).has(x));
+		}
+
+		function isSkillFilterAtDefaults() {
+			if (!appState.skillFilter) return true;
+			const def = computeDefaultSkillFilter();
+			const f = appState.skillFilter;
+			return (
+				arrayContentEqual(f.categories, def.categories) &&
+				arrayContentEqual(f.specificSkills, def.specificSkills) &&
+				f.allSkills === def.allSkills
+			);
+		}
+
+		function isSkillAffixBlockedByFilter(affix) {
+			if (!affix || !appState.skillFilter) return false;
+			const { family, name, id } = affix;
+			if (!family && id === "to-all-skills") {
+				return !appState.skillFilter.allSkills;
+			}
+			if (family === "class-agnostic-general" || family === "class-specific-general") {
+				return !appState.skillFilter.categories.includes(name);
+			}
+			if (family === "specific-skill") {
+				return !appState.skillFilter.specificSkills.includes(name);
+			}
+			return false;
+		}
+
+		// Returns true if any filled current or target slot has a skill rank affix.
+		function hasAnySkillAffixOnItem() {
+			const allEntries = [...appState.current.affixes, ...appState.target.affixes];
+			return allEntries.some((entry) => {
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (!affix) return false;
+				const { family, id } = affix;
+				return (
+					family === "specific-skill" ||
+					family === "class-specific-general" ||
+					family === "class-agnostic-general" ||
+					(!family && id === "to-all-skills")
+				);
+			});
+		}
+
+		function snapshotSkillFilterLegality() {
+			// Capture which affixes are currently NOT blocked (allowed).
+			const check = (entry) => {
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				return affix ? !isSkillAffixBlockedByFilter(affix) : null;
+			};
+			return {
+				current: appState.current.affixes.map(check),
+				target: appState.target.affixes.map(check),
+			};
+		}
+
+		function flashNewlyBlockedSkillAffixes(snapshot) {
+			// After a slot/class change the filter resets — flash any affix that
+			// was allowed before the reset but is now blocked by the new defaults.
+			appState.current.affixes.forEach((entry, idx) => {
+				if (snapshot.current[idx] !== true) return;
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (affix && isSkillAffixBlockedByFilter(affix)) {
+					pendingIllegalFlashCurrent.add(idx);
+				}
+			});
+			appState.target.affixes.forEach((entry, idx) => {
+				if (snapshot.target[idx] !== true) return;
+				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+				if (affix && isSkillAffixBlockedByFilter(affix)) {
+					pendingIllegalFlashTarget.add(idx);
+				}
+			});
+		}
+
+		function renderSkillFilter() {
+			const container = document.getElementById("skill-filter-container");
+			if (!container) return;
+			container.innerHTML = "";
+
+			const gearSlot = getCurrentGearSlotForFiltering();
+			const className = getCurrentClassForFiltering();
+
+			// All categories and specific skills visible for this class.
+			const allCategories = getSkillCategoriesForClass(className);
+			const allSpecific = getSpecificSkillsForClass(className);
+
+			// Nothing to show if there are no skill affixes for this slot.
+			const hasSkills = allCategories.length > 0 || allSpecific.length > 0;
+			if (!hasSkills) return;
+
+			if (!appState.skillFilter) {
+				appState.skillFilter = computeDefaultSkillFilter();
+			}
+			const f = appState.skillFilter;
+			const showAllSkills = (gearSlot === "Amulet" || gearSlot === "Any");
+
+			const root = document.createElement("div");
+			root.className = "skill-filter";
+
+			// ── helper: build a parent checkbox for the accordion summary ──
+			function makeParentCheckbox(names, getEnabled, setEnabled) {
+				const cb = document.createElement("input");
+				cb.type = "checkbox";
+				const enabledCount = names.filter((n) => getEnabled(n)).length;
+				if (enabledCount === names.length) {
+					cb.checked = true;
+				} else if (enabledCount === 0) {
+					cb.checked = false;
+				} else {
+					cb.checked = false;
+					cb.indeterminate = true;
+				}
+				cb.addEventListener("click", (e) => {
+					e.stopPropagation(); // don't toggle accordion
+					const newVal = !names.every((n) => getEnabled(n));
+					// Snapshot which affected affixes are currently allowed (before applying change).
+					const affected = new Set(names);
+					const wasAllowedCurrent = appState.current.affixes.map((entry) => {
+						const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+						return affix && affected.has(affix.name) ? !isSkillAffixBlockedByFilter(affix) : false;
+					});
+					const wasAllowedTarget = appState.target.affixes.map((entry) => {
+						const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+						return affix && affected.has(affix.name) ? !isSkillAffixBlockedByFilter(affix) : false;
+					});
+					setEnabled(names, newVal);
+					saveState();
+					// Flash affixes that just became newly blocked.
+					if (!newVal) {
+						appState.current.affixes.forEach((entry, idx) => {
+							const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+							if (affix && wasAllowedCurrent[idx] && isSkillAffixBlockedByFilter(affix)) {
+								pendingIllegalFlashCurrent.add(idx);
+							}
+						});
+						appState.target.affixes.forEach((entry, idx) => {
+							const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+							if (affix && wasAllowedTarget[idx] && isSkillAffixBlockedByFilter(affix)) {
+								pendingIllegalFlashTarget.add(idx);
+							}
+						});
+					}
+					renderAll();
+				});
+				return cb;
+			}
+
+			// ── helper: build a child checkbox item ──
+			function makeChildItem(name, isEnabled, toggle) {
+				const wrap = document.createElement("label");
+				wrap.className = "skill-filter-item";
+				const cb = document.createElement("input");
+				cb.type = "checkbox";
+				cb.checked = isEnabled;
+				cb.addEventListener("change", () => {
+					// Flash current/target affixes that just became blocked.
+					if (!cb.checked) {
+						appState.current.affixes.forEach((entry, idx) => {
+							const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+							if (affix && affix.name === name && !isSkillAffixBlockedByFilter(affix)) {
+								pendingIllegalFlashCurrent.add(idx);
+							}
+						});
+						appState.target.affixes.forEach((entry, idx) => {
+							const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+							if (affix && affix.name === name && !isSkillAffixBlockedByFilter(affix)) {
+								pendingIllegalFlashTarget.add(idx);
+							}
+						});
+					}
+					toggle(cb.checked);
+					saveState();
+					renderAll();
+				});
+				const label = document.createElement("span");
+				label.textContent = name;
+				wrap.appendChild(cb);
+				wrap.appendChild(label);
+				return wrap;
+			}
+
+			// ── Skill Categories accordion ──
+			if (allCategories.length > 0) {
+				const details = document.createElement("details");
+				const summary = document.createElement("summary");
+
+				const arrow = document.createElement("span");
+				arrow.className = "sf-arrow";
+				arrow.textContent = "▶";
+
+				const labelSpan = document.createElement("span");
+				labelSpan.className = "sf-label";
+				labelSpan.textContent = "Skill Categories";
+
+				const parentCb = makeParentCheckbox(
+					allCategories,
+					(n) => f.categories.includes(n),
+					(names, val) => {
+						if (val) {
+							const s = new Set(f.categories);
+							names.forEach((n) => s.add(n));
+							f.categories = [...s];
+						} else {
+							const rem = new Set(names);
+							f.categories = f.categories.filter((n) => !rem.has(n));
+						}
+					}
+				);
+
+				summary.appendChild(arrow);
+				summary.appendChild(labelSpan);
+				summary.appendChild(parentCb);
+				details.appendChild(summary);
+
+				const list = document.createElement("div");
+				list.className = "skill-filter-list";
+				allCategories.forEach((name) => {
+					list.appendChild(makeChildItem(
+						name,
+						f.categories.includes(name),
+						(val) => {
+							if (val) {
+								if (!f.categories.includes(name)) f.categories.push(name);
+							} else {
+								f.categories = f.categories.filter((n) => n !== name);
+							}
+						}
+					));
+				});
+				details.appendChild(list);
+				root.appendChild(details);
+			}
+
+			// ── Specific Skills accordion ──
+			if (allSpecific.length > 0) {
+				const details = document.createElement("details");
+				const summary = document.createElement("summary");
+
+				const arrow = document.createElement("span");
+				arrow.className = "sf-arrow";
+				arrow.textContent = "▶";
+
+				const labelSpan = document.createElement("span");
+				labelSpan.className = "sf-label";
+				labelSpan.textContent = "Specific Skills";
+
+				const parentCb = makeParentCheckbox(
+					allSpecific,
+					(n) => f.specificSkills.includes(n),
+					(names, val) => {
+						if (val) {
+							const s = new Set(f.specificSkills);
+							names.forEach((n) => s.add(n));
+							f.specificSkills = [...s];
+						} else {
+							const rem = new Set(names);
+							f.specificSkills = f.specificSkills.filter((n) => !rem.has(n));
+						}
+					}
+				);
+
+				summary.appendChild(arrow);
+				summary.appendChild(labelSpan);
+				summary.appendChild(parentCb);
+				details.appendChild(summary);
+
+				const list = document.createElement("div");
+				list.className = "skill-filter-list";
+				allSpecific.forEach((name) => {
+					list.appendChild(makeChildItem(
+						name,
+						f.specificSkills.includes(name),
+						(val) => {
+							if (val) {
+								if (!f.specificSkills.includes(name)) f.specificSkills.push(name);
+							} else {
+								f.specificSkills = f.specificSkills.filter((n) => n !== name);
+							}
+						}
+					));
+				});
+				details.appendChild(list);
+				root.appendChild(details);
+			}
+
+			// ── +X to All Skills (standalone, Amulet/Any only) ──
+			const allSkillsRow = document.createElement("div");
+			allSkillsRow.className = "skill-filter-all-skills" + (showAllSkills ? "" : " sf-hidden");
+			const allSkillsCb = document.createElement("input");
+			allSkillsCb.type = "checkbox";
+			allSkillsCb.checked = f.allSkills;
+			allSkillsCb.addEventListener("change", () => {
+				if (!allSkillsCb.checked) {
+					// Flash any affix that's "to All Skills" and was allowed before.
+					const toAllId = "to-all-skills";
+					appState.current.affixes.forEach((entry, idx) => {
+						if (entry && entry.affixId === toAllId) pendingIllegalFlashCurrent.add(idx);
+					});
+					appState.target.affixes.forEach((entry, idx) => {
+						if (entry && entry.affixId === toAllId) pendingIllegalFlashTarget.add(idx);
+					});
+				}
+				f.allSkills = allSkillsCb.checked;
+				saveState();
+				renderAll();
+			});
+			const allSkillsLabel = document.createElement("span");
+			allSkillsLabel.textContent = "+X to All Skills (Amulet, via Enchantress only)";
+			allSkillsRow.appendChild(allSkillsCb);
+			allSkillsRow.appendChild(allSkillsLabel);
+			root.appendChild(allSkillsRow);
+
+			// ── Enchantress warning ──
+			// Only shown for slots where defaults have skills enabled, so the user
+			// knows to visit the Enchantress to refine what skills the item can get.
+			// Omit for Ring/Weapon defaults (nothing enabled = no useful visit needed).
+			const warning = document.createElement("p");
+			warning.className = "skill-filter-warning";
+			warning.textContent =
+				"Visit the Enchantress to see which skill affixes your item can roll — " +
+				"then uncheck any you don't want to allow here.";
+			const isDisabledDefault = SKILL_FILTER_DISABLED_SLOTS.has(gearSlot);
+			if (!isDisabledDefault && isSkillFilterAtDefaults() && hasAnySkillAffixOnItem()) {
+				warning.classList.add("sf-visible");
+			}
+			root.appendChild(warning);
+
+			container.appendChild(root);
+		}
+
+		// ── End skill filter helpers ──────────────────────────────────────────
 
 		function renderCurrentControls() {
 			els.gearSlot.value = appState.current.gearSlot;
@@ -1811,7 +2322,7 @@
 				input.value = affixName(entry.affixId);
 				input.placeholder = "Affix";
 				const selectedAffix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (!entry.affixId || (selectedAffix && !isAffixLegalForCurrentSlot(selectedAffix))) {
+				if (!entry.affixId || (selectedAffix && (!isAffixLegalForCurrentSlot(selectedAffix) || isSkillAffixBlockedByFilter(selectedAffix)))) {
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
@@ -1936,7 +2447,7 @@
 				input.value = affixName(entry.affixId);
 				input.placeholder = "Target affix";
 				const selectedAffix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (!entry.affixId || (selectedAffix && !isAffixLegalForCurrentSlot(selectedAffix))) {
+				if (!entry.affixId || (selectedAffix && (!isAffixLegalForCurrentSlot(selectedAffix) || isSkillAffixBlockedByFilter(selectedAffix)))) {
 					input.classList.add("invalid");
 				}
 				input.addEventListener("change", () => {
@@ -2326,6 +2837,18 @@
 			appState.history = appState.history
 				.filter((entry) => entry && typeof entry === "object")
 				.slice(0, 200);
+
+			// Sanitize skillFilter — compute defaults if missing or malformed.
+			if (!appState.skillFilter || typeof appState.skillFilter !== "object") {
+				appState.skillFilter = computeDefaultSkillFilter();
+			} else {
+				const f = appState.skillFilter;
+				appState.skillFilter = {
+					categories: Array.isArray(f.categories) ? f.categories.filter((s) => typeof s === "string") : [],
+					specificSkills: Array.isArray(f.specificSkills) ? f.specificSkills.filter((s) => typeof s === "string") : [],
+					allSkills: !!f.allSkills,
+				};
+			}
 		}
 
 		function exportCurrentState() {
@@ -2363,6 +2886,7 @@
 					settings: appState.settings,
 					lastAction: appState.lastAction,
 					history: appState.history,
+					skillFilter: appState.skillFilter,
 				};
 				localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 			} catch (error) {
@@ -2382,6 +2906,7 @@
 					settings: parsed.settings || JSON.parse(JSON.stringify(defaultState.settings)),
 					lastAction: parsed.lastAction || JSON.parse(JSON.stringify(defaultState.lastAction)),
 					history: parsed.history || [],
+					skillFilter: parsed.skillFilter || null,
 				};
 			} catch (error) {
 				return JSON.parse(JSON.stringify(defaultState));
@@ -2559,20 +3084,39 @@
 			const gearSlot = getCurrentGearSlotForFiltering();
 			const className = getCurrentClassForFiltering();
 			if (gearSlot === "Any" && className === "Any") {
+				// Still check skill filter even in Any/Any mode.
+				for (const entry of appState.current.affixes) {
+					const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+					if (affix && isSkillAffixBlockedByFilter(affix)) {
+						return { message: `Current affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
+					}
+				}
+				for (const entry of appState.target.affixes) {
+					const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
+					if (affix && isSkillAffixBlockedByFilter(affix)) {
+						return { message: `Target affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
+					}
+				}
 				return null;
 			}
 
 			for (const entry of appState.current.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
 				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
-					return { label: "Current affix", name: affix.name, gearSlot, className };
+					return { message: `Current affix "${affix.name}" is not legal on ${gearSlot} for class ${className}. Set Gear Slot and Class to Any to disable narrowing.` };
+				}
+				if (affix && isSkillAffixBlockedByFilter(affix)) {
+					return { message: `Current affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
 				}
 			}
 
 			for (const entry of appState.target.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
 				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
-					return { label: "Target affix", name: affix.name, gearSlot, className };
+					return { message: `Target affix "${affix.name}" is not legal on ${gearSlot} for class ${className}. Set Gear Slot and Class to Any to disable narrowing.` };
+				}
+				if (affix && isSkillAffixBlockedByFilter(affix)) {
+					return { message: `Target affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
 				}
 			}
 

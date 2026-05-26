@@ -2196,5 +2196,76 @@ test("getValidActionsV2 includes same-affix enchant for non-GA matched-target sl
   );
 });
 
+// ── Re-enchant of already-enchanted slot ─────────────────────────────────────
+
+test("re-enchant of already-enchanted slot is chosen over Add Affix when cheaper", { timeout: TEST_TIMEOUT_MS * 5 }, async () => {
+  // Reproduce the screenshot scenario:
+  //   Slot=Any, Class=Barbarian, not Legendary.
+  //   Current: one slot — "Maximum Life", Enchanted=true, GA=false.
+  //   Target: "Armor".
+  //
+  // The closed-form REENCHANT candidate (cost 0.5) must beat the Case A
+  // "Add Affix (Protector prism)" candidate (~2 expected steps for a
+  // 2-entry pool) so the optimizer recommends the enchant action.
+  const { data, byName } = buildFixture();  // Protector: ["Armor", "Maximum Life"]
+  const state = buildState(
+    [{ affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: true }],
+    { gearSlot: "Any", class: "Any", isLegendary: false }
+  );
+  const target = buildTarget([{ affixId: byName["Armor"].id }]);
+  const gaConfig = { currentGAAffixes: [], unsatisfactoryAffixIds: [], strictMode: true };
+
+  const result = await worker.optimizePayloadV3(
+    { state, target, data, gaConfig, timeMs: 0, stopBuffer: null, tree: null }
+  );
+
+  assert.ok(result, "optimizePayloadV3 must return a result");
+  assert.ok(result.action, "result must have a recommended action");
+  assert.equal(result.action.type, "enchant",
+    `Expected enchant action but got ${JSON.stringify(result.action)}`);
+  assert.equal(result.action.targetAffixId, byName["Armor"].id,
+    "Enchant must target the missing 'Armor' affix");
+  assert.ok(
+    Number.isFinite(result.expectedSteps) && result.expectedSteps <= 0.5 + 1e-6,
+    `Expected expectedSteps ≤ 0.5 but got ${result.expectedSteps}`
+  );
+  assert.ok(
+    Number.isFinite(result.successProb) && result.successProb >= 1 - 1e-6,
+    `Expected 100% success probability but got ${result.successProb}`
+  );
+});
+
+test("re-enchant candidate is NOT proposed when enchanted slot's affix is itself a target", { timeout: TEST_TIMEOUT_MS }, () => {
+  // Negative test: current slot has "Maximum Life" (enchanted, non-GA),
+  // AND "Maximum Life" is in the target set. Re-enchanting would lose the
+  // satisfied target, so no REENCHANT candidate should be generated.
+  // The second target "Armor" must come from an empty slot via Case A.
+  const { data, byName } = buildFixture();
+  const state = buildState(
+    [{ affixId: byName["Maximum Life"].id, isGA: false, isEnchanted: true }],
+    { gearSlot: "Any", class: "Any", isLegendary: false }
+  );
+  const gaConfig = { currentGAAffixes: [], unsatisfactoryAffixIds: [], strictMode: true };
+  // Target includes both Maximum Life (already satisfied) and Armor (missing).
+  const target = buildTarget([
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Armor"].id },
+  ]);
+  const env = worker.buildEnv(data, gaConfig, target);
+
+  const armorEntry = target.affixes.find((e) => e.affixId === byName["Armor"].id);
+  // Slot 0 is the enchanted "Maximum Life" slot — REENCHANT must NOT fire.
+  const candidatesSlot0 = worker.getClosedFormPlanCandidatesV3(state, armorEntry, 0, env, { data, gaConfig, target });
+  const reenchantCandidates = candidatesSlot0.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.REENCHANT);
+  assert.equal(reenchantCandidates.length, 0,
+    "REENCHANT must not be proposed when the enchanted slot's affix is itself a target");
+
+  // Slot 1 is empty — Case A must be generated for Armor.
+  const candidatesSlot1 = worker.getClosedFormPlanCandidatesV3(state, armorEntry, 1, env, { data, gaConfig, target });
+  const caseACandidates = candidatesSlot1.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.A);
+  assert.ok(caseACandidates.length > 0,
+    "Case A must be generated for Armor on the empty slot");
+});
+
 // Suppress lint by referencing approxEqual from the existing helper above.
 void approxEqual;

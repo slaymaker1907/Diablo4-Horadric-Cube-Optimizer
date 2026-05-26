@@ -1005,7 +1005,7 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
-		const WORKER_VERSION = "2026-05-25-v3-consolidated";
+		const WORKER_VERSION = "2026-05-26-v3-reenchant-closed-form";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1410,7 +1410,12 @@
 				? describeAction(message.action)
 				: ((message.diagnostics && message.diagnostics.reason) || "No recommendation yet");
 			els.resultSuccess.textContent = percentOrDash(message.successProb);
-			els.resultSteps.textContent = numberOrDash(message.expectedSteps);
+			// Re-enchant plans report expectedSteps = RE_ENCHANT_TIE_BREAK_COST (0.5),
+			// a model artifact for cycle-breaking. Round up to 1 for enchant-only plans
+			// so the display reads "1.00" (one Enchantress visit) instead of "0.50".
+			const isEnchantOnlyStep = message.action && message.action.type === "enchant"
+				&& Number.isFinite(message.expectedSteps) && message.expectedSteps < 1;
+			els.resultSteps.textContent = numberOrDash(isEnchantOnlyStep ? 1 : message.expectedSteps);
 			els.resultStd.textContent = numberOrDash(message.stdDev);
 			if (Number.isFinite(message.iterations)) {
 				els.resultIterations.textContent = message.stoppedByUser

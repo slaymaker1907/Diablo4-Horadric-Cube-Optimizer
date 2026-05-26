@@ -52,6 +52,9 @@ const CLOSED_FORM_CASE_IDS = Object.freeze({
   E: "E",
   F: "F",
   G: "G",
+  // Re-enchant of the already-enchanted non-GA slot to a different target affix.
+  // Deterministic outcome; cost = RE_ENCHANT_TIE_BREAK_COST to break cycles.
+  REENCHANT: "REENCHANT",
 });
 const KEEP_PLAN_CASE_ID = "KEEP";
 const RESIDUAL_STATE_LIMIT = 500;
@@ -3114,6 +3117,31 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
   }
 
   if (hostEntry.isEnchanted) {
+    // For non-GA enchanted slots whose current affix is not in the target
+    // set, propose re-enchanting the slot directly to the missing target.
+    // The model treats Enchantress re-enchant as deterministic, so this is
+    // one Enchantress visit at RE_ENCHANT_TIE_BREAK_COST expected cost.
+    // The decomposition ILP arbitrates this against Case A "add to empty
+    // slot" candidates and picks the cheaper plan.
+    if (
+      !hostEntry.isGA
+      // Host affix must not itself be a required target: re-enchanting would
+      // lose the satisfied target and swap it for another.
+      && (env.targetCounts[hostEntry.affixId] || 0) === 0
+      // Target affix must not already be present on a different slot
+      // (enchant cannot create a duplicate affixId on the item).
+      && !getCurrentAffixes(state).some(
+        (entry, idx) => idx !== slotIndex && entry && entry.affixId === targetEntry.affixId
+      )
+    ) {
+      candidates.push(createClosedFormCandidateV3(
+        CLOSED_FORM_CASE_IDS.REENCHANT,
+        slotIndex,
+        targetEntry,
+        RE_ENCHANT_TIE_BREAK_COST,
+        { actionType: "enchant", sourceIndex: slotIndex }
+      ));
+    }
     return candidates;
   }
 
@@ -3295,7 +3323,11 @@ function getDecompositionOptionActionV3(option) {
   if (option.caseId === CLOSED_FORM_CASE_IDS.C) {
     return { type: "remove", prism: option.removePrism };
   }
-  if (option.caseId === CLOSED_FORM_CASE_IDS.D || option.caseId === CLOSED_FORM_CASE_IDS.E) {
+  if (
+    option.caseId === CLOSED_FORM_CASE_IDS.D
+    || option.caseId === CLOSED_FORM_CASE_IDS.E
+    || option.caseId === CLOSED_FORM_CASE_IDS.REENCHANT
+  ) {
     return {
       type: "enchant",
       sourceIndex: option.slotIndex,
@@ -3335,6 +3367,7 @@ function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candid
   const constantCase = (
     candidate.caseId === CLOSED_FORM_CASE_IDS.D
     || candidate.caseId === CLOSED_FORM_CASE_IDS.E
+    || candidate.caseId === CLOSED_FORM_CASE_IDS.REENCHANT
     || (
       candidate.caseId === CLOSED_FORM_CASE_IDS.F
       && Number.isFinite(candidate.expectedSteps)
@@ -3351,7 +3384,7 @@ function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candid
     prism,
     removePrism: candidate.removePrism || "",
     prismDelta,
-    usesEnchant: candidate.caseId === CLOSED_FORM_CASE_IDS.D || candidate.caseId === CLOSED_FORM_CASE_IDS.E,
+    usesEnchant: candidate.caseId === CLOSED_FORM_CASE_IDS.D || candidate.caseId === CLOSED_FORM_CASE_IDS.E || candidate.caseId === CLOSED_FORM_CASE_IDS.REENCHANT,
     costKind: constantCase ? "constant" : "stage",
     constantCost: constantCase ? candidate.expectedSteps : 0,
     baseDenominator: Number.isFinite(candidate.denominator) ? candidate.denominator : null,

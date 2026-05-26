@@ -299,6 +299,7 @@
     "1H Weapon": Object.freeze([
       "Mainstat",
       "Maximum Life",
+      "Maximum Resource",
       "Weapon Damage",
       "All Damage",
       "Attack Speed",
@@ -320,6 +321,7 @@
     "2H Weapon": Object.freeze([
       "Mainstat",
       "Maximum Life",
+      "Maximum Resource",
       "Weapon Damage",
       "All Damage",
       "Attack Speed",

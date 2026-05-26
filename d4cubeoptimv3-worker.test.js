@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const worker = require("./d4cubeoptimv3-worker.js");
 const ilp = require("./ilp.js");
+const gearSlotLegality = require("./gear-slot-legality.js");
 
 const TEST_TIMEOUT_MS = 1000;
 
@@ -865,6 +866,26 @@ test("closed-form pool sizes respect slot legality narrowing", { timeout: TEST_T
 
   assert.equal(plan.caseId, worker.CLOSED_FORM_CASE_IDS.B);
   approxEqual(plan.expectedSteps, 1);
+});
+
+test("Maximum Resource is legal on 1H Weapon and 2H Weapon", () => {
+  const { isAffixNameLegalForGearSlot } = gearSlotLegality;
+  assert.equal(
+    isAffixNameLegalForGearSlot("Maximum Resource", "1H Weapon"),
+    true,
+    "Maximum Resource must be legal on 1H Weapon (e.g. Maximum Fury for Barbarian dual-wield)"
+  );
+  assert.equal(
+    isAffixNameLegalForGearSlot("Maximum Resource", "2H Weapon"),
+    true,
+    "Maximum Resource must be legal on 2H Weapon (e.g. Maximum Fury for Barbarian 2H weapons)"
+  );
+  // Sanity-check: still legal when gearSlot is Any
+  assert.equal(
+    isAffixNameLegalForGearSlot("Maximum Resource", "Any"),
+    true,
+    "Maximum Resource must be legal when gearSlot is Any"
+  );
 });
 
 test("solveDecompositionPlanV3 keeps multi-category add targets in decomposition when the prism is explicit", { timeout: TEST_TIMEOUT_MS }, () => {

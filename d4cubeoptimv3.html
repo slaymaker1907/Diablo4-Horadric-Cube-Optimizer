@@ -1009,12 +1009,16 @@
 			</div>
 			<div class="modal-body">
 				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Result Verification</label>
-				<div class="field" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1 1 auto;">
+				<div class="field">
+					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
 						<input type="checkbox" id="tighten-steps-toggle">
-						<span>Tighten Steps Estimate <span style="color:var(--muted);font-size:0.85em;">(adaptive, up to 2 min)</span></span>
+						<span>
+							Tighten Steps Estimate
+							<span style="color:var(--muted);font-size:0.85em;">(adaptive, up to 2 min)</span>
+							<button id="tighten-steps-info-btn" type="button" title="About Tighten Steps Estimate"
+									style="background:none;border:1px solid var(--muted);border-radius:50%;padding:0 3px;margin-left:4px;cursor:pointer;font-size:0.8rem;color:var(--muted);vertical-align:middle;line-height:1.4;">ℹ</button>
+						</span>
 					</label>
-					<button id="tighten-steps-info-btn" class="btn ghost" title="About Tighten Steps Estimate" style="flex:0 0 auto;">ℹ</button>
 				</div>
 				<div id="tighten-steps-info-box" style="display:none;font-size:0.84rem;color:var(--muted);margin:6px 0 0;line-height:1.45;">
 					<p style="margin:0 0 8px;">The <strong>Expected Cube Steps</strong> number is the optimizer's best estimate of how many cube actions you'll need on average. For complex starting states it can be loose — sometimes overshooting by 2–3×.</p>
@@ -1551,10 +1555,7 @@
 					if (message.intermediateResult) {
 						applyWorkerResult(message.intermediateResult, false);
 					}
-					const total = message.total || 0;
-					const completed = message.completed || 0;
-					const pct = total > 0 ? Math.round(100 * completed / total) : 0;
-					renderStatus(`Verifying (${completed}/${total} rollouts, ${pct}%)…`, "running");
+					renderStatus("Verifying…", "running");
 				} else if (message.type === "done") {
 					runInProgress = false;
 					treeCache = message.tree || treeCache;

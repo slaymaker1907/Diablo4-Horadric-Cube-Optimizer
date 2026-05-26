@@ -192,6 +192,10 @@
 			animation: ga-cleared-flash 0.9s ease-out;
 		}
 
+		.checkbox-chip.flash-blocked {
+			animation: duplicate-blocked-flash 0.9s ease-out;
+		}
+
 		@keyframes duplicate-blocked-flash {
 			0%   { background: rgba(181, 29, 29, 0); box-shadow: 0 0 0 0 rgba(181, 29, 29, 0); }
 			20%  { background: rgba(181, 29, 29, 0.45); box-shadow: 0 0 8px 1px rgba(181, 29, 29, 0.5); }
@@ -920,13 +924,13 @@
 			<div class="modal-body">
 				<ol class="instructions">
 					<li>Fill in your item's current affixes. Check <strong>GA</strong> for any Greater Affixes and <strong>Enchanted</strong> for the affix modified by the Enchantress (at most one).</li>
-					<li>Fill in up to 4 target affixes — the affixes you want on the finished item. Check <strong>Needs Improvement</strong> for affixes already present but at an unsatisfactory roll value.</li>
+					<li>Fill in up to 4 target affixes — the affixes you want on the finished item. Check <strong>Needs Improvement</strong> for affixes that are already present in your current item but at an unsatisfactory roll value — this tells the optimizer to treat the affix as missing and plan to re-roll it.</li>
 					<li>GA preservation is automatic: any GA on a current affix that aligns with a target affix is protected throughout optimization. The optimizer will never recommend an action that risks losing it.</li>
-					<li>Check <strong>Legendary</strong> if your item cannot have affixes removed. The Enchantress Available toggle tracks whether the one-time enchant has been used — it resets automatically when an enchanted affix is removed.</li>
+					<li>Check <strong>Legendary</strong> if your item cannot have affixes removed (Legendary items skip the remove step and go straight to cube-reroll). The optimizer tracks whether the Enchantress is still available from the <strong>Enchanted</strong> checkbox in the current panel — if no affix is marked Enchanted, the one-time enchant is still available.</li>
 					<li>Set <strong>Gear Slot</strong> to your item type to restrict suggestions to slot-legal affixes and reduce compute time. Leave it at <em>Any</em> to allow all affixes.</li>
 					<li>Set <strong>Class</strong> to your character class to narrow the Adept skill pool to that class's skills (plus class-agnostic generals). Leave it at <em>Any</em> to keep every class's skills in the pool — useful for browsing but not realistic for actual crafting.</li>
 					<li>Click <strong>Optimize</strong>. The recommended cube action appears with success probability and expected steps to a terminal outcome (success or GA loss).</li>
-					<li>Perform the action in-game, then record it with <strong>Apply Last Outcome</strong>: pick the modification type and prism used (pre-filled from the recommendation), select the source affix that changed, and type the new affix that appeared. Click Apply to update state, then Optimize again.</li>
+					<li>Perform the action in-game, then record it with <strong>Apply Last Outcome</strong>: pick the modification type (Added / Removed / Changed / Enchanted), the prism used (pre-filled from the recommendation), the source affix that changed, and the new affix that appeared. Click <strong>Apply Outcome and Optimize</strong> to update the item state and immediately re-optimize. Applying a result automatically clears <em>Needs Improvement</em> from any target affix that was just obtained.</li>
 					<li>Click <strong>Reset</strong> to clear all state and start over.</li>
 				</ol>
 
@@ -2197,6 +2201,9 @@
 		// Same idea for target-side "Needs Improvement" chips auto-cleared
 		// because the matching current affix became GA.
 		const pendingNiFlashIndices = new Set();
+		// Indices where an NI check was rejected because the affix is absent
+		// from the current item — triggers a red flash on the chip.
+		const pendingNiBlockedIndices = new Set();
 		// Indices whose Enchanted checkbox was just unchecked by the
 		// sticky-slot rule (because another slot was marked enchanted).
 		const pendingEnchantedFlashIndices = new Set();
@@ -2481,7 +2488,23 @@
 					improveWrap.classList.add("flash-cleared");
 					pendingNiFlashIndices.delete(index);
 				}
+				if (pendingNiBlockedIndices.has(index)) {
+					improveWrap.classList.add("flash-blocked");
+					pendingNiBlockedIndices.delete(index);
+				}
 				improve.addEventListener("change", () => {
+					const affixId = appState.target.affixes[index].affixId;
+					if (improve.checked && affixId) {
+						const inCurrentItem = appState.current.affixes.some(
+							(e) => e && e.affixId === affixId
+						);
+						if (!inCurrentItem) {
+							improve.checked = false;
+							pendingNiBlockedIndices.add(index);
+							renderTargetAffixes();
+							return;
+						}
+					}
 					appState.target.affixes[index].needsImprovement = improve.checked;
 					saveState();
 					renderTargetAffixes();
@@ -2660,6 +2683,19 @@
 				pendingChangeAppliedCurrent.add(sourceIndex);
 			}
 
+			// When an affix is freshly placed on the item (added/changed/enchanted),
+			// clear "Needs Improvement" on any matching target entry — NI means
+			// "present but at a bad roll", which is no longer meaningful for a
+			// freshly-obtained affix.
+			if (resultId && mode !== "removed") {
+				appState.target.affixes.forEach((tEntry, tIdx) => {
+					if (tEntry && tEntry.affixId === resultId && tEntry.needsImprovement) {
+						tEntry.needsImprovement = false;
+						pendingNiFlashIndices.add(tIdx);
+					}
+				});
+			}
+
 			appState.lastAction = {
 				mode,
 				sourceIndex: "",
@@ -2808,6 +2844,7 @@
 			normalizeTargetNeedsImprovement();
 			pendingGaFlashIndices.clear();
 			pendingNiFlashIndices.clear();
+			pendingNiBlockedIndices.clear();
 			pendingEnchantedFlashIndices.clear();
 			pendingDuplicateFlashCurrent.clear();
 			pendingDuplicateFlashTarget.clear();

@@ -2305,9 +2305,43 @@ function getValidActionsV2(state, target, env) {
   }
 
   const lateEnchantActions = getLateEnchantActions(state, target, env, actions);
+
+  // GA-preserve enchants: same-affix fresh enchant on each un-enchanted
+  // protected-GA slot.  The base getValidActions generates these actions, but
+  // the same-affix filter above strips them (line ~2299).  They must be
+  // re-added here because they have two important effects that the solver
+  // cannot discover otherwise:
+  //
+  //   1. Locking the GA slot (isEnchanted=true) excludes it from
+  //      getEligibleByCategory, which un-blocks cube rerolls in the same
+  //      category that were previously forbidden by the strictMode
+  //      touchesGA guard.  When the GA affix belongs to, say, the Protector
+  //      category, Protector chaotic rerolls are entirely blocked until the
+  //      slot is enchanted.  The solver cannot find the optimal "enchant GA
+  //      first, then chaotic-reroll Protector" sequence if this action is
+  //      absent from the graph.
+  //
+  //   2. When the GA slot also carries a "Needs Improvement" marker, this is
+  //      the only legal action that both clears the NI and preserves the GA.
+  //      The late-enchant path only fires when exactly one target remains
+  //      unresolved, so multi-target scenarios need this unconditional path.
+  //
+  // Only fresh enchants are relevant (once a slot is enchanted the sticky-slot
+  // rule prevents enchanting any other slot).
+  const gaPreserveEnchants = [];
+  if (!(state.affixes || []).some((e) => e.isEnchanted)) {
+    for (let i = 0; i < (state.affixes || []).length; i++) {
+      const entry = (state.affixes || [])[i];
+      if (entry && entry.affixId && isProtectedGA(entry, env)) {
+        gaPreserveEnchants.push({ type: "enchant", sourceIndex: i, targetAffixId: entry.affixId });
+      }
+    }
+  }
+
   return dedupeActions([
     ...actions.filter((action) => action.type !== "enchant"),
     ...lateEnchantActions,
+    ...gaPreserveEnchants,
   ]);
 }
 

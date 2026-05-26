@@ -2306,34 +2306,52 @@ function getValidActionsV2(state, target, env) {
 
   const lateEnchantActions = getLateEnchantActions(state, target, env, actions);
 
-  // GA-preserve enchants: same-affix fresh enchant on each un-enchanted
-  // protected-GA slot.  The base getValidActions generates these actions, but
-  // the same-affix filter above strips them (line ~2299).  They must be
-  // re-added here because they have two important effects that the solver
-  // cannot discover otherwise:
+  // Prism-unblock enchants: same-affix fresh enchant on each un-enchanted
+  // slot that either (a) is a protected GA or (b) is a non-GA matched-target
+  // slot whose affix appears in env.targetCounts.  The base getValidActions
+  // generates these actions, but the same-affix filter above strips them
+  // (line ~2299).  They must be re-added here because they have material
+  // effects that the solver cannot discover otherwise:
   //
-  //   1. Locking the GA slot (isEnchanted=true) excludes it from
-  //      getEligibleByCategory, which un-blocks cube rerolls in the same
-  //      category that were previously forbidden by the strictMode
-  //      touchesGA guard.  When the GA affix belongs to, say, the Protector
-  //      category, Protector chaotic rerolls are entirely blocked until the
-  //      slot is enchanted.  The solver cannot find the optimal "enchant GA
-  //      first, then chaotic-reroll Protector" sequence if this action is
-  //      absent from the graph.
+  //   (a) Protected-GA slots:
+  //       1. Locking the GA slot (isEnchanted=true) excludes it from
+  //          getEligibleByCategory, which un-blocks cube rerolls in the same
+  //          prism category that were previously forbidden by the strictMode
+  //          touchesGA guard.  When the GA affix belongs to, say, the
+  //          Protector category, Protector chaotic rerolls are entirely
+  //          blocked until the slot is enchanted.  The solver cannot find the
+  //          optimal "enchant GA first, then chaotic-reroll Protector"
+  //          sequence if this action is absent from the graph.
+  //       2. When the GA slot also carries a "Needs Improvement" marker, this
+  //          is the only legal action that both clears the NI and preserves
+  //          the GA.  The late-enchant path only fires when exactly one target
+  //          remains unresolved, so multi-target scenarios need this
+  //          unconditional path.
   //
-  //   2. When the GA slot also carries a "Needs Improvement" marker, this is
-  //      the only legal action that both clears the NI and preserves the GA.
-  //      The late-enchant path only fires when exactly one target remains
-  //      unresolved, so multi-target scenarios need this unconditional path.
+  //   (b) Non-GA matched-target slots:
+  //       isCategoryFocusedBlockedByMatchedTargetV3 returns true (blocking
+  //       closed-form Cases B, C, F, G) when an un-enchanted matched-target
+  //       slot shares its prism category with a missing target.  It returns
+  //       false when that slot has isEnchanted=true.  Enchanting such a slot
+  //       in place therefore unlocks the affected prism for cube ops, enabling
+  //       the solver to discover the optimal "enchant non-GA target first,
+  //       then reroll the now-unblocked prism" sequence.  Without this action
+  //       in the graph the blocked prism appears permanently closed and the
+  //       solver underestimates its options.
   //
-  // Only fresh enchants are relevant (once a slot is enchanted the sticky-slot
-  // rule prevents enchanting any other slot).
-  const gaPreserveEnchants = [];
+  // Only fresh enchants are relevant (once any slot is enchanted the
+  // sticky-slot rule prevents enchanting any other slot).
+  const prismUnblockEnchants = [];
   if (!(state.affixes || []).some((e) => e.isEnchanted)) {
     for (let i = 0; i < (state.affixes || []).length; i++) {
       const entry = (state.affixes || [])[i];
-      if (entry && entry.affixId && isProtectedGA(entry, env)) {
-        gaPreserveEnchants.push({ type: "enchant", sourceIndex: i, targetAffixId: entry.affixId });
+      if (
+        entry &&
+        entry.affixId &&
+        (isProtectedGA(entry, env) ||
+          (!entry.isGA && (env.targetCounts[entry.affixId] || 0) > 0))
+      ) {
+        prismUnblockEnchants.push({ type: "enchant", sourceIndex: i, targetAffixId: entry.affixId });
       }
     }
   }
@@ -2341,7 +2359,7 @@ function getValidActionsV2(state, target, env) {
   return dedupeActions([
     ...actions.filter((action) => action.type !== "enchant"),
     ...lateEnchantActions,
-    ...gaPreserveEnchants,
+    ...prismUnblockEnchants,
   ]);
 }
 
@@ -5300,6 +5318,7 @@ if (typeof module !== "undefined" && module.exports) {
     solveResidualExactV3,
     solveResidualLAOStarV3,
     buildResidualApproximateResultV3,
+    getValidActionsV2,
     solveResidualPayloadV3,
     analyzeFeasibilityV3,
     optimizePayloadV3,

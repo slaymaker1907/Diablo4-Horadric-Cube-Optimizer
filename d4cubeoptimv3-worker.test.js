@@ -1158,9 +1158,14 @@ test("optimizePayloadV3 uses timeMs to widen the residual search budget on hard 
   payload.data.targetAffixIds = payload.target.affixes.map((entry) => entry.affixId);
 
   const defaultBudget = worker.optimizePayloadV3(payload);
+  // timeMs=30000 gives stateLimit=2000 (vs. 500 default), enough to reach
+  // OPTIMAL on this fixture.  The original budget of 10000 (stateLimit=1000)
+  // became insufficient after the prismUnblockEnchants extension added the
+  // same-affix enchant for VulnDamage (a non-GA matched-target in Aggressive),
+  // expanding the residual graph to ~1464 abstract states.
   const extendedBudget = worker.optimizePayloadV3({
     ...payload,
-    timeMs: 10000,
+    timeMs: 30000,
   });
 
   assertStableDiagnosticsContract(defaultBudget, {
@@ -2074,6 +2079,99 @@ test("Case C is still generated on non-Legendary items so the regression check s
   const caseCCandidates = candidates.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.C);
   assert.ok(caseCCandidates.length > 0,
     "Case C must still be generated for the equivalent non-Legendary scenario"
+  );
+});
+
+test("getValidActionsV2 includes same-affix enchant for non-GA matched-target slot", () => {
+  // Regression test for the prismUnblockEnchants extension.
+  // When a non-GA affix is already on the item AND appears in env.targetCounts
+  // (it is a matched target), getValidActionsV2 must include a same-affix fresh
+  // enchant on that slot.  Without the enchant in the action set the residual
+  // solver cannot discover the "enchant non-GA target first, then chaotic/focused
+  // reroll the now-unblocked prism" sequence.
+  //
+  // isCategoryFocusedBlockedByMatchedTargetV3 returns true when a non-GA
+  // matched-target slot is un-enchanted and shares the prism with a missing
+  // target, blocking closed-form Cases B/C/F/G.  After the same-affix enchant
+  // the slot has isEnchanted=true and the block lifts.
+  const categoryToNames = {
+    Aggressive: ["Critical Strike Chance", "Critical Strike Damage", "Attack Speed"],
+    Protector:  ["Maximum Life", "Armor"],
+    Pragmatic:  ["Movement Speed"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  // Current item: CSC (non-GA, Aggressive, matched-target) + non-target fillers.
+  const state = buildState([
+    { affixId: byName["Critical Strike Chance"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Attack Speed"].id,            isGA: false, isEnchanted: false },
+    { affixId: byName["Movement Speed"].id,          isGA: false, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id,            isGA: false, isEnchanted: false },
+  ], { isLegendary: true });
+
+  // Target: keep CSC, add CSD and Armor — two missing targets so late-enchant
+  // does not fire, ensuring getValidActionsV2 is the source of the enchant.
+  const target = buildTarget([
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+    { affixId: byName["Critical Strike Damage"].id, requireGA: false },
+    { affixId: byName["Armor"].id,                  requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  // strictMode=true so isCategoryFocusedBlockedByMatchedTargetV3 actually fires.
+  const gaConfig = { currentGAAffixes: [], strictMode: true, rulesEnabled: true };
+  const env = worker.buildEnv(data, gaConfig, target);
+
+  const actions = worker.getValidActionsV2(state, target, env);
+
+  // The action set must contain a same-affix enchant on the CSC slot (slot 0).
+  const cscEnchant = actions.find(
+    (a) =>
+      a.type === "enchant" &&
+      a.sourceIndex === 0 &&
+      a.targetAffixId === byName["Critical Strike Chance"].id
+  );
+  assert.ok(
+    cscEnchant,
+    "getValidActionsV2 must include a same-affix enchant on the non-GA matched-target CSC slot"
+  );
+
+  // Confirm the block is active before the enchant: Aggressive focused is blocked
+  // because CSC (slot 0) is a non-GA matched-target sharing Aggressive with the
+  // missing CSD.
+  assert.ok(
+    worker.isCategoryFocusedBlockedByMatchedTargetV3(state, "Aggressive", env, /* excludeSlotIndex */ 1),
+    "Aggressive prism must be blocked by unenchanted CSC before the enchant"
+  );
+
+  // After simulating the same-affix enchant (set isEnchanted=true on slot 0),
+  // the block must lift — Case B for AttackSpeed→CSD becomes available.
+  const postEnchantState = {
+    ...state,
+    affixes: state.affixes.map((e, i) =>
+      i === 0 ? { ...e, isEnchanted: true } : e
+    ),
+  };
+  assert.ok(
+    !worker.isCategoryFocusedBlockedByMatchedTargetV3(postEnchantState, "Aggressive", env, 1),
+    "Aggressive prism must be unblocked once CSC is enchanted in place"
+  );
+
+  // Case B must now be generated for AttackSpeed→CSD in the post-enchant state.
+  const postEnchantEnv = worker.buildEnv(data, gaConfig, target);
+  const csdTarget = target.affixes.find((e) => e.affixId === byName["Critical Strike Damage"].id);
+  const candidates = worker.getClosedFormPlanCandidatesV3(
+    postEnchantState,
+    csdTarget,
+    /* hostSlotIndex */ 1,
+    postEnchantEnv,
+    { data, gaConfig, target }
+  );
+  const caseBCandidates = candidates.filter((c) => c.caseId === worker.CLOSED_FORM_CASE_IDS.B);
+  assert.ok(
+    caseBCandidates.length > 0,
+    "Case B must be generated for AttackSpeed→CSD in the post-enchant state (Aggressive prism unblocked)"
   );
 });
 

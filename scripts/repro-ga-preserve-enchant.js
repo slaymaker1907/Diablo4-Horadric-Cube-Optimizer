@@ -1,9 +1,9 @@
 /**
  * repro-ga-preserve-enchant.js
  *
- * Reproduces and verifies the fix for: optimizer recommending a chaotic
- * reroll (~31% success) instead of a same-affix GA-preserve enchant (which
- * unlocks blocked cube operations and improves P(success)).
+ * Reproduces and verifies the fix for: optimizer recommending a suboptimal
+ * (or outright dead-end) action instead of the GA-preserve enchant that
+ * unlocks a blocked prism.
  *
  * Root cause: getValidActionsV2 filtered all same-affix enchant actions
  * (line ~2299 in d4cubeoptimv3-worker.js), including the valid fresh-enchant
@@ -13,37 +13,49 @@
  * action set, the solver cannot discover the optimal "enchant GA first, then
  * chaotic-reroll" sequence.
  *
- * Scenario
- * ─────────
- * Current item (Legendary, Necromancer):
- *   Slot 0: Maximum Life  [GA]   (Protector category)
- *   Slot 1: Movement Speed       (Pragmatic category)
- *   Slot 2: Maximum Evade Charges (Pragmatic category)
- *   Slot 3: Maximum Resource     (Resourceful category)
+ * Scenario (Protector-only catalog, Legendary item)
+ * ─────────────────────────────────────────────────
+ * All affixes are in the Protector category.  In strictMode this means that
+ * ALL cube operations (chaotic / focused) are blocked as long as Maximum Life
+ * (GA) appears in the eligible Protector pool.  The ONLY action that unblocks
+ * the prism is the same-affix fresh enchant on Maximum Life.
+ *
+ * Current item (Legendary):
+ *   Slot 0: Maximum Life    [GA]   (Protector)
+ *   Slot 1: Damage Reduction       (Protector, non-target)
+ *   Slot 2: Specific Resistance    (Protector, matched target)
+ *   Slot 3: Max Block              (Protector, non-target)
  *
  * Target:
- *   Maximum Life   (GA must be preserved — in gaRequiredCounts)
- *   Armor          (Protector — currently missing)
- *   Critical Strike Chance (Aggressive — currently missing)
- *   Maximum Resource (Resourceful — already present)
+ *   Maximum Life         (GA must be preserved)
+ *   Specific Resistance  (already present — matched target)
+ *   Armor                (missing)
+ *   All Resistance       (missing)
  *
  * Analysis:
- *   • Maximum Life (GA) is in the Protector category.  With strictMode=true,
- *     getValidActions blocks the Protector chaotic reroll entirely
- *     (touchesGA=true) because Maximum Life appears in the Protector eligible
+ *   • All four current affixes are Protector.  With strictMode=true,
+ *     getValidActions blocks the Protector chaotic/focused rerolls entirely
+ *     (touchesGA=true) because Maximum Life (GA) is in the Protector eligible
  *     pool while it is un-enchanted.
- *   • After the GA-preserve enchant (same-affix, fresh), Maximum Life gains
- *     isEnchanted=true and is excluded from getEligibleByCategory, so
- *     Protector chaotic becomes available.  The solver can then replace
- *     Movement Speed/Maximum Evade Charges/Maximum Resource with Armor +
- *     Critical Strike Chance + Maximum Resource via cube ops.
- *   • The optimal first action should be the enchant-same-affix on slot 0,
- *     giving P(success) > P(success from any chaotic/focused first).
+ *
+ *   • The prismUnblockEnchants block in getValidActionsV2 provides exactly
+ *     two same-affix fresh-enchant actions:
+ *       a) enchant MaxLife  → MaxLife  (GA-preserve; unlocks Protector prism)
+ *       b) enchant SpecRes  → SpecRes  (non-GA matched-target; does NOT help
+ *                                       because MaxLife-GA remains in the
+ *                                       eligible pool → prism still blocked →
+ *                                       sticky-slot used → dead end with
+ *                                       P(success)=0)
+ *
+ *   • The solver must pick (a): after MaxLife gains isEnchanted=true it is
+ *     excluded from getEligibleByCategory, making touchesGA=false, and the
+ *     Protector chaotic/focused become available to roll Damage Reduction /
+ *     Specific Resistance / Max Block into Armor + All Resistance.
  *
  * Expected result after the fix:
  *   result.action.type === "enchant"
- *   result.action.targetAffixId === "maximum-life" (same affix, GA-preserve)
- *   result.successProb === 1  (or materially higher than without the enchant)
+ *   result.action.targetAffixId === "maximum-life"  (GA-preserve mark)
+ *   result.successProb === 1  (guaranteed completion once prism is unlocked)
  */
 
 "use strict";
@@ -60,11 +72,14 @@ function normalizeName(name) {
 
 function buildCatalog() {
   const categoryToNames = {
-    Aggressive: ["Critical Strike Chance", "Critical Strike Damage", "All Damage"],
-    Pragmatic:  ["Movement Speed", "Maximum Evade Charges"],
-    Protector:  ["Armor", "Maximum Life"],
-    Resourceful:["Maximum Resource"],
-    Adept:      ["Mainstat"],
+    Protector: [
+      "Maximum Life",
+      "Armor",
+      "Damage Reduction",
+      "All Resistance",
+      "Specific Resistance",
+      "Max Block",
+    ],
   };
 
   const byId = new Map();
@@ -99,26 +114,29 @@ const data = {
   maxAffixSlots: 4,
 };
 
-// Current state: Maximum Life (GA, Protector) + two Pragmatic + one Resourceful
+// Current state: MaxLife (GA) + three non-GA Protector affixes.
+// All are in Protector only, so strictMode blocks every cube operation
+// until MaxLife is enchanted in place.
 const state = {
   gearSlot: "Any",
-  class: "Necromancer",
+  class: "Any",
   isLegendary: true,
   affixes: [
-    { affixId: byName["Maximum Life"].id,           isGA: true,  isEnchanted: false },
-    { affixId: byName["Movement Speed"].id,          isGA: false, isEnchanted: false },
-    { affixId: byName["Maximum Evade Charges"].id,   isGA: false, isEnchanted: false },
-    { affixId: byName["Maximum Resource"].id,         isGA: false, isEnchanted: false },
+    { affixId: byName["Maximum Life"].id,       isGA: true,  isEnchanted: false },
+    { affixId: byName["Damage Reduction"].id,   isGA: false, isEnchanted: false },
+    { affixId: byName["Specific Resistance"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Max Block"].id,           isGA: false, isEnchanted: false },
   ],
 };
 
-// Target: same GA affix + two missing targets
+// Target: MaxLife (GA preserved) + SpecResistance (already present) +
+// Armor + AllResistance (both missing).
 const target = {
   affixes: [
-    { affixId: byName["Maximum Life"].id,           needsImprovement: false },
-    { affixId: byName["Armor"].id,                  needsImprovement: false },
-    { affixId: byName["Critical Strike Chance"].id, needsImprovement: false },
-    { affixId: byName["Maximum Resource"].id,        needsImprovement: false },
+    { affixId: byName["Maximum Life"].id,        needsImprovement: false },
+    { affixId: byName["Specific Resistance"].id,  needsImprovement: false },
+    { affixId: byName["Armor"].id,               needsImprovement: false },
+    { affixId: byName["All Resistance"].id,       needsImprovement: false },
   ],
 };
 
@@ -133,10 +151,10 @@ const payload = {
   target,
   data,
   gaConfig,
-  timeMs: 5000,  // generous budget
+  timeMs: 5000,
 };
 
-console.log("Running optimizer for GA-preserve-enchant scenario…");
+console.log("Running optimizer for GA-preserve-enchant (Protector-only) scenario…");
 console.log("Current affixes:", state.affixes.map((a) => `${a.affixId}${a.isGA ? " [GA]" : ""}`));
 console.log("Target affixes: ", target.affixes.map((a) => a.affixId));
 console.log();

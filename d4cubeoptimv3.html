@@ -278,9 +278,7 @@
 
 		/* Skill filter */
 		.skill-filter {
-			margin-top: 10px;
-			border-top: 1px solid var(--edge);
-			padding-top: 6px;
+			padding: 4px 0 2px;
 		}
 
 		.skill-filter details {
@@ -320,8 +318,6 @@
 		}
 
 		.skill-filter-list {
-			max-height: 150px;
-			overflow-y: auto;
 			padding: 3px 0 3px 18px;
 			display: flex;
 			flex-direction: column;
@@ -356,10 +352,6 @@
 			margin-top: 4px;
 		}
 
-		.skill-filter-all-skills.sf-hidden {
-			display: none;
-		}
-
 		.skill-filter-warning {
 			display: none;
 			font-size: 0.82rem;
@@ -377,6 +369,41 @@
 			font-size: 0.84rem;
 			color: var(--muted);
 		}
+
+		#skill-filter-container {
+			overflow-y: auto;
+			margin-bottom: 10px;
+			scrollbar-width: thin;
+			scrollbar-color: #7b2a2a #1a0808;
+		}
+
+		#skill-filter-container::-webkit-scrollbar { width: 8px; }
+
+		#skill-filter-container::-webkit-scrollbar-track {
+			background: #1a0808;
+			border-left: 1px solid var(--edge);
+		}
+
+		#skill-filter-container::-webkit-scrollbar-thumb {
+			background: linear-gradient(180deg, #7b2a2a, #4c1a1a);
+			border-radius: 2px;
+		}
+
+		#skill-filter-container::-webkit-scrollbar-thumb:hover {
+			background: linear-gradient(180deg, #9a3535, #6e2424);
+		}
+
+		.panel-errors {
+			list-style: disc;
+			padding: 0 0 0 22px;
+			margin: 8px 0 0;
+			color: var(--danger);
+			font-size: 0.84rem;
+		}
+
+		.panel-errors:empty { display: none; }
+
+		.panel-errors li { margin: 2px 0; }
 
 		.panel-actions {
 			margin-top: 10px;
@@ -750,33 +777,19 @@
 					<p class="legend">
 						Enchanted affixes are immune to cube operations. Any cube-touched affix is forced to non-GA.
 					</p>
+					<ul class="panel-errors" id="current-errors"></ul>
 				</div>
 			</section>
 
 			<section class="panel" id="target-panel">
 				<h2>Target Item</h2>
 				<div class="panel-body">
-					<div class="top-row" aria-hidden="true" style="visibility: hidden; pointer-events: none; user-select: none;">
-						<div class="field" style="width: 200px;">
-							<label>&nbsp;</label>
-							<select disabled></select>
-						</div>
-						<div class="field" style="width: 200px;">
-							<label>&nbsp;</label>
-							<select disabled></select>
-						</div>
-						<button class="toggle" disabled>&nbsp;</button>
-						<div style="flex-basis: 100%; height: 0; margin: 0;"></div>
-						<button class="toggle" disabled>&nbsp;</button>
-					</div>
+					<div id="skill-filter-container"></div>
 					<div class="affix-list" id="target-affixes"></div>
 					<div class="panel-actions">
 						<button id="add-target-affix" class="btn ghost">Add Target Affix</button>
 					</div>
-					<div id="skill-filter-container"></div>
-					<p class="legend">
-						Require GA can only be checked for affixes that are already GA on the source item.
-					</p>
+					<ul class="panel-errors" id="target-errors"></ul>
 				</div>
 			</section>
 		</div>
@@ -1310,18 +1323,14 @@
 			}
 
 			sanitizeState();
-			const illegalSelection = getFirstIllegalAffixSelection();
-			if (illegalSelection) {
-				renderStatus(illegalSelection.message, "");
+			const validationErrors = getPanelValidationErrors();
+			if (validationErrors.length > 0) {
+				renderStatus("", "");
+				renderPanelErrors();
 				return;
 			}
 			const runState = exportCurrentState();
 			const runTarget = exportTargetState();
-
-			if (runTarget.affixes.length === 0) {
-				renderStatus("Set at least one target affix.", "");
-				return;
-			}
 
 			ensureWorker();
 			activeRunId += 1;
@@ -1746,9 +1755,10 @@
 
 		function syncTargetPanelSpacer() {
 			const realRow = document.querySelector("#current-panel .top-row");
-			const spacer = document.querySelector("#target-panel .top-row[aria-hidden]");
-			if (realRow && spacer) {
-				spacer.style.height = realRow.offsetHeight + "px";
+			const filterContainer = document.getElementById("skill-filter-container");
+			if (realRow && filterContainer) {
+				filterContainer.style.height = realRow.offsetHeight + "px";
+				filterContainer.style.maxHeight = realRow.offsetHeight + "px";
 			}
 		}
 
@@ -1759,6 +1769,7 @@
 			renderCurrentAffixes();
 			renderTargetAffixes();
 			renderSkillFilter();
+			renderPanelErrors();
 			renderManualControls();
 			renderSolverDiagnostics(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
@@ -1851,22 +1862,6 @@
 			return false;
 		}
 
-		// Returns true if any filled current or target slot has a skill rank affix.
-		function hasAnySkillAffixOnItem() {
-			const allEntries = [...appState.current.affixes, ...appState.target.affixes];
-			return allEntries.some((entry) => {
-				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (!affix) return false;
-				const { family, id } = affix;
-				return (
-					family === "specific-skill" ||
-					family === "class-specific-general" ||
-					family === "class-agnostic-general" ||
-					(!family && id === "to-all-skills")
-				);
-			});
-		}
-
 		function snapshotSkillFilterLegality() {
 			// Capture which affixes are currently NOT blocked (allowed).
 			const check = (entry) => {
@@ -1918,7 +1913,6 @@
 				appState.skillFilter = computeDefaultSkillFilter();
 			}
 			const f = appState.skillFilter;
-			const showAllSkills = (gearSlot === "Amulet" || gearSlot === "Any");
 
 			const root = document.createElement("div");
 			root.className = "skill-filter";
@@ -2109,9 +2103,9 @@
 				root.appendChild(details);
 			}
 
-			// ── +X to All Skills (standalone, Amulet/Any only) ──
+			// ── +X to All Skills (standalone) ──
 			const allSkillsRow = document.createElement("div");
-			allSkillsRow.className = "skill-filter-all-skills" + (showAllSkills ? "" : " sf-hidden");
+			allSkillsRow.className = "skill-filter-all-skills";
 			const allSkillsCb = document.createElement("input");
 			allSkillsCb.type = "checkbox";
 			allSkillsCb.checked = f.allSkills;
@@ -2137,16 +2131,14 @@
 			root.appendChild(allSkillsRow);
 
 			// ── Enchantress warning ──
-			// Only shown for slots where defaults have skills enabled, so the user
-			// knows to visit the Enchantress to refine what skills the item can get.
-			// Omit for Ring/Weapon defaults (nothing enabled = no useful visit needed).
+			// Shown whenever the skill filter is at defaults, reminding the user
+			// to visit the Enchantress to discover which skills their item can roll.
 			const warning = document.createElement("p");
 			warning.className = "skill-filter-warning";
 			warning.textContent =
 				"Visit the Enchantress to see which skill affixes your item can roll — " +
 				"then uncheck any you don't want to allow here.";
-			const isDisabledDefault = SKILL_FILTER_DISABLED_SLOTS.has(gearSlot);
-			if (!isDisabledDefault && isSkillFilterAtDefaults() && hasAnySkillAffixOnItem()) {
+			if (isSkillFilterAtDefaults()) {
 				warning.classList.add("sf-visible");
 			}
 			root.appendChild(warning);
@@ -3080,47 +3072,54 @@
 			});
 		}
 
-		function getFirstIllegalAffixSelection() {
+		function getPanelValidationErrors() {
+			const errors = [];
 			const gearSlot = getCurrentGearSlotForFiltering();
 			const className = getCurrentClassForFiltering();
-			if (gearSlot === "Any" && className === "Any") {
-				// Still check skill filter even in Any/Any mode.
-				for (const entry of appState.current.affixes) {
-					const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-					if (affix && isSkillAffixBlockedByFilter(affix)) {
-						return { message: `Current affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
-					}
-				}
-				for (const entry of appState.target.affixes) {
-					const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-					if (affix && isSkillAffixBlockedByFilter(affix)) {
-						return { message: `Target affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
-					}
-				}
-				return null;
-			}
+			const isAnyAny = gearSlot === "Any" && className === "Any";
 
 			for (const entry of appState.current.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
-					return { message: `Current affix "${affix.name}" is not legal on ${gearSlot} for class ${className}. Set Gear Slot and Class to Any to disable narrowing.` };
+				if (!affix) continue;
+				if (!isAnyAny && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
+					errors.push({ panel: "current",
+						text: `"${affix.name}" is not legal on ${gearSlot} for class ${className}.` });
 				}
-				if (affix && isSkillAffixBlockedByFilter(affix)) {
-					return { message: `Current affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
+				if (isSkillAffixBlockedByFilter(affix)) {
+					errors.push({ panel: "current",
+						text: `"${affix.name}" is blocked by the skill filter.` });
 				}
 			}
-
 			for (const entry of appState.target.affixes) {
 				const affix = entry && entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
-				if (affix && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
-					return { message: `Target affix "${affix.name}" is not legal on ${gearSlot} for class ${className}. Set Gear Slot and Class to Any to disable narrowing.` };
+				if (!affix) continue;
+				if (!isAnyAny && !isAffixLegalForCurrentSlot(affix, gearSlot, className)) {
+					errors.push({ panel: "target",
+						text: `"${affix.name}" is not legal on ${gearSlot} for class ${className}.` });
 				}
-				if (affix && isSkillAffixBlockedByFilter(affix)) {
-					return { message: `Target affix "${affix.name}" is blocked by the skill filter. Adjust the Skill Filter below the target affixes.` };
+				if (isSkillAffixBlockedByFilter(affix)) {
+					errors.push({ panel: "target",
+						text: `"${affix.name}" is blocked by the skill filter.` });
 				}
 			}
+			if (!appState.target.affixes.some((e) => e && e.affixId)) {
+				errors.push({ panel: "target", text: "Set at least one target affix." });
+			}
+			return errors;
+		}
 
-			return null;
+		function renderPanelErrors() {
+			const errors = getPanelValidationErrors();
+			const currentUl = document.getElementById("current-errors");
+			const targetUl = document.getElementById("target-errors");
+			if (!currentUl || !targetUl) return;
+			currentUl.innerHTML = "";
+			targetUl.innerHTML = "";
+			for (const e of errors) {
+				const li = document.createElement("li");
+				li.textContent = e.text;
+				(e.panel === "current" ? currentUl : targetUl).appendChild(li);
+			}
 		}
 
 		function affixIdFromText(text) {

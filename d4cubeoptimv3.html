@@ -377,6 +377,7 @@
 		#skill-filter-container {
 			overflow-y: auto;
 			margin-bottom: 10px;
+			max-height: 30vh;
 			scrollbar-width: thin;
 			scrollbar-color: #7b2a2a #1a0808;
 		}
@@ -773,6 +774,7 @@
 						</p>
 					</div>
 
+					<div id="current-spacer"></div>
 					<div class="affix-list" id="current-affixes"></div>
 					<div class="panel-actions">
 						<button id="add-current-affix" class="btn ghost">Add Current Affix</button>
@@ -1009,6 +1011,9 @@
 
 		const PRISMS = Object.keys(CATEGORY_TO_AFFIX_NAMES);
 		const STORAGE_KEY = "d4cubeoptim_state_v3";
+		// Separate key for per-(class/slot) target saves.  Kept apart from the
+		// main state blob so Reset can wipe them independently.
+		const TARGET_SAVES_KEY = "d4cubeoptim_targets_v3";
 		const WORKER_VERSION = "2026-05-26-v3-reenchant-closed-form";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
@@ -1204,8 +1209,9 @@
 			els.gearSlot.addEventListener("change", () => {
 				const snapshot = snapshotAffixLegality();
 				const skillSnapshot = snapshotSkillFilterLegality();
+				saveCurrentTarget();                        // persist old combo before key changes
 				appState.current.gearSlot = els.gearSlot.value;
-				appState.skillFilter = computeDefaultSkillFilter();
+				applyAutoLoadedTarget();                    // restore new combo (or reset to empty)
 				invalidatePolicyCache();
 				flashNewlyIllegalAffixes(snapshot);
 				flashNewlyBlockedSkillAffixes(skillSnapshot);
@@ -1216,8 +1222,9 @@
 			els.characterClass.addEventListener("change", () => {
 				const snapshot = snapshotAffixLegality();
 				const skillSnapshot = snapshotSkillFilterLegality();
+				saveCurrentTarget();                        // persist old combo before key changes
 				appState.current.class = els.characterClass.value;
-				appState.skillFilter = computeDefaultSkillFilter();
+				applyAutoLoadedTarget();                    // restore new combo (or reset to empty)
 				invalidatePolicyCache();
 				flashNewlyIllegalAffixes(snapshot);
 				flashNewlyBlockedSkillAffixes(skillSnapshot);
@@ -1748,6 +1755,7 @@
 
 			try {
 				localStorage.removeItem(STORAGE_KEY);
+				localStorage.removeItem(TARGET_SAVES_KEY);
 			} catch (error) {
 			}
 
@@ -1763,12 +1771,17 @@
 		}
 
 		function syncTargetPanelSpacer() {
-			const realRow = document.querySelector("#current-panel .top-row");
-			const filterContainer = document.getElementById("skill-filter-container");
-			if (realRow && filterContainer) {
-				filterContainer.style.height = realRow.offsetHeight + "px";
-				filterContainer.style.maxHeight = realRow.offsetHeight + "px";
-			}
+			const spacer = document.getElementById("current-spacer");
+			const currentAffixes = document.getElementById("current-affixes");
+			const targetAffixes = document.getElementById("target-affixes");
+			if (!spacer || !currentAffixes || !targetAffixes) return;
+
+			// Reset spacer so we measure the natural (unpadded) positions.
+			spacer.style.height = "0px";
+
+			const gap = targetAffixes.getBoundingClientRect().top
+				- currentAffixes.getBoundingClientRect().top;
+			spacer.style.height = Math.max(0, gap) + "px";
 		}
 
 		function renderAll() {
@@ -2912,6 +2925,62 @@
 			};
 		}
 
+		// ── Per-(class/slot) target save helpers ────────────────────────────────
+
+		function getTargetSaveKey() {
+			return `${appState.current.class}/${appState.current.gearSlot}`;
+		}
+
+		function loadTargetSaves() {
+			try {
+				const raw = localStorage.getItem(TARGET_SAVES_KEY);
+				return raw ? JSON.parse(raw) : {};
+			} catch { return {}; }
+		}
+
+		function saveTargetSaves(saves) {
+			try {
+				localStorage.setItem(TARGET_SAVES_KEY, JSON.stringify(saves));
+			} catch {}
+		}
+
+		function saveCurrentTarget() {
+			const key = getTargetSaveKey();
+			const saves = loadTargetSaves();
+			saves[key] = {
+				affixes: JSON.parse(JSON.stringify(appState.target.affixes)),
+				skillFilter: appState.skillFilter
+					? JSON.parse(JSON.stringify(appState.skillFilter))
+					: null,
+			};
+			saveTargetSaves(saves);
+		}
+
+		// Loads the saved target for the current class/slot combo (or resets to
+		// empty + default skill filter when no save exists for that combo).
+		function applyAutoLoadedTarget() {
+			const saves = loadTargetSaves();
+			const saved = saves[getTargetSaveKey()] || null;
+
+			if (saved) {
+				appState.target.affixes = (saved.affixes || [])
+					.slice(0, 4)
+					.map((entry) => ({
+						affixId: normalizeAffixId(entry.affixId || ""),
+						requireGA: false,
+						needsImprovement: !!entry.needsImprovement,
+					}));
+				appState.skillFilter = saved.skillFilter || computeDefaultSkillFilter();
+			} else {
+				appState.target.affixes = JSON.parse(JSON.stringify(defaultState.target.affixes));
+				appState.skillFilter = computeDefaultSkillFilter();
+			}
+
+			// Normalise NI flags against the (possibly changed) current item.
+			normalizeCurrentGAs();
+			normalizeTargetNeedsImprovement();
+		}
+
 		function saveState() {
 			try {
 				const payload = {
@@ -2925,6 +2994,7 @@
 				localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
 			} catch (error) {
 			}
+			saveCurrentTarget();
 		}
 
 		function loadState() {

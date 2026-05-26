@@ -697,6 +697,53 @@
 			background: rgba(0, 0, 0, 0.75);
 		}
 
+		#settings-modal {
+			border: 1px solid var(--edge);
+			background: linear-gradient(180deg, #1e0808, #130505);
+			color: var(--fg);
+			padding: 0;
+			max-width: min(700px, 94vw);
+			max-height: 85vh;
+			width: 100%;
+			overflow: hidden;
+		}
+
+		#settings-modal::backdrop {
+			background: rgba(0, 0, 0, 0.75);
+		}
+
+		.overrides-table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 0.88rem;
+			margin-bottom: 10px;
+		}
+
+		.overrides-table th {
+			padding: 4px 8px;
+			text-align: left;
+			color: var(--muted);
+			font-size: 0.78rem;
+			text-transform: uppercase;
+			letter-spacing: 0.04em;
+			border-bottom: 1px solid var(--edge);
+		}
+
+		.overrides-table td {
+			padding: 6px 8px;
+			border-bottom: 1px solid rgba(95, 36, 36, 0.35);
+		}
+
+		.action-grid-override {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
+			align-items: end;
+		}
+
+		.action-grid-override .action-submit {
+			width: 100%;
+			grid-column: span 3;
+		}
+
 		.modal-inner {
 			display: flex;
 			flex-direction: column;
@@ -747,6 +794,7 @@
 				<button id="run-btn" class="btn">Optimize</button>
 				<button id="stop-btn" class="btn stop" disabled>Stop</button>
 				<button id="reset-btn" class="btn ghost">Reset</button>
+				<button id="settings-btn" class="btn ghost">Settings</button>
 				<button id="help-btn" class="btn ghost">How To Use</button>
 				<div class="status" id="run-status"></div>
 				<div id="thinking-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
@@ -950,6 +998,55 @@
 		</div>
 	</dialog>
 
+	<dialog id="settings-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>Settings — Slot Legality Overrides</h2>
+				<button id="settings-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
+				<p class="legend" style="margin:0 0 10px;">
+					Add overrides to make an affix legal on a slot that it wouldn't normally appear on.
+					Overrides are additive (allow-only) and survive a main-state Reset.
+				</p>
+
+				<table id="overrides-table" class="overrides-table">
+					<thead>
+						<tr>
+							<th>Slot</th>
+							<th>Class</th>
+							<th>Affix</th>
+							<th></th>
+						</tr>
+					</thead>
+					<tbody id="overrides-tbody">
+						<!-- rows rendered by renderOverridesTable() -->
+					</tbody>
+				</table>
+
+				<div class="divider"></div>
+
+				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Add Override</label>
+				<div class="action-grid action-grid-override">
+					<div class="field">
+						<label for="override-slot-select">Slot</label>
+						<select id="override-slot-select"></select>
+					</div>
+					<div class="field">
+						<label for="override-class-select">Class</label>
+						<select id="override-class-select"></select>
+					</div>
+					<div class="field">
+						<label for="override-affix-input">Affix</label>
+						<input id="override-affix-input" type="text" list="affix-options" placeholder="Affix name">
+					</div>
+					<button id="override-add-btn" class="btn action-submit">Add Override</button>
+				</div>
+				<p class="legend" id="override-add-error" style="min-height:1.2em;color:var(--danger,#e55);margin-top:4px;"></p>
+			</div>
+		</div>
+	</dialog>
+
 	<datalist id="affix-options"></datalist>
 	<datalist id="manual-result-options"></datalist>
 
@@ -1014,6 +1111,9 @@
 		// Separate key for per-(class/slot) target saves.  Kept apart from the
 		// main state blob so Reset can wipe them independently.
 		const TARGET_SAVES_KEY = "d4cubeoptim_targets_v3";
+		// Separate key for user-defined slot-legality overrides.  Kept apart from
+		// the main state blob so overrides survive a main-state Reset.
+		const OVERRIDES_KEY = "d4cubeoptim_overrides_v3";
 		const WORKER_VERSION = "2026-05-26-v3-reenchant-closed-form";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
@@ -1082,6 +1182,7 @@
 			},
 			history: [],
 			skillFilter: null, // computed on first sanitize
+			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
 		};
 
 		let appState = loadState();
@@ -1137,6 +1238,8 @@
 
 			affixOptions: document.getElementById("affix-options"),
 			manualResultOptions: document.getElementById("manual-result-options"),
+
+			settingsModal: document.getElementById("settings-modal"),
 		};
 
 		// NOTE: init() is invoked at the bottom of this script, after every
@@ -1145,6 +1248,21 @@
 		// temporal dead zone — sanitizeState() reaches them via renderAll().
 
 		function init() {
+			// If stored overrides were loaded from localStorage, rebuild the
+			// affix catalog now so overrides take effect before first render.
+			if (appState.userOverrides && appState.userOverrides.length > 0) {
+				const fresh = buildAffixCatalog(
+					CATEGORY_TO_AFFIX_NAMES,
+					OPERATION_CATEGORY_OVERRIDES,
+					getEffectiveLegalGearSlotsForAffixName
+				);
+				AFFIXES.length = 0;
+				for (const affix of fresh) {
+					AFFIX_BY_ID[affix.id] = affix;
+					AFFIX_BY_NAME[affix.name.trim().toLowerCase().replace(/\s+/g, " ")] = affix;
+					AFFIXES.push(affix);
+				}
+			}
 			populateStaticLists();
 			bindEvents();
 			renderAll();
@@ -1193,6 +1311,71 @@
 			document.getElementById("help-btn").addEventListener("click", () => helpModal.showModal());
 			document.getElementById("help-modal-close").addEventListener("click", () => helpModal.close());
 			helpModal.addEventListener("click", (e) => { if (e.target === helpModal) { helpModal.close(); } });
+
+			// ── Settings modal ────────────────────────────────────────────────
+			const settingsModal = els.settingsModal;
+
+			// Populate slot/class dropdowns (done once; GEAR_SLOTS / CLASSES are stable).
+			const overrideSlotSelect = document.getElementById("override-slot-select");
+			// Slot dropdown: all slots except "Any" (legality is slot-specific)
+			GEAR_SLOTS.filter((s) => s !== "Any").forEach((slot) => {
+				const opt = document.createElement("option");
+				opt.value = opt.textContent = slot;
+				overrideSlotSelect.appendChild(opt);
+			});
+
+			const overrideClassSelect = document.getElementById("override-class-select");
+			// Class dropdown: "Any" first, then the configured classes
+			["Any", ...CLASSES.filter((c) => c !== "Any")].forEach((cls) => {
+				const opt = document.createElement("option");
+				opt.value = opt.textContent = cls;
+				overrideClassSelect.appendChild(opt);
+			});
+
+			document.getElementById("settings-btn").addEventListener("click", () => {
+				renderOverridesTable();
+				settingsModal.showModal();
+			});
+			document.getElementById("settings-modal-close").addEventListener("click", () => settingsModal.close());
+			settingsModal.addEventListener("click", (e) => { if (e.target === settingsModal) { settingsModal.close(); } });
+
+			document.getElementById("override-add-btn").addEventListener("click", () => {
+				const slot = overrideSlotSelect.value;
+				const cls  = overrideClassSelect.value;
+				const rawName = document.getElementById("override-affix-input").value.trim();
+				const errorDiv = document.getElementById("override-add-error");
+
+				if (!rawName) {
+					errorDiv.textContent = "Please enter an affix name.";
+					return;
+				}
+
+				// Resolve the affix name to an ID
+				const normalized = normalizeName(rawName);
+				const affix = AFFIX_BY_NAME[normalized];
+				if (!affix) {
+					errorDiv.textContent = `Affix "${rawName}" not found in the catalog.`;
+					return;
+				}
+
+				// Deduplicate
+				const existing = appState.userOverrides || [];
+				const duplicate = existing.some(
+					(o) => o.slot === slot && o.class === cls && o.affixId === affix.id
+				);
+				if (duplicate) {
+					errorDiv.textContent = "That override already exists.";
+					return;
+				}
+
+				appState.userOverrides = [...existing, { slot, class: cls, affixId: affix.id }];
+				saveUserOverrides(appState.userOverrides);
+				document.getElementById("override-affix-input").value = "";
+				errorDiv.textContent = "";
+				renderOverridesTable();
+				rebuildAffixCatalogAndWorker();
+			});
+			// ─────────────────────────────────────────────────────────────────
 			els.clearHistory.addEventListener("click", () => {
 				appState.history = [];
 				saveState();
@@ -1768,6 +1951,47 @@
 			renderAll();
 			setRunButtons();
 			renderStatus("Reset complete.", "done");
+		}
+
+		function renderOverridesTable() {
+			const tbody = document.getElementById("overrides-tbody");
+			if (!tbody) return;
+			tbody.innerHTML = "";
+			const overrides = appState.userOverrides || [];
+			if (overrides.length === 0) {
+				const tr = document.createElement("tr");
+				const td = document.createElement("td");
+				td.colSpan = 4;
+				td.className = "legend";
+				td.style.fontStyle = "italic";
+				td.textContent = "No overrides defined.";
+				tr.appendChild(td);
+				tbody.appendChild(tr);
+				return;
+			}
+			overrides.forEach((o, idx) => {
+				const affix = AFFIX_BY_ID[o.affixId];
+				const affixName = affix ? affix.name : o.affixId;
+				const tr = document.createElement("tr");
+				[o.slot, o.class, affixName].forEach((text) => {
+					const td = document.createElement("td");
+					td.textContent = text;
+					tr.appendChild(td);
+				});
+				const tdBtn = document.createElement("td");
+				const btn = document.createElement("button");
+				btn.className = "btn ghost";
+				btn.textContent = "Remove";
+				btn.addEventListener("click", () => {
+					appState.userOverrides = (appState.userOverrides || []).filter((_, i) => i !== idx);
+					saveUserOverrides(appState.userOverrides);
+					renderOverridesTable();
+					rebuildAffixCatalogAndWorker();
+				});
+				tdBtn.appendChild(btn);
+				tr.appendChild(tdBtn);
+				tbody.appendChild(tr);
+			});
 		}
 
 		function syncTargetPanelSpacer() {
@@ -2896,6 +3120,24 @@
 					allSkills: !!f.allSkills,
 				};
 			}
+
+			// Ensure userOverrides is a valid array.
+			if (!Array.isArray(appState.userOverrides)) {
+				appState.userOverrides = [];
+			} else {
+				// Drop entries with invalid structure.
+				const validSlots = GEAR_SLOTS.filter((s) => s !== "Any");
+				const validClasses = ["Any", ...CLASSES.filter((c) => c !== "Any")];
+				appState.userOverrides = appState.userOverrides.filter(
+					(o) =>
+						o &&
+						typeof o === "object" &&
+						typeof o.affixId === "string" &&
+						o.affixId &&
+						validSlots.includes(o.slot) &&
+						validClasses.includes(o.class)
+				);
+			}
 		}
 
 		function exportCurrentState() {
@@ -2981,6 +3223,79 @@
 			normalizeTargetNeedsImprovement();
 		}
 
+		// ── User-defined slot-legality overrides ────────────────────────────────
+		// Each override is { slot, class, affixId } where class may be "Any".
+		// Stored in a separate localStorage key so they survive a main-state Reset.
+
+		function loadUserOverrides() {
+			try {
+				const raw = localStorage.getItem(OVERRIDES_KEY);
+				if (!raw) return [];
+				const parsed = JSON.parse(raw);
+				return Array.isArray(parsed) ? parsed : [];
+			} catch {
+				return [];
+			}
+		}
+
+		function saveUserOverrides(overrides) {
+			try {
+				localStorage.setItem(OVERRIDES_KEY, JSON.stringify(overrides));
+			} catch { /* storage full — silently ignore */ }
+		}
+
+		// Returns true when any stored override allows affixId on slot for class.
+		function overrideAllowsAffix(affixId, slot, className) {
+			return (appState.userOverrides || []).some(
+				(o) =>
+					o.affixId === affixId &&
+					o.slot === slot &&
+					(o.class === "Any" || o.class === className)
+			);
+		}
+
+		// Returns the legal gear-slot list for an affix name, merging built-in
+		// legality with any user-defined overrides.
+		function getEffectiveLegalGearSlotsForAffixName(name) {
+			const builtIn =
+				slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
+					? slotLegality.getLegalGearSlotsForAffixName(name)
+					: null;
+			const builtInArr = Array.isArray(builtIn) ? builtIn.slice() : [];
+			const id = slugify(name);
+			const overrideSlots = (appState.userOverrides || [])
+				.filter((o) => o.affixId === id)
+				.map((o) => o.slot);
+			const merged = Array.from(new Set([...builtInArr, ...overrideSlots]));
+			return merged.length > 0 ? merged : null;
+		}
+
+		// Rebuild the affix catalog, datalists, worker, and UI after overrides change.
+		function rebuildAffixCatalogAndWorker() {
+			// Rebuild AFFIX_BY_ID / AFFIX_BY_NAME / AFFIXES in-place using the
+			// override-aware slot resolver so newly-added overrides are reflected.
+			const fresh = buildAffixCatalog(
+				CATEGORY_TO_AFFIX_NAMES,
+				OPERATION_CATEGORY_OVERRIDES,
+				getEffectiveLegalGearSlotsForAffixName
+			);
+			// Replace all entries on the live AFFIXES array.
+			AFFIXES.length = 0;
+			for (const affix of fresh) {
+				AFFIX_BY_ID[affix.id] = affix;
+				AFFIX_BY_NAME[affix.name.trim().toLowerCase().replace(/\s+/g, " ")] = affix;
+				AFFIXES.push(affix);
+			}
+			populateStaticLists();
+			invalidatePolicyCache();
+			if (worker) {
+				worker.terminate();
+				worker = null;
+			}
+			ensureWorker();
+			renderAll();
+		}
+
 		function saveState() {
 			try {
 				const payload = {
@@ -3000,8 +3315,11 @@
 		function loadState() {
 			try {
 				const raw = localStorage.getItem(STORAGE_KEY);
+				const overrides = loadUserOverrides();
 				if (!raw) {
-					return JSON.parse(JSON.stringify(defaultState));
+					const s = JSON.parse(JSON.stringify(defaultState));
+					s.userOverrides = overrides;
+					return s;
 				}
 				const parsed = JSON.parse(raw);
 				return {
@@ -3011,6 +3329,7 @@
 					lastAction: parsed.lastAction || JSON.parse(JSON.stringify(defaultState.lastAction)),
 					history: parsed.history || [],
 					skillFilter: parsed.skillFilter || null,
+					userOverrides: overrides,
 				};
 			} catch (error) {
 				return JSON.parse(JSON.stringify(defaultState));
@@ -3166,7 +3485,24 @@
 				return true;
 			}
 
-			return legalSlots.includes("Any") || legalSlots.includes(gearSlot);
+			if (!legalSlots.includes("Any") && !legalSlots.includes(gearSlot)) {
+				return false;
+			}
+
+			// The affix is legal on this slot per its gearSlots list.  Now check
+			// whether that slot match comes from built-in data or from an override.
+			// If it comes only from an override, enforce the override's class scope.
+			const builtInSlots =
+				slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
+					? slotLegality.getLegalGearSlotsForAffixName(affix.name)
+					: null;
+			const builtInArr = Array.isArray(builtInSlots) ? builtInSlots : [];
+			if (builtInArr.includes(gearSlot) || builtInArr.includes("Any")) {
+				// Covered by built-in data — no extra class restriction.
+				return true;
+			}
+			// Slot match comes only from an override — honour the override's class.
+			return overrideAllowsAffix(affix.id, gearSlot, className);
 		}
 
 		function renderAffixOptions() {
@@ -3278,7 +3614,17 @@
 				.replace(/^-+|-+$/g, "");
 		}
 
-		function buildAffixCatalog(categories, overrides) {
+		// gearSlotsResolver: optional function(name) -> string[]|null.
+		// When supplied, it replaces the default slotLegality lookup so callers
+		// can inject override-aware slot resolution (used by rebuildAffixCatalogAndWorker).
+		function buildAffixCatalog(categories, overrides, gearSlotsResolver) {
+			const resolveSlots = typeof gearSlotsResolver === "function"
+				? gearSlotsResolver
+				: (name) =>
+					slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
+						? slotLegality.getLegalGearSlotsForAffixName(name)
+						: null;
+
 			const map = Object.create(null);
 
 			Object.entries(categories).forEach(([categoryName, names]) => {
@@ -3288,9 +3634,7 @@
 					const family = typeof entry === "string" ? "" : String(entry.family || "");
 					const familyRollWeight = typeof entry === "string" ? 0 : Number(entry.familyRollWeight);
 					const className = typeof entry === "string" ? "" : String(entry.class || "");
-					const gearSlots = slotLegality && typeof slotLegality.getLegalGearSlotsForAffixName === "function"
-						? slotLegality.getLegalGearSlotsForAffixName(name)
-						: null;
+					const gearSlots = resolveSlots(name);
 					const id = slugify(name);
 					if (!map[id]) {
 						map[id] = {

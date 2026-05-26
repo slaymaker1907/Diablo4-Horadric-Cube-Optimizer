@@ -888,6 +888,42 @@ test("Maximum Resource is legal on 1H Weapon and 2H Weapon", () => {
   );
 });
 
+test("Amulet legality additions: Vulnerable Damage, Critical Strike Damage, DoT Damage, Lucky Hit Chance", () => {
+  const { isAffixNameLegalForGearSlot } = gearSlotLegality;
+  const amuletAffixes = [
+    "Vulnerable Damage",
+    "Critical Strike Damage",
+    "DoT Damage",
+    "Lucky Hit Chance",
+  ];
+  for (const name of amuletAffixes) {
+    assert.equal(
+      isAffixNameLegalForGearSlot(name, "Amulet"),
+      true,
+      `${name} must be legal on Amulet`
+    );
+  }
+});
+
+test("Ring legality additions: all 6 Elemental Damage subtypes", () => {
+  const { isAffixNameLegalForGearSlot } = gearSlotLegality;
+  const elementalDamageAffixes = [
+    "Elemental Damage (Physical)",
+    "Elemental Damage (Fire)",
+    "Elemental Damage (Cold)",
+    "Elemental Damage (Lightning)",
+    "Elemental Damage (Poison)",
+    "Elemental Damage (Shadow)",
+  ];
+  for (const name of elementalDamageAffixes) {
+    assert.equal(
+      isAffixNameLegalForGearSlot(name, "Ring"),
+      true,
+      `${name} must be legal on Ring`
+    );
+  }
+});
+
 test("solveDecompositionPlanV3 keeps multi-category add targets in decomposition when the prism is explicit", { timeout: TEST_TIMEOUT_MS }, () => {
   const { affixes, byName, categories } = buildCatalogFixture({
     Aggressive: ["Thorns"],

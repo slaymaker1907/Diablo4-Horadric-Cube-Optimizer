@@ -252,8 +252,8 @@ const CURRENT_SLOT_TO_NAMES = {
   Gloves:       ["Mainstat","Maximum Life","Armor","Attack Speed","Critical Strike Chance","Critical Strike Damage","Lucky Hit Chance","Lucky Hit Chance restore Resource","Life on Hit"],
   Pants:        ["Mainstat","Maximum Life","Armor","Damage Reduction","Dodge Chance","Thorns","Potion Capacity","Impairment Reduction","Life Regeneration","Barrier Generation","Fortify Generation","Healing Received","All Resistance","Specific Resistance (Physical)","Specific Resistance (Fire)","Specific Resistance (Cold)","Specific Resistance (Lightning)","Specific Resistance (Poison)","Specific Resistance (Shadow)"],
   Boots:        ["Mainstat","Maximum Life","Armor","Movement Speed","Dodge Chance","Impairment Reduction","Life Regeneration","Fortify Generation","Healing Received","Maximum Evade Charges","Attacks reduce Evade Cooldown","Evade grants Movement Speed","All Resistance","Specific Resistance (Physical)","Specific Resistance (Fire)","Specific Resistance (Cold)","Specific Resistance (Lightning)","Specific Resistance (Poison)","Specific Resistance (Shadow)"],
-  Amulet:       ["Mainstat","Maximum Life","All Damage","Attack Speed","Critical Strike Chance","Cooldown Reduction","Movement Speed","Damage Reduction","Impairment Reduction","Resource Cost Reduction","Elemental Damage (Physical)","Elemental Damage (Fire)","Elemental Damage (Cold)","Elemental Damage (Lightning)","Elemental Damage (Poison)","Elemental Damage (Shadow)","All Resistance"],
-  Ring:         ["Mainstat","Maximum Life","Attack Speed","Critical Strike Chance","Critical Strike Damage","Vulnerable Damage","DoT Damage","Lucky Hit Chance","Maximum Resource","Resource Regeneration","Life on Hit","All Resistance","Specific Resistance (Physical)","Specific Resistance (Fire)","Specific Resistance (Cold)","Specific Resistance (Lightning)","Specific Resistance (Poison)","Specific Resistance (Shadow)"],
+  Amulet:       ["Mainstat","Maximum Life","All Damage","Attack Speed","Critical Strike Chance","Cooldown Reduction","Movement Speed","Damage Reduction","Impairment Reduction","Resource Cost Reduction","Elemental Damage (Physical)","Elemental Damage (Fire)","Elemental Damage (Cold)","Elemental Damage (Lightning)","Elemental Damage (Poison)","Elemental Damage (Shadow)","All Resistance","Vulnerable Damage","Critical Strike Damage","DoT Damage","Lucky Hit Chance"],
+  Ring:         ["Mainstat","Maximum Life","Attack Speed","Critical Strike Chance","Critical Strike Damage","Vulnerable Damage","DoT Damage","Lucky Hit Chance","Maximum Resource","Resource Regeneration","Life on Hit","All Resistance","Specific Resistance (Physical)","Specific Resistance (Fire)","Specific Resistance (Cold)","Specific Resistance (Lightning)","Specific Resistance (Poison)","Specific Resistance (Shadow)","Elemental Damage (Physical)","Elemental Damage (Fire)","Elemental Damage (Cold)","Elemental Damage (Lightning)","Elemental Damage (Poison)","Elemental Damage (Shadow)"],
   "1H Weapon":  ["Mainstat","Maximum Life","Weapon Damage","All Damage","Attack Speed","Critical Strike Damage","Vulnerable Damage","DoT Damage","Elemental Damage (Physical)","Elemental Damage (Fire)","Elemental Damage (Cold)","Elemental Damage (Lightning)","Elemental Damage (Poison)","Elemental Damage (Shadow)","Life on Hit","Life on Kill","Resource on Kill"],
   "2H Weapon":  ["Mainstat","Maximum Life","Weapon Damage","All Damage","Attack Speed","Critical Strike Damage","Vulnerable Damage","DoT Damage","Elemental Damage (Physical)","Elemental Damage (Fire)","Elemental Damage (Cold)","Elemental Damage (Lightning)","Elemental Damage (Poison)","Elemental Damage (Shadow)","Life on Hit","Life on Kill","Resource on Kill"],
   Offhand:      ["Mainstat","Maximum Life","Cooldown Reduction","Critical Strike Chance","Lucky Hit Chance","Lucky Hit Chance restore Resource","Maximum Resource","Resource Cost Reduction","Resource Regeneration"],
@@ -267,6 +267,18 @@ const CURRENT_SLOT_TO_NAMES = {
 const MANUAL_ADDITIONS = {
   "1H Weapon": ["Maximum Resource"],
   "2H Weapon": ["Maximum Resource"],
+  // Companion omits Amulet from these affix entries; all four genuinely roll on
+  // Amulets in D4.
+  Amulet: ["Vulnerable Damage", "Critical Strike Damage", "DoT Damage", "Lucky Hit Chance"],
+  // Companion omits Ring from all six Elemental Damage subtypes.
+  Ring: [
+    "Elemental Damage (Physical)",
+    "Elemental Damage (Fire)",
+    "Elemental Damage (Cold)",
+    "Elemental Damage (Lightning)",
+    "Elemental Damage (Poison)",
+    "Elemental Damage (Shadow)",
+  ],
 };
 
 // ─── Compute union (current ∪ Companion-derived ∪ manual) ──────────────────

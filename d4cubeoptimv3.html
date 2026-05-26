@@ -629,6 +629,9 @@
 						<p id="class-any-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
 							Class is Any — the rolling pool includes every class's skills. Set Class to your character for accurate probabilities.
 						</p>
+						<p id="gear-slot-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
+							Gear Slot filtering is in progress — slot data is being updated this week and may not be accurate yet.
+						</p>
 					</div>
 
 					<div class="affix-list" id="current-affixes"></div>
@@ -968,6 +971,7 @@
 			gearSlot: document.getElementById("gear-slot"),
 			characterClass: document.getElementById("character-class"),
 			classAnyWarning: document.getElementById("class-any-warning"),
+			gearSlotWarning: document.getElementById("gear-slot-warning"),
 			legendaryToggle: document.getElementById("legendary-toggle"),
 
 			currentAffixes: document.getElementById("current-affixes"),
@@ -1651,6 +1655,10 @@
 
 			if (els.classAnyWarning) {
 				els.classAnyWarning.style.display = appState.current.class === "Any" ? "" : "none";
+			}
+
+			if (els.gearSlotWarning) {
+				els.gearSlotWarning.style.display = appState.current.gearSlot === "Any" ? "" : "none";
 			}
 
 			els.legendaryToggle.classList.toggle("active", appState.current.isLegendary);

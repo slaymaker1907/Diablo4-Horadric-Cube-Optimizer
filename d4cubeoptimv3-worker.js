@@ -5719,6 +5719,75 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   };
 }
 
+// ── Raw rollout executor (used by parallel worker threads) ───────────────────
+//
+// Runs exactly `rolloutCount` independent rollouts from payload.state using
+// the same policy as runMCVerificationV3 (optimizePayloadV3 with refineDepth:0,
+// cached per state key). Returns the raw step counts and truncation count so
+// the caller can aggregate across threads before computing statistics.
+//
+// `rootAction` — the optimizer's recommended action for payload.state, used to
+// pre-warm the action cache without re-running the root-state optimizer call.
+// options:
+//   initialCacheEntries — Array of [stateKey, action] pairs to pre-populate the
+//     action cache (e.g. from a previous warm-up run).  Avoids re-running the
+//     optimizer for already-discovered states.
+//
+// Returns:
+//   { stepCounts, truncatedCount, actionCacheEntries }
+//   actionCacheEntries is an Array of [stateKey, action] pairs representing
+//   every state visited during this run.  Callers can merge entries across
+//   parallel warmup threads to build a shared warm cache.
+function runMCRolloutsRawV3(payload, rootAction, rolloutCount, options = {}) {
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const actionCache = options.initialCacheEntries
+    ? new Map(options.initialCacheEntries)
+    : new Map();
+  if (rootAction) {
+    actionCache.set(stateKey(payload.state), rootAction);
+  }
+  const stepCounts = [];
+  let truncatedCount = 0;
+
+  for (let i = 0; i < rolloutCount; i++) {
+    let state = payload.state;
+    let steps = 0;
+    let truncated = false;
+
+    while (true) {
+      const term = isTerminal(state, payload.target, env);
+      if (term.terminal) {
+        if (!term.success) { truncated = true; steps = MC_ROLLOUT_STEP_CAP; }
+        break;
+      }
+      if (steps >= MC_ROLLOUT_STEP_CAP) { truncated = true; break; }
+
+      const key = stateKey(state);
+      let action = actionCache.get(key);
+      if (action === undefined) {
+        const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
+        action = subResult && subResult.action ? subResult.action : null;
+        actionCache.set(key, action);
+      }
+      if (!action) { truncated = true; steps = MC_ROLLOUT_STEP_CAP; break; }
+
+      const rawOutcomes = getActionOutcomes(state, action, env);
+      if (!rawOutcomes || rawOutcomes.length === 0) { truncated = true; break; }
+      const outcomes = filterValidMCOutcomesV3(rawOutcomes);
+      if (outcomes.length === 0) { truncated = true; break; }
+
+      const chosen = pickWeightedOutcomeV3(outcomes);
+      state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
+      steps++;
+    }
+
+    stepCounts.push(steps);
+    if (truncated) truncatedCount++;
+  }
+
+  return { stepCounts, truncatedCount, actionCacheEntries: [...actionCache.entries()] };
+}
+
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
@@ -5848,6 +5917,7 @@ if (typeof module !== "undefined" && module.exports) {
     optimizeScenarioV3,
     runOptimizationV3,
     runMCVerificationV3,
+    runMCRolloutsRawV3,
     computeMCStatsV3,
     // MC verification budget constants — exposed for tests + benchmarks.
     MC_LIGHT_ROLLOUTS,

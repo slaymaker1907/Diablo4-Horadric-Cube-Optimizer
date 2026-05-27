@@ -5265,16 +5265,24 @@ function tagLooseEstimateIfApplicableV3(result, payload) {
 }
 
 function optimizePayloadV3(payload, options = {}) {
-  // refineDepth controls one-step concrete refinement of residual results.
-  //   1 (default) → apply refinement when the residual layer wins routing.
-  //   0           → skip refinement (used by recursive calls inside refinement
-  //                  and by the MC verification per-step optimizer lookups).
+  // refineDepth controls Bellman-backup depth for residual results.
+  //   1 (default) → one concrete backup step when the residual layer wins.
+  //   2           → two steps (used by runOptimizationV3 for better accuracy).
+  //   0           → skip refinement (MC per-step lookups, recursive sub-calls).
   const refineDepth = options.refineDepth != null ? options.refineDepth : 1;
+  // refineTopK controls how many top candidates are refined before re-picking.
+  //   1 (default) → refine only the closed-form winner (old behaviour).
+  //   6           → refine all 6 candidates; used by runOptimizationV3 to catch
+  //                  cases where closed-form mis-orders (see fix notes in plan).
+  const refineTopK = options.refineTopK != null ? options.refineTopK : 1;
+  // refineBudgetMs: wall-clock cap for the refinement loop across all candidates.
+  //   Infinity (default) → no cap; sub-calls finish unconditionally.
+  const refineBudgetMs = options.refineBudgetMs != null ? options.refineBudgetMs : Infinity;
 
   const result = computeOptimizationResultV3(payload, options);
 
   const refined = (refineDepth > 0 && shouldRefineResultV3(result))
-    ? applyOneStepRefinementV3(payload, result)
+    ? refineRootActionV3(payload, result, { refineDepth, refineTopK, refineBudgetMs })
     : result;
   return tagLooseEstimateIfApplicableV3(refined, payload);
 }
@@ -5373,23 +5381,36 @@ function shouldRefineResultV3(result) {
   return true;
 }
 
-function applyOneStepRefinementV3(payload, result) {
-  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
-  const outcomes = getActionOutcomes(payload.state, result.action, env);
-  if (!outcomes || outcomes.length === 0) return result;
+// ── Inner Bellman-backup helper ───────────────────────────────────────────────
+//
+// Performs a single concrete Bellman-backup step for one (payload, action) pair.
+// Shared by both applyOneStepRefinementV3 and refineRootActionV3.
+//
+// Parameters:
+//   payload        — the optimizer payload for the current state.
+//   action         — the action whose value we are computing.
+//   env            — pre-built env from buildEnv(payload.*).
+//   subRefineDepth — refineDepth to pass to recursive optimizePayloadV3 calls.
+//                    0 = no further refinement (old behaviour).
+//                    1 = one more step of refinement at each successor (depth-2
+//                        Bellman from the root's perspective).
+//   successorCache — shared Map({ stateKey → { value, looseEstimate } }) across
+//                    multiple candidates to avoid re-evaluating the same
+//                    concrete successor state more than once.
+//
+// Returns { refinedSteps, anySuccessorLoose } on success, or null when any
+// successor is unevaluable (we bail rather than emit a partial result).
+function refineOneAction(payload, action, env, subRefineDepth, successorCache) {
+  const outcomes = getActionOutcomes(payload.state, action, env);
+  if (!outcomes || outcomes.length === 0) return null;
 
-  // Cache stores { value, looseEstimate } per successor state key so we
-  // propagate the looseEstimate flag up to the parent result when any
-  // successor's estimate is a loose lower bound (Bug 2 transitivity).
-  const cache = new Map();
   let sum = 0;
-  let outcomeCount = 0;
   let anySuccessorLoose = false;
 
   for (const outcome of outcomes) {
     const successor = outcome.state;
     const key = stateKey(successor);
-    if (!cache.has(key)) {
+    if (!successorCache.has(key)) {
       const term = isTerminal(successor, payload.target, env);
       let entry;
       if (term.terminal && term.success) {
@@ -5397,49 +5418,141 @@ function applyOneStepRefinementV3(payload, result) {
       } else if (term.terminal && !term.success) {
         entry = { value: Infinity, looseEstimate: false };
       } else {
-        const successorPayload = { ...payload, state: successor };
-        const subResult = optimizePayloadV3(successorPayload, { refineDepth: 0 });
+        // Strip timeMs from successor payloads: the caller's expanded residual
+        // budget (e.g. timeMs:0 → 4096-state graph) applies to the root
+        // evaluation only.  Sub-calls use the default 500-state budget so the
+        // refinement loop doesn't cascade O(budget^depth) in wall time.
+        // Successor states are typically simpler (one fewer wrong affix) and
+        // are handled by the decomposition layer or a small residual graph.
+        const { timeMs: _ignored, ...payloadBase } = payload;  // eslint-disable-line no-unused-vars
+        const successorPayload = { ...payloadBase, state: successor };
+        const subResult = optimizePayloadV3(successorPayload, { refineDepth: subRefineDepth });
         entry = {
           value: subResult && Number.isFinite(subResult.expectedSteps) ? subResult.expectedSteps : NaN,
           looseEstimate: !!(subResult && subResult.diagnostics && subResult.diagnostics.looseEstimate),
         };
       }
-      cache.set(key, entry);
+      successorCache.set(key, entry);
     }
-    const cached = cache.get(key);
+    const cached = successorCache.get(key);
     if (!Number.isFinite(cached.value)) {
       // Unevaluable successor — bail rather than emit a partial refinement.
-      return result;
+      return null;
     }
     if (cached.looseEstimate) anySuccessorLoose = true;
     sum += outcome.probability * cached.value;
-    outcomeCount++;
   }
+
+  return { refinedSteps: 1 + sum, anySuccessorLoose };
+}
+
+// ── Top-K root-action refinement ──────────────────────────────────────────────
+//
+// Refines up to `opts.refineTopK` of the ranked candidate actions from
+// `result.diagnostics.candidateActions` and re-picks by the lowest refined
+// value. This fixes the class of mis-orderings where the closed-form (abstract)
+// LAO* value ranks action A above action B, but the concrete 1-step Bellman
+// backup shows B is actually cheaper.
+//
+// When refineTopK = 1 this degenerates to the old applyOneStepRefinementV3
+// behaviour (refine only the winner, no re-picking). The caller opts in to
+// wider refinement; runOptimizationV3 uses K=6 and depth=2 by default.
+//
+// opts:
+//   refineDepth   — Bellman backup depth. Sub-calls receive refineDepth-1 so
+//                   depth=2 at the root means depth=1 at each successor.
+//   refineTopK    — max candidates to refine (default 1, capped to available).
+//   refineBudgetMs — wall-clock cap; stops before the next candidate if elapsed.
+//                    Infinity = no cap (default).
+function refineRootActionV3(payload, result, opts) {
+  const { refineDepth, refineTopK, refineBudgetMs } = opts;
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+
+  // candidateActions is already sorted best-first (lowest closed-form rank).
+  const allCandidates = (result.diagnostics && result.diagnostics.candidateActions) || [];
+  const k = Math.max(1, Math.min(refineTopK, allCandidates.length));
+  const candidates = allCandidates.slice(0, k);
+
+  // Shared cache across all candidates: if two actions lead to the same
+  // concrete successor state, we only pay the sub-optimize cost once.
+  const successorCache = new Map();
+  const t0 = Date.now();
+  let bestRefined = null;
+
+  for (const candidate of candidates) {
+    if (Date.now() - t0 > refineBudgetMs) break;
+
+    const r = refineOneAction(payload, candidate.action, env, refineDepth - 1, successorCache);
+    if (r == null) continue;   // unevaluable successor — skip this candidate
+
+    // Sanity: refinement is a strict improvement over the per-candidate
+    // abstract cost (the residual abstract value is an upper bound).
+    // Skip if the abstract cost is known and refinement doesn't improve it.
+    const candidateAbstract = candidate.expectedSteps;
+    if (candidateAbstract != null && !(r.refinedSteps <= candidateAbstract + 1e-9)) continue;
+
+    if (bestRefined == null || r.refinedSteps < bestRefined.refinedSteps) {
+      bestRefined = { ...r, action: candidate.action };
+    }
+  }
+
+  // If no candidate survived (all bailed or failed the sanity check), fall
+  // back to the unrefined result so we never emit a worse recommendation.
+  if (bestRefined == null) return result;
+
+  // Build the refined result.  The action may differ from result.action — that
+  // is the whole point.  Preserve everything else (including candidateActions
+  // in diagnostics so the UI can still show alternates).
+  return {
+    ...result,
+    action: bestRefined.action,
+    expectedSteps: bestRefined.refinedSteps,
+    diagnostics: {
+      ...result.diagnostics,
+      // Propagate looseEstimate transitively if any successor's value is loose.
+      ...(bestRefined.anySuccessorLoose ? { looseEstimate: true } : {}),
+      refinement: {
+        applied: true,
+        topK: candidates.length,
+        depth: refineDepth,
+        originalAction: result.action,
+        originalSteps: result.expectedSteps,
+        refinedSteps: bestRefined.refinedSteps,
+        timedOut: Date.now() - t0 > refineBudgetMs,
+      },
+    },
+  };
+}
+
+// ── Legacy single-action refinement (kept for reference) ─────────────────────
+//
+// Now superseded at the call site by refineRootActionV3 (called from
+// optimizePayloadV3). Refactored to delegate to the shared helpers so it stays
+// consistent if called directly.
+function applyOneStepRefinementV3(payload, result) {
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const cache = new Map();
+  const r = refineOneAction(payload, result.action, env, 0, cache);
+  if (r == null) return result;
 
   const originalSteps = result.expectedSteps;
-  const refinedSteps = 1 + sum;
+  const refinedSteps = r.refinedSteps;
 
-  // Only adopt the refinement when it's a strict improvement (the
-  // residual abstract value is an upper bound, so the refinement should
-  // be ≤ original; if it isn't, something is off and we keep the safer
-  // original).
-  if (!(refinedSteps <= originalSteps + 1e-9)) {
-    return result;
-  }
+  // Only adopt the refinement when it's a strict improvement.
+  if (!(refinedSteps <= originalSteps + 1e-9)) return result;
 
+  const outcomes = getActionOutcomes(payload.state, result.action, env);
   return {
     ...result,
     expectedSteps: refinedSteps,
     diagnostics: {
       ...result.diagnostics,
-      // Propagate looseEstimate if any successor's estimate is a loose lower
-      // bound — the refined headline inherits that looseness transitively.
-      ...(anySuccessorLoose ? { looseEstimate: true } : {}),
+      ...(r.anySuccessorLoose ? { looseEstimate: true } : {}),
       refinement: {
         applied: true,
         originalSteps,
         refinedSteps,
-        outcomeCount,
+        outcomeCount: outcomes ? outcomes.length : 0,
       },
     },
   };
@@ -5722,7 +5835,12 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
-  const result = optimizePayloadV3(payload, { stopView });
+  const result = optimizePayloadV3(payload, {
+    stopView,
+    refineDepth: 2,      // two concrete Bellman-backup steps
+    refineTopK: 6,       // refine all 6 candidates before re-picking
+    refineBudgetMs: 8000, // hard cap; falls back to best refined so far
+  });
 
   const wantsVerification = payload.tightenStepsLevel === "light"
     || payload.tightenStepsLevel === "heavy"

@@ -2592,6 +2592,89 @@ test("Case A picks enchant-follow-up formula when no slot is enchanted, falls ba
 
 // ─── Bug 2 detection: stuck-recovery looseEstimate flag ───────────────────────
 
+// ─── Top-K candidate refinement + depth-N Bellman backup ─────────────────────
+
+test("top-K refinement (refineTopK:6) is at least as good as top-1", { timeout: TEST_TIMEOUT_MS * 3 }, () => {
+  // Uses the same looseResidualFixture scenario as the "refinement tightens"
+  // test.  The important property is monotonicity: refining more candidates
+  // can only keep or improve the recommended action's expectedSteps vs K=1.
+  // We also verify that the refinement.topK diagnostic is correctly populated.
+  const { data, byName } = buildLooseResidualFixture();
+  const state = buildState([
+    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Vulnerable Damage"].id, isGA: false, isEnchanted: true },
+    { affixId: byName["Mainstat"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: false },
+    { affixId: byName["Attack Speed"].id, requireGA: false },
+    { affixId: byName["Vulnerable Damage"].id, requireGA: false },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+  ]);
+
+  const k1 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 1 });
+  const k6 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 6 });
+
+  assert.equal(k1.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  assert.equal(k6.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  // Both should have refinement diagnostics.
+  assert.ok(k1.diagnostics.refinement, "K=1: expected diagnostics.refinement");
+  assert.ok(k6.diagnostics.refinement, "K=6: expected diagnostics.refinement");
+  assert.equal(k1.diagnostics.refinement.applied, true);
+  assert.equal(k6.diagnostics.refinement.applied, true);
+  // K=6 must have refined at least as many candidates as K=1.
+  assert.ok(
+    k6.diagnostics.refinement.topK >= k1.diagnostics.refinement.topK,
+    `K=6 topK (${k6.diagnostics.refinement.topK}) should be ≥ K=1 topK (${k1.diagnostics.refinement.topK})`
+  );
+  // Depth is reported correctly.
+  assert.equal(k1.diagnostics.refinement.depth, 1);
+  assert.equal(k6.diagnostics.refinement.depth, 1);
+  // Monotonicity: refining more candidates never worsens the result.
+  assert.ok(
+    k6.expectedSteps <= k1.expectedSteps + 1e-9,
+    `K=6 (${k6.expectedSteps}) should be ≤ K=1 (${k1.expectedSteps})`
+  );
+});
+
+test("depth-2 refinement produces expected-steps ≤ depth-1 on residual scenario", { timeout: TEST_TIMEOUT_MS * 5 }, () => {
+  // Smoke test for the depth-N recursion: passing refineDepth-1 down to
+  // successor sub-calls means each successor's value is itself refined,
+  // tightening (or equalling) the root Bellman backup vs depth-1.
+  const { data, byName } = buildLooseResidualFixture();
+  const state = buildState([
+    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
+    { affixId: byName["Vulnerable Damage"].id, isGA: false, isEnchanted: true },
+    { affixId: byName["Mainstat"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: false },
+    { affixId: byName["Attack Speed"].id, requireGA: false },
+    { affixId: byName["Vulnerable Damage"].id, requireGA: false },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+  ]);
+
+  const d1 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 1 });
+  const d2 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 2, refineTopK: 1 });
+
+  assert.equal(d1.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  assert.equal(d2.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
+  assert.ok(d1.diagnostics.refinement, "depth-1: expected diagnostics.refinement");
+  assert.ok(d2.diagnostics.refinement, "depth-2: expected diagnostics.refinement");
+  assert.equal(d1.diagnostics.refinement.applied, true);
+  assert.equal(d2.diagnostics.refinement.applied, true);
+  // The depth field reflects the requested depth.
+  assert.equal(d1.diagnostics.refinement.depth, 1);
+  assert.equal(d2.diagnostics.refinement.depth, 2);
+  // Depth-2 can only be at most as expensive as depth-1 (monotonicity).
+  assert.ok(
+    d2.expectedSteps <= d1.expectedSteps + 1e-9,
+    `depth-2 (${d2.expectedSteps}) should be ≤ depth-1 (${d1.expectedSteps})`
+  );
+});
+
 test("Case A candidate flags looseEstimate when stuck-recovery conditions are met", { timeout: TEST_TIMEOUT_MS }, () => {
   // Bug 2 scenario: an enchanted slot whose affix IS a target (so re-enchant
   // would lose a target and is blocked); another non-enchanted matched-target

@@ -1582,10 +1582,12 @@
 			}
 
 			sanitizeState();
+			// Always refresh the panel error list so it reflects the just-sanitized
+			// state — both the failure branch below and the success path benefit.
+			renderPanelErrors();
 			const validationErrors = getPanelValidationErrors();
 			if (validationErrors.length > 0) {
 				renderStatus("", "");
-				renderPanelErrors();
 				return;
 			}
 			const runState = exportCurrentState();
@@ -2758,6 +2760,10 @@
 
 			els.addCurrentAffix.disabled = appState.current.affixes.length >= 4;
 			els.copyCurrentToTarget.disabled = !appState.current.affixes.some((entry) => entry.affixId);
+			// Refresh the panel error list — affix mutations can resolve or
+			// introduce validation errors and the user should see that change
+			// immediately, not stall until the next OPTIMIZE click.
+			renderPanelErrors();
 		}
 
 		function renderTargetAffixes() {
@@ -2864,6 +2870,8 @@
 			});
 
 			els.addTargetAffix.disabled = appState.target.affixes.length >= 4;
+			// Refresh the panel error list — see renderCurrentAffixes() for rationale.
+			renderPanelErrors();
 		}
 
 		function getAffixCategoriesForMode(affix, mode) {

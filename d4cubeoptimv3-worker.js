@@ -5378,23 +5378,41 @@ function applyOneStepRefinementV3(payload, result) {
   const outcomes = getActionOutcomes(payload.state, result.action, env);
   if (!outcomes || outcomes.length === 0) return result;
 
+  // Cache stores { value, looseEstimate } per successor state key so we
+  // propagate the looseEstimate flag up to the parent result when any
+  // successor's estimate is a loose lower bound (Bug 2 transitivity).
   const cache = new Map();
   let sum = 0;
   let outcomeCount = 0;
+  let anySuccessorLoose = false;
 
   for (const outcome of outcomes) {
     const successor = outcome.state;
     const key = stateKey(successor);
-    let value = cache.get(key);
-    if (value === undefined) {
-      value = computeRefinedSuccessorValueV3(payload, successor, env);
-      cache.set(key, value);
+    if (!cache.has(key)) {
+      const term = isTerminal(successor, payload.target, env);
+      let entry;
+      if (term.terminal && term.success) {
+        entry = { value: 0, looseEstimate: false };
+      } else if (term.terminal && !term.success) {
+        entry = { value: Infinity, looseEstimate: false };
+      } else {
+        const successorPayload = { ...payload, state: successor };
+        const subResult = optimizePayloadV3(successorPayload, { refineDepth: 0 });
+        entry = {
+          value: subResult && Number.isFinite(subResult.expectedSteps) ? subResult.expectedSteps : NaN,
+          looseEstimate: !!(subResult && subResult.diagnostics && subResult.diagnostics.looseEstimate),
+        };
+      }
+      cache.set(key, entry);
     }
-    if (!Number.isFinite(value)) {
+    const cached = cache.get(key);
+    if (!Number.isFinite(cached.value)) {
       // Unevaluable successor — bail rather than emit a partial refinement.
       return result;
     }
-    sum += outcome.probability * value;
+    if (cached.looseEstimate) anySuccessorLoose = true;
+    sum += outcome.probability * cached.value;
     outcomeCount++;
   }
 
@@ -5414,6 +5432,9 @@ function applyOneStepRefinementV3(payload, result) {
     expectedSteps: refinedSteps,
     diagnostics: {
       ...result.diagnostics,
+      // Propagate looseEstimate if any successor's estimate is a loose lower
+      // bound — the refined headline inherits that looseness transitively.
+      ...(anySuccessorLoose ? { looseEstimate: true } : {}),
       refinement: {
         applied: true,
         originalSteps,
@@ -5422,17 +5443,6 @@ function applyOneStepRefinementV3(payload, result) {
       },
     },
   };
-}
-
-function computeRefinedSuccessorValueV3(payload, successor, env) {
-  const term = isTerminal(successor, payload.target, env);
-  if (term.terminal && term.success) return 0;
-  if (term.terminal && !term.success) return Infinity;
-
-  const successorPayload = { ...payload, state: successor };
-  const subResult = optimizePayloadV3(successorPayload, { refineDepth: 0 });
-  if (!subResult || !Number.isFinite(subResult.expectedSteps)) return NaN;
-  return subResult.expectedSteps;
 }
 
 function optimizeScenarioV3(payload, options = {}) {

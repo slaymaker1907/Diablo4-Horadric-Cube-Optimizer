@@ -2528,3 +2528,99 @@ test("computeMCStatsV3 reports mean, stdev, and CI half-width", () => {
   approxEqual(single.stdev, 0, 1e-9);
   approxEqual(single.ci95halfWidth, 0, 1e-9);
 });
+
+// ─── Bug 1 fix: Case A enchant-follow-up formula ──────────────────────────────
+
+test("computeCaseAExpectedStepsV3 uses 2 - 1/n when enchant-follow-up flag is set", () => {
+  // With useEnchantFollowUp: Add (1 step) + Enchant with probability (n-1)/n
+  // = 1 + (n-1)/n = 2 - 1/n.
+  approxEqual(worker.computeCaseAExpectedStepsV3(8, { useEnchantFollowUp: true }), 2 - 1/8, 1e-9);
+  approxEqual(worker.computeCaseAExpectedStepsV3(12, { useEnchantFollowUp: true }), 2 - 1/12, 1e-9);
+  // Without context, falls back to the existing geometric-retry formula.
+  approxEqual(worker.computeCaseAExpectedStepsV3(8), 8 - 1 + 1/8, 1e-9);
+  // Context with useEnchantFollowUp explicitly false also falls back.
+  approxEqual(worker.computeCaseAExpectedStepsV3(8, { useEnchantFollowUp: false }), 8 - 1 + 1/8, 1e-9);
+});
+
+test("Case A picks enchant-follow-up formula when no slot is enchanted, falls back otherwise", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  // Bug 1 scenario: 1 affix on the item, no slot enchanted, target needs
+  // a different affix in the same prism (Add → Enchant follow-up is optimal).
+  const stateNoEnchant = buildState([
+    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
+  ]);
+  // Sticky-slot scenario: same affix is now enchanted. Because Movement Speed
+  // is also a target, re-enchant would lose the target — so the optimizer
+  // can't escape via re-enchant and falls back through Case A.
+  const stateWithEnchant = buildState([
+    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: true },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Movement Speed"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const resultNoEnchant = worker.optimizePayloadV3({ state: stateNoEnchant, target, data, gaConfig: {} });
+  const resultWithEnchant = worker.optimizePayloadV3({ state: stateWithEnchant, target, data, gaConfig: {} });
+
+  // No-enchant case applies the Bug 1 fix and uses E = 2 - 1/n.
+  // For Aggressive Add pool of 5 effective entries (CSC + CSD + 2 elemental
+  // family + Thorns), expected ≈ 1.8.
+  assert.ok(resultNoEnchant.expectedSteps >= 1.5 && resultNoEnchant.expectedSteps <= 2.5,
+    `Enchant-follow-up scenario expected ~2 steps (2 - 1/n); got ${resultNoEnchant.expectedSteps}`);
+  // Sticky-slot case falls back to the geometric-retry formula n - 1 + 1/n.
+  assert.ok(resultWithEnchant.expectedSteps > resultNoEnchant.expectedSteps + 1,
+    `Sticky-slot case should be MUCH more expensive than no-enchant case ` +
+    `(no-enchant=${resultNoEnchant.expectedSteps}, with-enchant=${resultWithEnchant.expectedSteps})`);
+
+  // The selectedOptions for the no-enchant case should carry useEnchantFollowUp=true.
+  const optNoEnchant = resultNoEnchant.diagnostics.decomposition.selectedOptions
+    .find((o) => o.caseId === worker.CLOSED_FORM_CASE_IDS.A);
+  assert.ok(optNoEnchant, "Expected a Case A option in the no-enchant scenario");
+  assert.equal(optNoEnchant.useEnchantFollowUp, true,
+    "Case A selectedOption must carry useEnchantFollowUp=true when no slot enchanted");
+
+  // Sticky-slot case must NOT carry the flag.
+  const optWithEnchant = resultWithEnchant.diagnostics.decomposition.selectedOptions
+    .find((o) => o.caseId === worker.CLOSED_FORM_CASE_IDS.A);
+  if (optWithEnchant) {
+    assert.equal(optWithEnchant.useEnchantFollowUp, false,
+      "Case A selectedOption must NOT carry useEnchantFollowUp=true when a slot is enchanted");
+  }
+});
+
+// ─── Bug 2 detection: stuck-recovery looseEstimate flag ───────────────────────
+
+test("Case A candidate flags looseEstimate when stuck-recovery conditions are met", { timeout: TEST_TIMEOUT_MS }, () => {
+  // Bug 2 scenario: an enchanted slot whose affix IS a target (so re-enchant
+  // would lose a target and is blocked); another non-enchanted matched-target
+  // slot shares the prism category with the Add we're about to do; recovery
+  // from a wrong Add via Focused(Aggressive) would risk destroying that
+  // matched target. Case A's formula under-estimates the recovery cost.
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    // Critical Strike Damage is a matched target in Aggressive (non-enchanted)
+    { affixId: byName["Critical Strike Damage"].id, isGA: false, isEnchanted: false },
+    // Armor is enchanted AND a target — re-enchant escape is blocked.
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: true },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Damage"].id, requireGA: false },
+    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((e) => e.affixId);
+
+  const result = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
+  if (result.diagnostics.strategy !== worker.DECOMPOSITION_STRATEGY) {
+    // Strategy may escalate to residual on some configs; the looseEstimate
+    // flag check only applies when decomposition wins. Skip silently if not.
+    return;
+  }
+  const looseOptions = (result.diagnostics.decomposition.selectedOptions || [])
+    .filter((o) => o && o.looseEstimate === true);
+  assert.ok(looseOptions.length > 0,
+    "At least one selectedOption must have looseEstimate=true for the stuck-recovery scenario " +
+    `(got selectedOptions: ${JSON.stringify(result.diagnostics.decomposition.selectedOptions)})`);
+});

@@ -2929,10 +2929,51 @@ function isUniqueUnlockedCategoryHostV3(state, slotIndex, category, env, operati
   return matches.length === 1 && matches[0] === slotIndex;
 }
 
-function computeCaseAExpectedStepsV3(n) {
+// Bug 1 (over-estimate): when no slot is currently enchanted, the optimal
+// policy after Add(prism) into an empty slot is to Enchant that slot to the
+// target affix (deterministic, 1 extra step) if the Add doesn't land on
+// target directly. Cost: 1 (Add) + ((n-1)/n) × 1 (Enchant) = 2 - 1/n,
+// substantially tighter than the default geometric retry model n - 1 + 1/n.
+function canUseEnchantFollowUpAfterAddV3(state, env, targetAffixId) {
+  if (!state || !env || !targetAffixId) return false;
+  // Sticky-slot rule: once any slot is enchanted, no other slot can be enchanted.
+  if (getCurrentAffixes(state).some((entry) => entry.isEnchanted)) return false;
+  // The target affix must be legal for the slot/class (i.e. enchant-eligible).
+  return isAffixLegalForStateV3(targetAffixId, state, env);
+}
+
+// Bug 2 (under-estimate): when the Bug-1 fix path is unavailable (a slot IS
+// enchanted) AND another non-enchanted slot is a matched-target whose affix
+// shares the prism's category, recovery from a wrong Add via
+// Focused/Chaotic/Remove(prism) would risk destroying the matched target.
+// The actual recovery cost is high and Case A's n-1+1/n formula significantly
+// under-estimates it. We don't try to fix the formula (analytically
+// intractable for the recovery sub-policy) — we just flag the candidate as
+// `looseEstimate: true` so the UI can warn the user.
+function isCaseAStuckRecoveryRiskV3(state, target, env, prism) {
+  if (!state || !target || !env || !prism) return false;
+  if (!getCurrentAffixes(state).some((entry) => entry.isEnchanted)) return false;
+  const targetIds = new Set(
+    (target.affixes || []).map((entry) => entry.affixId).filter(Boolean)
+  );
+  return getCurrentAffixes(state).some((entry) => {
+    if (entry.isEnchanted) return false;
+    if (!entry.affixId || !targetIds.has(entry.affixId)) return false;
+    return affixHasCategoryV3(entry.affixId, prism, env, "focused");
+  });
+}
+
+function computeCaseAExpectedStepsV3(n, context) {
   if (!Number.isFinite(n) || n <= 0) {
     return null;
   }
+  // Bug 1 fix: when enchant-follow-up is available, the optimal policy is
+  // 1 Add + (with probability (n-1)/n) 1 Enchant. Cost = 2 - 1/n.
+  if (context && context.useEnchantFollowUp === true) {
+    return 2 - (1 / n);
+  }
+  // Default: cube-retry model — 1 Add + expected (n-1) failed retries with
+  // remove+add cycles, all probability-weighted.
   return n - 1 + (1 / n);
 }
 
@@ -3101,14 +3142,18 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
 
     for (const prism of targetCategoriesAdd) {
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "add" });
-      const expectedSteps = computeCaseAExpectedStepsV3(n);
+      const useEnchantFollowUp = canUseEnchantFollowUpAfterAddV3(state, env, targetEntry.affixId);
+      const expectedSteps = computeCaseAExpectedStepsV3(n, { useEnchantFollowUp });
       if (Number.isFinite(expectedSteps)) {
+        // Stuck-recovery risk only matters when the Bug 1 fix path is NOT
+        // available; the helper enforces that itself.
+        const looseEstimate = isCaseAStuckRecoveryRiskV3(state, options.target, env, prism);
         candidates.push(createClosedFormCandidateV3(
           CLOSED_FORM_CASE_IDS.A,
           slotIndex,
           targetEntry,
           expectedSteps,
-          { prism, denominator: n }
+          { prism, denominator: n, useEnchantFollowUp, looseEstimate }
         ));
       }
     }
@@ -3390,6 +3435,11 @@ function createDecompositionOptionV3(targetIndex, targetEntry, slotIndex, candid
     baseDenominator: Number.isFinite(candidate.denominator) ? candidate.denominator : null,
     requiresStage: !!prism && (prismDelta > 0 || !constantCase),
     sourceIndex: Number.isInteger(candidate.sourceIndex) ? candidate.sourceIndex : slotIndex,
+    // Carry forward Bug 1 / Bug 2 flags from the candidate so they reach the
+    // final diagnostics.decomposition.selectedOptions[*] entries and the
+    // stage-adjusted Case A formula picks the right branch.
+    useEnchantFollowUp: candidate.useEnchantFollowUp === true,
+    looseEstimate: candidate.looseEstimate === true,
   };
   option.action = getDecompositionOptionActionV3(option);
   return option;
@@ -3535,7 +3585,13 @@ function computeDecompositionOptionExpectedStepsV3(option, stage = 0) {
   }
 
   if (option.caseId === CLOSED_FORM_CASE_IDS.A) {
-    return computeCaseAExpectedStepsV3(adjustedDenominator);
+    // Preserve the enchant-follow-up flag computed at candidate-generation
+    // time. The flag depends on the initial state (no slot enchanted yet),
+    // which is the relevant time-of-evaluation for a Case A Add.
+    return computeCaseAExpectedStepsV3(
+      adjustedDenominator,
+      option.useEnchantFollowUp === true ? { useEnchantFollowUp: true } : null
+    );
   }
   if (
     option.caseId === CLOSED_FORM_CASE_IDS.B
@@ -4031,6 +4087,8 @@ function buildDecompositionResultV3(solution, feasibility) {
       removePrism: option.removePrism,
       stage: option.stage,
       expectedSteps: computeDecompositionOptionExpectedStepsV3(option, Number.isInteger(option.stage) ? option.stage : 0),
+      useEnchantFollowUp: option.useEnchantFollowUp === true,
+      looseEstimate: option.looseEstimate === true,
     })),
   };
 
@@ -5185,6 +5243,27 @@ function choosePreferredApproximateResultV3(decompositionResult, residualResult)
   return decompositionResult;
 }
 
+// Bug 2 belt-and-suspenders: tag diagnostics.looseEstimate on the final
+// result regardless of which strategy was used (decomposition or residual).
+// This ensures the UI warning fires even if decomposition.selectedOptions
+// is empty (e.g. when the residual solver is used for the same state that
+// would produce a loose Case A estimate via decomposition).
+function tagLooseEstimateIfApplicableV3(result, payload) {
+  if (!result || !result.diagnostics) return result;
+  if (!result.action || result.action.type !== "add" || !result.action.prism) return result;
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  if (!isCaseAStuckRecoveryRiskV3(payload.state, payload.target, env, result.action.prism)) {
+    return result;
+  }
+  return {
+    ...result,
+    diagnostics: {
+      ...result.diagnostics,
+      looseEstimate: true,
+    },
+  };
+}
+
 function optimizePayloadV3(payload, options = {}) {
   // refineDepth controls one-step concrete refinement of residual results.
   //   1 (default) → apply refinement when the residual layer wins routing.
@@ -5194,10 +5273,10 @@ function optimizePayloadV3(payload, options = {}) {
 
   const result = computeOptimizationResultV3(payload, options);
 
-  if (refineDepth > 0 && shouldRefineResultV3(result)) {
-    return applyOneStepRefinementV3(payload, result);
-  }
-  return result;
+  const refined = (refineDepth > 0 && shouldRefineResultV3(result))
+    ? applyOneStepRefinementV3(payload, result)
+    : result;
+  return tagLooseEstimateIfApplicableV3(refined, payload);
 }
 
 function computeOptimizationResultV3(payload, options = {}) {

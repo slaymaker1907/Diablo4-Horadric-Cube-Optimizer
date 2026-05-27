@@ -83,12 +83,11 @@ async function runAll() {
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
-test("MC produces sensible values on a simple Add scenario (K=200)", () => {
-  // Simple Add-Affix scenario. MC and optimizer headline may legitimately
-  // disagree — the optimizer's closed-form does not always consider all
-  // follow-up actions (e.g. enchant-after-add), so MC can be substantially
-  // tighter than the headline. The test only asserts both are finite, MC
-  // doesn't have NaN, and rollouts didn't all truncate.
+test("MC and optimizer agree on a simple Add scenario after Bug 1 fix (K=200)", () => {
+  // Simple Add-Affix scenario where no slot is enchanted. After the Bug 1
+  // fix, Case A uses E = 2 - 1/N (Add + maybe Enchant follow-up) instead of
+  // the geometric retry formula. MC should now agree with the optimizer
+  // headline within 3 SE.
   const { data, byName } = buildLooseFixture();
   const state = {
     gearSlot: "Any", class: "Any", isLegendary: false,
@@ -122,7 +121,13 @@ test("MC produces sensible values on a simple Add scenario (K=200)", () => {
   assert.ok(Number.isFinite(gs.ci95halfWidth), "CI must be finite");
   assert.ok(gs.truncatedRolloutCount < gs.rollouts / 2,
     `>50% of rollouts truncated (${gs.truncatedRolloutCount}/${gs.rollouts}) — MC may be trapped`);
-  console.log(`  [info] optimizer=${intermediate.expectedSteps.toFixed(2)}, MC=${gs.mean.toFixed(2)} ± ${gs.ci95halfWidth.toFixed(2)} (${gs.truncatedRolloutCount} truncated)`);
+  const drift = Math.abs(intermediate.expectedSteps - gs.mean);
+  const se = gs.ci95halfWidth / 1.96;
+  console.log(`  [info] optimizer=${intermediate.expectedSteps.toFixed(2)}, MC=${gs.mean.toFixed(2)} ± ${gs.ci95halfWidth.toFixed(2)} (drift=${drift.toFixed(2)}, ${gs.truncatedRolloutCount} truncated)`);
+  // After Bug 1 fix: MC and optimizer should agree within 3 SE.
+  assert.ok(drift <= 3 * se,
+    `MC mean ${gs.mean.toFixed(2)} drifted ${drift.toFixed(2)} from optimizer ${intermediate.expectedSteps.toFixed(2)} ` +
+    `(allowed 3 SE = ${(3 * se).toFixed(2)}). Bug 1 fix should make them agree.`);
 });
 
 test("Adaptive converges within the cap on a simple low-variance case", () => {

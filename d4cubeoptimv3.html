@@ -1823,6 +1823,20 @@
 				appendDiagnosticLine(`Decomposition status: ${formatStatusLabel(decomposition.status)}.`);
 			}
 
+			// Bug 2 warning: when Case A's closed-form is loose due to
+			// stuck-recovery risk (no enchant-follow-up path AND matched-target
+			// in the prism category), surface a hint that the headline may be
+			// an under-estimate and verification is the right tool to tighten it.
+			const looseOptions = (decomposition && Array.isArray(decomposition.selectedOptions)
+				? decomposition.selectedOptions.filter((o) => o && o.looseEstimate === true)
+				: []);
+			if (looseOptions.length > 0 || diagnostics.looseEstimate === true) {
+				appendDiagnosticLine(
+					"Note: this estimate may be a loose lower bound (Add → stuck-state recovery is hard to compute in closed form). " +
+					"Enable \"Tighten Steps Estimate\" in Settings for a Monte Carlo verification — the recommended action is unaffected."
+				);
+			}
+
 			const ilp = diagnostics.ilp || null;
 			if (ilp && ilp.status === "OPTIMAL") {
 				appendDiagnosticLine(`ILP OPTIMAL: objective ${numberOrDash(ilp.objective)}, iterations ${ilp.iterations}, nodes ${ilp.nodesVisited}.`);

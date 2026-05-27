@@ -635,7 +635,8 @@ function getCategoryAffixesForState(state, env, categoryName, operationType) {
  */
 function stateKey(state) {
   const tokens = state.affixes
-    .map((entry) => `${entry.affixId}|${entry.isGA ? 1 : 0}|${entry.isEnchanted ? 1 : 0}`);
+    .map((entry) => `${entry.affixId}|${entry.isGA ? 1 : 0}|${entry.isEnchanted ? 1 : 0}`)
+    .sort();
   return [
     `L${state.isLegendary ? 1 : 0}`,
     `S${state.gearSlot || "any"}`,

@@ -108,7 +108,7 @@
         "to Razor Wings", "to Ravager", "to Payback", "to Counterattack",
         "to Concussive Stomp", "to Armored Hide", "to Stinger", "to Rake", "to Quill Volley",
         "to Crushing Hand", "to Withering Fist", "to Thunderspike", "to Thrash",
-        "to Rock Splitter",
+        "to Rock Splitter", "to Vortex",
       ],
       general: [
         "to Potency Skills", "to Focus Skills", "to Centipede Skills",

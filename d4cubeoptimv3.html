@@ -827,6 +827,7 @@
 					<div class="panel-actions">
 						<button id="add-current-affix" class="btn ghost">Add Current Affix</button>
 						<button id="copy-current-to-target" class="btn ghost" disabled>Copy to Right</button>
+						<button id="reset-source-btn" class="btn ghost">Reset Source</button>
 					</div>
 					<p class="legend">
 						Enchanted affixes are immune to cube operations. Any cube-touched affix is forced to non-GA.
@@ -1039,9 +1040,8 @@
 					</label>
 				</div>
 				<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
-					Runs the optimizer in WebAssembly instead of JavaScript. The WASM module loads on first use. Currently
-					<strong>~1.4× slower</strong> than JS due to per-state cache reconstruction — useful mainly for testing and
-					future development. Falls back to JS automatically if the WASM module fails to load.
+					Runs the optimizer in WebAssembly instead of JavaScript. The WASM module loads on first use.
+					Falls back to JS automatically if the WASM module fails to load.
 				</div>
 
 				<div class="divider"></div>
@@ -1230,7 +1230,7 @@
 			skillFilter: null, // computed on first sanitize
 			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
 			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
-			useRust: false, // persisted to USE_RUST_KEY, not main state blob
+			useRust: true, // persisted to USE_RUST_KEY, not main state blob
 		};
 
 		let appState = loadState();
@@ -1261,6 +1261,7 @@
 			targetAffixes: document.getElementById("target-affixes"),
 			addCurrentAffix: document.getElementById("add-current-affix"),
 			copyCurrentToTarget: document.getElementById("copy-current-to-target"),
+			resetSourceBtn: document.getElementById("reset-source-btn"),
 			addTargetAffix: document.getElementById("add-target-affix"),
 
 			manualMode: document.getElementById("manual-mode"),
@@ -1352,6 +1353,7 @@
 			els.runBtn.addEventListener("click", startRun);
 			els.stopBtn.addEventListener("click", stopRun);
 			els.resetBtn.addEventListener("click", resetState);
+			els.resetSourceBtn.addEventListener("click", resetSource);
 			document.getElementById("thinking-info-btn").addEventListener("click", () => {
 				const box = document.getElementById("thinking-info-box");
 				box.style.display = box.style.display === "none" ? "block" : "none";
@@ -2080,6 +2082,23 @@
 			renderStatus("Reset complete.", "done");
 		}
 
+		function resetSource() {
+			appState.current.affixes = [
+				{ affixId: "", isGA: false, isEnchanted: false },
+				{ affixId: "", isGA: false, isEnchanted: false },
+				{ affixId: "", isGA: false, isEnchanted: false },
+				{ affixId: "", isGA: false, isEnchanted: false },
+			];
+			treeCache = null;
+			currentBestAction = null;
+			lastDiagnostics = null;
+			lastOneStepRisk = null;
+			saveState();
+			renderAll();
+			setRunButtons();
+			renderStatus("Source affixes cleared.", "done");
+		}
+
 		function renderOverridesTable() {
 			const tbody = document.getElementById("overrides-tbody");
 			if (!tbody) return;
@@ -2168,13 +2187,13 @@
 					}
 				}
 			}
-			return result;
+			return result.sort();
 		}
 
 		function getSpecificSkillsForClass(className) {
 			if (className && className !== "Any") {
 				const cls = CLASS_SKILLS[className];
-				return cls && Array.isArray(cls.specific) ? cls.specific.slice() : [];
+				return cls && Array.isArray(cls.specific) ? cls.specific.slice().sort() : [];
 			}
 			const result = [];
 			for (const cls of Object.values(CLASS_SKILLS)) {
@@ -2182,7 +2201,7 @@
 					result.push(...cls.specific);
 				}
 			}
-			return result;
+			return result.sort();
 		}
 
 		// Slots where skills default to all-disabled.
@@ -2269,6 +2288,12 @@
 		function renderSkillFilter() {
 			const container = document.getElementById("skill-filter-container");
 			if (!container) return;
+			// Snapshot open/closed state of each accordion before clearing.
+			const openStates = {};
+			container.querySelectorAll("details").forEach((d) => {
+				const label = d.querySelector(".sf-label");
+				if (label) openStates[label.textContent] = d.open;
+			});
 			container.innerHTML = "";
 
 			const gearSlot = getCurrentGearSlotForFiltering();
@@ -2404,6 +2429,7 @@
 				summary.appendChild(labelSpan);
 				summary.appendChild(parentCb);
 				details.appendChild(summary);
+				if (openStates["Skill Categories"] !== undefined) details.open = openStates["Skill Categories"];
 
 				const list = document.createElement("div");
 				list.className = "skill-filter-list";
@@ -2456,6 +2482,7 @@
 				summary.appendChild(labelSpan);
 				summary.appendChild(parentCb);
 				details.appendChild(summary);
+				if (openStates["Specific Skills"] !== undefined) details.open = openStates["Specific Skills"];
 
 				const list = document.createElement("div");
 				list.className = "skill-filter-list";
@@ -3419,10 +3446,10 @@
 		function loadUseRust() {
 			try {
 				const raw = localStorage.getItem(USE_RUST_KEY);
-				if (!raw) return false;
+				if (!raw) return true;
 				return JSON.parse(raw) === true;
 			} catch {
-				return false;
+				return true;
 			}
 		}
 

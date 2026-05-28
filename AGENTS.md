@@ -35,11 +35,64 @@ The "Expected Cube Steps" value shown in the UI (and `result.expectedSteps` in t
 
 ## Build And Test
 
-- There is no build step, package manager, or bundler. Work directly in the checked-in HTML and JavaScript files.
+- There is no build step, package manager, or bundler for the JavaScript path. Work directly in the checked-in HTML and JavaScript files.
 - v3 worker validation: `node --test d4cubeoptimv3-worker.test.js`
 - ILP validation: `node --test ilp.test.js`
-- Full regression: `node --test ilp.test.js d4cubeoptimv3-worker.test.js`
+- Full JS regression: `node --test ilp.test.js d4cubeoptimv3-worker.test.js`
+- Rust unit tests: `cargo test --manifest-path rust/Cargo.toml`
+- JS vs Rust differential harness: `node scripts/diff-test-rust-vs-js.js` (phases 0–4; run after any Rust change)
+- MC performance benchmark: `node scripts/benchmark-mc-rollouts.js`
 - For browser smoke testing, run `python3 -m http.server 8123` from the repo root and load `d4cubeoptimv3.html`.
+
+## Rust/WASM Extension
+
+The optimizer's inner loop (`optimizePayloadV3` + `runMCVerificationV3`) is also implemented in Rust and compiled to WASM via `wasm-bindgen`. The JS path remains the primary path; the Rust path is loaded alongside it when the WASM module is available.
+
+### Why the ILP solver stays in JavaScript
+
+`ilp.js` does not move to Rust for three reasons:
+
+1. **Not the bottleneck.** Per-cache-miss cost is dominated by the residual LAO\* solver and closed-form case analysis, not ILP.
+2. **Coupling is per-unique-state, not per-step.** `solveILP` is called at most ~50–200 times per MC run (once per unique state, then cached). JSON-serialisable FFI overhead is negligible (~50 ms) compared with seconds saved on the LAO\* path.
+3. **No mature Rust BILP crate.** The only viable option (`microlp`) documents its branch-and-bound as still in development. Replacing 2256 lines of battle-tested, 78-test-covered JS would trade speedup for correctness risk. Rust calls the registered JS `solveILP` closure synchronously via a single `wasm-bindgen` callback — clean, zero correctness risk, easy to swap if a mature solver appears.
+
+### State representation
+
+States are packed into a `u64` (57 bits used, 7 spare):
+
+| Field | Bits |
+|---|---|
+| `isLegendary` | 1 |
+| `gearSlot` (12 values) | 4 |
+| `class` (9 values) | 4 |
+| 4 × token\_id (265 affixes + 10 trash sigs + 1 empty = 276 → 9 bits) | 36 |
+| 4 × `isGA` | 4 |
+| 4 × `isEnchanted` | 4 |
+| 4 × `isUnsatisfactory` | 4 |
+
+Trash signatures (10 unique category-set combos) are pre-computed into an `affixId → trashSigId` lookup at env build time.
+
+### FFI boundary
+
+Three coarse entry points (JSON in/out):
+
+1. `optimize(payloadJson, ilpCallback) → resultJson`
+2. `runMCVerification(payloadJson, intermediateJson, ilpCallback) → resultJson`
+3. `debug_residual_graph(stateJson, targetJson, dataJson, gaConfigJson) → debugJson` — permanent diagnostic/regression export
+
+Callbacks: `{ solveILP: js_sys::Function, onProgress?: js_sys::Function, stopBuffer?: Int32Array }`.
+
+### Build
+
+Run `bash scripts/build-wasm.sh` after any Rust change. This produces `rust/pkg-node/` (for Node tests) and `rust/pkg-web/` (for the browser). **Commit the built `.wasm` and binding `.js` files** — there is no CI build step, so artifacts must be checked in to preserve the "no deploy build step" constraint.
+
+### Key footgun: `time_ms` inheritance in MC sub-calls
+
+`runMCVerificationV3` calls `optimizePayloadV3` for each cache-miss state encountered during rollouts. These sub-calls **must inherit `time_ms` from the parent payload** so they use the same residual state-limit budget (e.g. `timeMs=30000` boosts the limit from 500 to ~2000 states). In JS this happens naturally via `{ ...payload, state }`. In Rust the sub-payload must explicitly copy `time_ms`, `tighten_steps_level`, and `tighten_steps_overrides`. Dropping `time_ms` causes the optimizer to return `action=null` for states that need a large graph, which truncates MC rollouts at `MC_ROLLOUT_STEP_CAP=1000` and produces wildly inflated mean estimates (~920 vs ~55 correct). This was fixed in `rust/src/mc.rs`; do not revert it.
+
+### Current performance
+
+After the `time_ms` inheritance fix, Rust MC wall time is approximately **1.4× slower** than JS MC for typical Spiritborn amulet scenarios (JS ~35 s, Rust ~50 s per 100 rollouts). The Rust optimizer does not maintain a warm action/outcome cache across sub-calls the way the JS `env` object does — every cache-miss state re-runs `build_residual_reachable_graph_v3` from scratch. To get a real speedup, Rust would need either a persistent env/cache shared across MC sub-calls or a pre-built policy table memoized at the top level.
 
 ## Source Of Truth
 

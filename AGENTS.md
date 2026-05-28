@@ -92,7 +92,9 @@ Run `bash scripts/build-wasm.sh` after any Rust change. This produces `rust/pkg-
 
 ### Current performance
 
-After the `time_ms` inheritance fix, Rust MC wall time is approximately **1.4× slower** than JS MC for typical Spiritborn amulet scenarios (JS ~35 s, Rust ~50 s per 100 rollouts). The Rust optimizer does not maintain a warm action/outcome cache across sub-calls the way the JS `env` object does — every cache-miss state re-runs `build_residual_reachable_graph_v3` from scratch. To get a real speedup, Rust would need either a persistent env/cache shared across MC sub-calls or a pre-built policy table memoized at the top level.
+Rust MC is approximately **7–8× faster** than JS MC for typical Spiritborn amulet scenarios (JS ~35 s, Rust ~4.5 s per 500 rollouts). This requires the **MC policy table fast-path** in `rust/src/mc.rs::build_policy_table`: at MC start, the residual graph is built once from the root state and LAO\* phase 1 + phase 2 are run to extract a `residual_abstract_state_key → best_action` map. Rollouts consult this table in O(1) per state instead of recomputing the optimizer per cache-miss state. Without the policy table, Rust MC is ~5× slower than JS because every cache miss re-runs `build_residual_reachable_graph_v3` from scratch.
+
+The policy table covers the entire reachable abstract state space from the root (size ~625 for typical 4-affix scenarios, 0 misses observed). For states whose abstract key isn't in the table (graph state-limit exceeded, or the root didn't go through the residual layer cleanly), MC falls back to a full `optimize_payload_v3` sub-call — same path as before. The fallback path is also the only correctness-critical path; the policy table is pure optimization. See `extract_residual_policy_indices` in `rust/src/residual.rs` for the policy extraction and `lookup_policy_action` in `mc.rs` for the per-state lookup (which abstracts the MC concrete state and rewrites the action's `sourceIndex` to match the matching slot in the concrete state).
 
 ## Source Of Truth
 

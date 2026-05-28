@@ -39,26 +39,47 @@ if (typeof module !== "undefined" && module.exports) {
   };
 }
 
-// D4_USE_RUST=true enables the Rust/WASM optimiser path (v4).
-// Set process.env.D4_USE_RUST="true" in Node or window.D4_USE_RUST=true in
-// the browser before loading this worker. Defaults to false; JS path is
-// always available as fallback.
+// D4_USE_RUST=true enables the Rust/WASM optimiser path (v4) for Node tests.
+// In the browser, pass `useRust: true` in each "run" message instead.
 const D4_USE_RUST =
   (typeof process !== "undefined" && process.env && process.env.D4_USE_RUST === "true") ||
   (typeof self !== "undefined" && self.D4_USE_RUST === true);
 
 let rustWorker = null;
+let _rustWorkerLoading = null; // in-flight Promise for browser lazy WASM init
+let _rustWorkerFailed = false; // true after a failed load; skip Rust thereafter
 
-if (D4_USE_RUST) {
-  if (typeof module !== "undefined" && module.exports) {
-    try {
-      rustWorker = require("./rust/pkg-node/d4optimizer.js");
-    } catch (_) {
-      // Built artifacts not present; fall back to JS path silently.
-    }
+if (D4_USE_RUST && typeof module !== "undefined" && module.exports) {
+  try {
+    rustWorker = require("./rust/pkg-node/d4optimizer.js");
+  } catch (_) {
+    // Built artifacts not present; fall back to JS path silently.
   }
-  // Browser Web Worker path: async WASM init is wired up in Phase 5.
-  // The pkg-web/ artifacts are committed for future use.
+}
+
+// Lazy WASM loader for classic browser Web Workers.
+// Called before the first Rust-path run; resolves immediately on repeat calls.
+async function ensureRustWorker() {
+  if (rustWorker || _rustWorkerFailed) return;
+  if (_rustWorkerLoading) { await _rustWorkerLoading; return; }
+  if (typeof importScripts === "undefined") return; // not a classic worker
+
+  _rustWorkerLoading = (async () => {
+    try {
+      importScripts("./rust/pkg-no-modules/d4optimizer.js");
+      // wasm_bindgen is now a global set by the imported script.
+      // Pass the .wasm URL explicitly because document.currentScript is
+      // unavailable in workers, so the auto-detect path cannot be used.
+      await wasm_bindgen("./rust/pkg-no-modules/d4optimizer_bg.wasm"); // eslint-disable-line no-undef
+      rustWorker = wasm_bindgen; // eslint-disable-line no-undef
+    } catch (e) {
+      console.warn("[d4optimizer] WASM load failed; falling back to JS:", e);
+      _rustWorkerFailed = true;
+    } finally {
+      _rustWorkerLoading = null;
+    }
+  })();
+  await _rustWorkerLoading;
 }
 
 const DEFAULT_MAX_AFFIX_SLOTS = 4;
@@ -5893,7 +5914,7 @@ function runOptimizationV3(payload, runId) {
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
 
   // ── Rust WASM path ────────────────────────────────────────────────────────
-  if (D4_USE_RUST && rustWorker && typeof rustWorker.optimize_payload === "function") {
+  if ((D4_USE_RUST || payload.useRust) && rustWorker && typeof rustWorker.optimize_payload === "function") {
     const payloadJson = JSON.stringify(payload);
     const ilpCb = makeRustIlpCallback();
     let result;
@@ -6013,7 +6034,7 @@ function runOptimizationV3(payload, runId) {
 }
 
 if (typeof self !== "undefined") {
-  self.onmessage = (event) => {
+  self.onmessage = async (event) => {
     const payload = event.data || {};
 
     if (payload.type === "set-scorer-model") {
@@ -6027,6 +6048,9 @@ if (typeof self !== "undefined") {
     if (payload.type === "run") {
       const runId = Number(payload.runId) || 0;
       try {
+        if (payload.useRust && !rustWorker && !_rustWorkerFailed) {
+          await ensureRustWorker();
+        }
         runOptimizationV3(payload, runId);
       } catch (error) {
         self.postMessage({

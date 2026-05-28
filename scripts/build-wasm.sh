@@ -14,9 +14,13 @@ wasm-pack build "$RUST_DIR" --target nodejs --out-dir pkg-node --release
 echo "[build-wasm] Building web target..."
 wasm-pack build "$RUST_DIR" --target web --out-dir pkg-web --release
 
+echo "[build-wasm] Building no-modules target (classic worker)..."
+wasm-pack build "$RUST_DIR" --target no-modules --out-dir pkg-no-modules --release
+
 # wasm-pack writes a .gitignore that excludes *.wasm — remove it so the
 # built artifacts are tracked by git as required by AGENTS.md.
 rm -f "$RUST_DIR/pkg-node/.gitignore"
 rm -f "$RUST_DIR/pkg-web/.gitignore"
+rm -f "$RUST_DIR/pkg-no-modules/.gitignore"
 
-echo "[build-wasm] Done. Artifacts in rust/pkg-node/ and rust/pkg-web/"
+echo "[build-wasm] Done. Artifacts in rust/pkg-node/, rust/pkg-web/, and rust/pkg-no-modules/"

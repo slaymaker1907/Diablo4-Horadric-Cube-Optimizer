@@ -737,7 +737,7 @@ fn get_residual_affix_signature_v3(affix_id: &str, env: &TranslationEnv) -> Stri
 }
 
 /// Get the residual token for an affix entry.
-fn get_residual_affix_token_v3(entry: &AffixEntry, context: &ResidualContext, env: &TranslationEnv) -> String {
+pub fn get_residual_affix_token_v3(entry: &AffixEntry, context: &ResidualContext, env: &TranslationEnv) -> String {
     if entry.affix_id.is_empty() {
         return String::new();
     }
@@ -997,7 +997,7 @@ pub fn build_residual_reachable_graph_v3(
 // ── LAO* solver ───────────────────────────────────────────────────────────────
 
 /// Mirrors JS `getResolvedActionSuccessV3`.
-fn get_resolved_action_success_v3(
+pub fn get_resolved_action_success_v3(
     entry: &ActionEntry,
     state_index: usize,
     values: &[f64],
@@ -1023,7 +1023,7 @@ fn get_resolved_action_success_v3(
 }
 
 /// Mirrors JS `getResolvedActionWeightedCostV3`.
-fn get_resolved_action_weighted_cost_v3(
+pub fn get_resolved_action_weighted_cost_v3(
     entry: &ActionEntry,
     state_index: usize,
     optimal_success: f64,
@@ -1075,7 +1075,7 @@ fn select_best_phase1_action_index_v3(
 }
 
 /// Mirrors JS `buildResidualPhase2EligibleActionsV3`.
-fn build_phase2_eligible_actions_v3(
+pub fn build_phase2_eligible_actions_v3(
     graph: &ResidualGraph,
     phase1_values: &[f64],
     epsilon: f64,
@@ -1286,6 +1286,65 @@ pub fn solve_residual_lao_star_v3(graph: &ResidualGraph) -> ResidualSolution {
         phase1: Some(phase1),
         phase2: Some(phase2),
     }
+}
+
+// ── Policy extraction (for MC fast-path) ──────────────────────────────────────
+
+/// For each non-terminal node, return the index into `node.action_entries`
+/// that the LAO* solver selected (matches the same tie-break rule used by
+/// `solve_residual_lao_phase2_v3` and `build_residual_result_from_solution`).
+///
+/// Returns `None` for terminal nodes, dead nodes, and nodes with no feasible
+/// action. This is used to build a state→action policy table that MC rollouts
+/// can consult in O(1) instead of recomputing the optimizer from scratch.
+pub fn extract_residual_policy_indices(
+    graph: &ResidualGraph,
+    phase1: &Phase1Result,
+    phase2: &Phase2Result,
+) -> Vec<Option<usize>> {
+    let n = graph.nodes.len();
+    let mut policy: Vec<Option<usize>> = vec![None; n];
+    let eligible = build_phase2_eligible_actions_v3(graph, &phase1.values, RESIDUAL_EPSILON);
+
+    for index in 0..n {
+        let node = &graph.nodes[index];
+        if node.success || !node.dead_reason.is_empty() {
+            continue;
+        }
+        let optimal_success = phase1.values[index];
+        if optimal_success <= RESIDUAL_EPSILON {
+            continue;
+        }
+
+        let indices = match &eligible[index] {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+
+        let mut best_cost = f64::INFINITY;
+        let mut best_key = String::new();
+        let mut best_idx: Option<usize> = None;
+        for &action_idx in indices {
+            let entry = &node.action_entries[action_idx];
+            let candidate = get_resolved_action_weighted_cost_v3(
+                entry,
+                index,
+                optimal_success,
+                &phase2.costs,
+            );
+            let key = action_key(&entry.action);
+            if candidate < best_cost - RESIDUAL_ACTION_EPSILON
+                || (f64::abs(candidate - best_cost) <= RESIDUAL_ACTION_EPSILON
+                    && (best_idx.is_none() || key < best_key))
+            {
+                best_cost = candidate;
+                best_key = key;
+                best_idx = Some(action_idx);
+            }
+        }
+        policy[index] = best_idx;
+    }
+    policy
 }
 
 // ── Result builder ────────────────────────────────────────────────────────────

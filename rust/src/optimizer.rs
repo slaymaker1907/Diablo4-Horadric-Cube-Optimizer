@@ -60,7 +60,7 @@ pub fn now_ms_pub() -> u64 {
 
 // ── Residual env overrides ────────────────────────────────────────────────────
 
-fn get_residual_env_overrides(time_ms: Option<f64>) -> (usize, usize) {
+pub fn get_residual_env_overrides(time_ms: Option<f64>) -> (usize, usize) {
     match time_ms {
         None => (RESIDUAL_STATE_LIMIT, RESIDUAL_MAX_ITERATIONS),
         Some(t) if !t.is_finite() => (RESIDUAL_STATE_LIMIT, RESIDUAL_MAX_ITERATIONS),

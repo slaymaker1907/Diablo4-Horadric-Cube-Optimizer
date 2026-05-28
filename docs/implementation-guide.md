@@ -20,7 +20,7 @@
 - [d4cubeoptim-worker.js](../d4cubeoptim-worker.js): shared action generation, outcome distributions, strict-mode handling, one-step GA risk, and legality-aware category pools.
 - [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js): exact SSP helper semantics still reused by the v3 residual environment, especially GA accounting and state normalization.
 - [gear-slot-legality.js](../gear-slot-legality.js): machine-readable legality table.
-- [gear_to_affix.md](../gear_to_affix.md): human-readable legality source and explanation.
+- [docs/verified-affixes.md](verified-affixes.md): authoritative human-readable legality source. Unverified legacy entries are in [docs/maybe-affixes.md](maybe-affixes.md).
 - [CHANGES.md](../CHANGES.md) plus [v2-improvement-notes](../v2-improvement-notes/): implementation history, requirement mapping, decisions, open issues, and next steps.
 
 ## High-Value Gotchas
@@ -31,7 +31,7 @@
 - Concrete gear slots are required for meaningful residual benchmarking. `Any` preserves a broader pool and can hide slot-specific behavior.
 - Imported browser worker scripts share one global scope under `importScripts(...)`. Avoid top-level binding name collisions across [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js), [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js), and [d4cubeoptim-worker.js](../d4cubeoptim-worker.js).
 - Some older markdown still describes the ILP layer more narrowly than the live code. When in doubt, trust [ilp.js](../ilp.js) and [ilp.test.js](../ilp.test.js).
-- Slot-legality changes are cross-cutting: update [gear-slot-legality.js](../gear-slot-legality.js), [gear_to_affix.md](../gear_to_affix.md), the shared worker in [d4cubeoptim-worker.js](../d4cubeoptim-worker.js), the v3 worker in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js), and the UI in [d4cubeoptimv3.html](../d4cubeoptimv3.html).
+- Slot-legality changes are cross-cutting: update [gear-slot-legality.js](../gear-slot-legality.js) and [docs/verified-affixes.md](verified-affixes.md). The UI and workers read the table dynamically, so no further changes are required for legality-only additions.
 
 ## Validation Workflow
 

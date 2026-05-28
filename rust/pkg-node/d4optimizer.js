@@ -22,6 +22,38 @@ function action_key(action_json) {
 exports.action_key = action_key;
 
 /**
+ * F4–F7 feasibility check. Returns JSON `{ok, check, message, details}`.
+ * Mirrors JS `analyzeFeasibilityV3`.
+ *
+ * `env_handle` must reference an env built with `build_env` using the same
+ * data/gaConfig/target combination (typically the same call).
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {string} ga_config_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+function analyze_feasibility(state_json, target_json, ga_config_json, env_handle) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.analyze_feasibility(ptr0, len0, ptr1, len1, ptr2, len2, env_handle);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+exports.analyze_feasibility = analyze_feasibility;
+
+/**
  * Returns true if the state has lost a required GA. Matches JS `breaksRequiredGA`.
  * @param {string} state_json
  * @param {number} env_handle
@@ -36,11 +68,39 @@ function breaks_required_ga(state_json, env_handle) {
 exports.breaks_required_ga = breaks_required_ga;
 
 /**
+ * Full decomposition plan input for a (state, target) pair.
+ * Returns JSON DecompositionPlanInput (ok, reason, feasibility, maxAffixSlots,
+ * targets, options, residualTargets).
+ * Mirrors JS `buildDecompositionPlanInputV3`.
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {string} ga_config_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+function build_decomposition_plan_input(state_json, target_json, ga_config_json, env_handle) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.build_decomposition_plan_input(ptr0, len0, ptr1, len1, ptr2, len2, env_handle);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+exports.build_decomposition_plan_input = build_decomposition_plan_input;
+
+/**
  * Build the translation environment from the affix catalog, GA config, and
  * target. Returns an opaque handle; pass it to the other functions.
- *
- * Mirrors the relevant subset of JS `buildEnv` (d4cubeoptimv3-worker.js:364):
- * affix token IDs, gear-slot IDs, class IDs, gaRequiredCounts, targetCounts.
  * @param {string} data_json
  * @param {string} ga_config_json
  * @param {string} target_json
@@ -86,6 +146,41 @@ function free_env(handle) {
 exports.free_env = free_env;
 
 /**
+ * Closed-form plan candidates for one (state, targetEntry, slotIndex).
+ * Returns JSON array of ClosedFormCandidate objects.
+ * Mirrors JS `getClosedFormPlanCandidatesV3`.
+ *
+ * `options_json` fields (all optional):
+ *   maxAffixSlots, allowDiscretionaryEnchant, touchOnlyImprovement,
+ *   protectedAffixIds, target, gaConfig
+ * @param {string} state_json
+ * @param {string} target_entry_json
+ * @param {number} slot_index
+ * @param {number} env_handle
+ * @param {string} options_json
+ * @returns {string}
+ */
+function get_closed_form_plan_candidates(state_json, target_entry_json, slot_index, env_handle, options_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_entry_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.get_closed_form_plan_candidates(ptr0, len0, ptr1, len1, slot_index, env_handle, ptr2, len2);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+exports.get_closed_form_plan_candidates = get_closed_form_plan_candidates;
+
+/**
  * Returns JSON `{terminal: bool, success: bool}`. Matches JS `isTerminal`.
  * @param {string} state_json
  * @param {string} target_json
@@ -111,8 +206,7 @@ function is_terminal(state_json, target_json, env_handle) {
 exports.is_terminal = is_terminal;
 
 /**
- * Canonical string key for a state. Matches JS `stateKey` exactly, including
- * the `"any"` (lowercase) default for gearSlot.
+ * Canonical string key for a state. Matches JS `stateKey` exactly.
  * @param {string} state_json
  * @returns {string}
  */
@@ -133,8 +227,7 @@ function state_key(state_json) {
 exports.state_key = state_key;
 
 /**
- * Packed 57-bit state key as a u64. Uses the translation env to map affix
- * string IDs to compact token integers. Intended for Phase 3 LAO* graph.
+ * Packed 57-bit state key as a u64.
  * @param {string} state_json
  * @param {number} env_handle
  * @returns {bigint}

@@ -65,12 +65,7 @@ mod tests {
             .iter()
             .map(|id| AffixData {
                 id: id.to_string(),
-                categories: vec![],
-                family: None,
-                roll_weight: 1.0,
-                family_roll_weight: 0.0,
-                class: None,
-                gear_slots: None,
+                ..AffixData::default()
             })
             .collect();
 
@@ -82,18 +77,18 @@ mod tests {
         let target = JsTarget {
             affixes: target_affixes
                 .iter()
-                .map(|id| TargetAffixEntry { affix_id: id.to_string() })
+                .map(|id| TargetAffixEntry { affix_id: id.to_string(), ..TargetAffixEntry::default() })
                 .collect(),
+            ..JsTarget::default()
         };
 
         let data = JsEnvData {
             affixes,
             categories: HashMap::new(),
-            gear_slots: None,
-            classes: None,
+            ..JsEnvData::default()
         };
 
-        let ga_config = JsGaConfig { current_ga_affixes };
+        let ga_config = JsGaConfig { current_ga_affixes, ..JsGaConfig::default() };
 
         build_env(data, ga_config, target)
     }
@@ -112,6 +107,7 @@ mod tests {
                 })
                 .collect(),
             unsatisfactory_affix_ids: vec![],
+            max_affix_slots: None,
         }
     }
 
@@ -143,9 +139,10 @@ mod tests {
         let state = make_state(&[("max-life", false, false), ("attack-speed", false, false)]);
         let target = JsTarget {
             affixes: vec![
-                TargetAffixEntry { affix_id: "max-life".to_string() },
-                TargetAffixEntry { affix_id: "attack-speed".to_string() },
+                TargetAffixEntry { affix_id: "max-life".to_string(), ..TargetAffixEntry::default() },
+                TargetAffixEntry { affix_id: "attack-speed".to_string(), ..TargetAffixEntry::default() },
             ],
+            ..JsTarget::default()
         };
         let r = is_terminal(&state, &target, &env);
         assert!(r.terminal && r.success);
@@ -157,9 +154,10 @@ mod tests {
         let state = make_state(&[("max-life", false, false)]);
         let target = JsTarget {
             affixes: vec![
-                TargetAffixEntry { affix_id: "max-life".to_string() },
-                TargetAffixEntry { affix_id: "attack-speed".to_string() },
+                TargetAffixEntry { affix_id: "max-life".to_string(), ..TargetAffixEntry::default() },
+                TargetAffixEntry { affix_id: "attack-speed".to_string(), ..TargetAffixEntry::default() },
             ],
+            ..JsTarget::default()
         };
         let r = is_terminal(&state, &target, &env);
         assert!(!r.terminal && !r.success);
@@ -171,7 +169,8 @@ mod tests {
         // max-life is not GA — required GA is broken
         let state = make_state(&[("max-life", false, false)]);
         let target = JsTarget {
-            affixes: vec![TargetAffixEntry { affix_id: "max-life".to_string() }],
+            affixes: vec![TargetAffixEntry { affix_id: "max-life".to_string(), ..TargetAffixEntry::default() }],
+            ..JsTarget::default()
         };
         let r = is_terminal(&state, &target, &env);
         assert!(r.terminal && !r.success);

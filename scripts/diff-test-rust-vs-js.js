@@ -273,10 +273,250 @@ function runPhase1(jsWorker, rustMod) {
   return fail;
 }
 
+// ── Phase 2: feasibility + closed-form differential tests ────────────────────
+
+function runPhase2(jsWorker, rustMod) {
+  console.log("Phase 2: feasibility + closed-form differential tests");
+  let pass = 0;
+  let fail = 0;
+
+  function check(label, jsVal, rustVal) {
+    try {
+      assert.deepEqual(jsVal, rustVal, `${label}: mismatch`);
+      console.log(`  PASS: ${label}`);
+      pass++;
+    } catch (e) {
+      console.error(`  FAIL: ${label}`);
+      console.error(`        JS:   ${JSON.stringify(jsVal)}`);
+      console.error(`        Rust: ${JSON.stringify(rustVal)}`);
+      fail++;
+    }
+  }
+
+  // Shared env for Phase 2 tests
+  const env2Handle = rustMod.build_env(
+    JSON.stringify(CATALOG_DATA),
+    JSON.stringify(EMPTY_GA_CONFIG),
+    JSON.stringify({ affixes: [{ affixId: "maximum-life" }, { affixId: "attack-speed" }] })
+  );
+
+  // ── analyzeFeasibilityV3 ─────────────────────────────────────────────────
+
+  const feasTests = [
+    {
+      label: "feasibility: success — simple two-target",
+      state: makeState("Any", "Any", []),
+      target: { affixes: [{ affixId: "maximum-life" }, { affixId: "attack-speed" }] },
+      gaConfig: {},
+    },
+    {
+      label: "feasibility: F6 — duplicate required affix",
+      state: makeState("Any", "Any", []),
+      target: { affixes: [{ affixId: "maximum-life" }, { affixId: "maximum-life" }] },
+      gaConfig: {},
+    },
+    {
+      label: "feasibility: F6 — same-family conflict",
+      state: makeState("Any", "Any", []),
+      target: {
+        affixes: [
+          { affixId: "elemental-damage-fire" },
+          { affixId: "elemental-damage-cold" },
+        ],
+      },
+      gaConfig: {},
+    },
+    {
+      label: "feasibility: F7 — target affix also forbidden",
+      state: makeState("Any", "Any", []),
+      target: {
+        affixes: [{ affixId: "maximum-life" }],
+        forbiddenAffixIds: ["maximum-life"],
+      },
+      gaConfig: {},
+    },
+    {
+      label: "feasibility: success — GA config with strictMode",
+      state: makeState("Any", "Any", []),
+      target: { affixes: [{ affixId: "maximum-life" }] },
+      gaConfig: { currentGAAffixes: ["maximum-life"], strictMode: true },
+    },
+  ];
+
+  for (const tc of feasTests) {
+    const jsEnvFeas = jsWorker.buildEnv(
+      CATALOG_DATA,
+      tc.gaConfig || {},
+      tc.target || {}
+    );
+    const jsVal = jsWorker.analyzeFeasibilityV3(
+      tc.state, tc.target, CATALOG_DATA, tc.gaConfig
+    );
+
+    const rustEnvFeas = rustMod.build_env(
+      JSON.stringify(CATALOG_DATA),
+      JSON.stringify(tc.gaConfig || {}),
+      JSON.stringify(tc.target || {})
+    );
+    const rustVal = JSON.parse(rustMod.analyze_feasibility(
+      JSON.stringify(tc.state),
+      JSON.stringify(tc.target || {}),
+      JSON.stringify(tc.gaConfig || {}),
+      rustEnvFeas,
+    ));
+    rustMod.free_env(rustEnvFeas);
+
+    // Compare ok, check, message fields (details may differ in key ordering)
+    check(tc.label + " [ok]", jsVal.ok, rustVal.ok);
+    check(tc.label + " [check]", jsVal.check, rustVal.check);
+    // message intentionally skipped: JS uses affixName() which may return 'undefined'
+    // for test catalog affixes that lack a 'name' field; Rust uses the ID directly.
+  }
+
+  // ── getClosedFormPlanCandidatesV3 ────────────────────────────────────────
+
+  const cfTests = [
+    {
+      label: "closedForm: Case A — empty slot, simple category",
+      state: makeState("Any", "Any", []),
+      targetEntry: { affixId: "maximum-life" },
+      slotIndex: 0,
+      options: { maxAffixSlots: 4 },
+    },
+    {
+      label: "closedForm: Case A — no candidates (denominator=0, all 5 agg affixes present)",
+      // Pool of "Aggressive" has 5 affixes; state already has all 5 → n=0
+      state: makeState("Any", "Any", [
+        makeAffix("maximum-life"),
+        makeAffix("attack-speed"),
+        makeAffix("critical-strike-chance"),
+        makeAffix("elemental-damage-fire"),
+        makeAffix("elemental-damage-cold"),
+      ]),
+      targetEntry: { affixId: "maximum-life" },
+      slotIndex: 5,
+      options: { maxAffixSlots: 6 },
+    },
+    {
+      label: "closedForm: Case B — focused reroll, non-matching host",
+      // slot 0 has attack-speed (Aggressive), target is maximum-life (Aggressive) → Case B
+      state: makeState("Any", "Any", [makeAffix("attack-speed")]),
+      targetEntry: { affixId: "maximum-life" },
+      slotIndex: 0,
+      options: { maxAffixSlots: 4 },
+    },
+    {
+      label: "closedForm: no candidates — slot out of range",
+      state: makeState("Any", "Any", []),
+      targetEntry: { affixId: "maximum-life" },
+      slotIndex: 10,
+      options: { maxAffixSlots: 4 },
+    },
+  ];
+
+  for (const tc of cfTests) {
+    const jsEnvCf = jsWorker.buildEnv(CATALOG_DATA, {}, { affixes: [] });
+    const jsVal = jsWorker.getClosedFormPlanCandidatesV3(
+      tc.state, tc.targetEntry, tc.slotIndex, jsEnvCf, tc.options || {}
+    );
+
+    const rustVal = JSON.parse(rustMod.get_closed_form_plan_candidates(
+      JSON.stringify(tc.state),
+      JSON.stringify(tc.targetEntry),
+      tc.slotIndex,
+      env2Handle,
+      JSON.stringify(tc.options || {}),
+    ));
+
+    check(tc.label + " [length]", jsVal.length, rustVal.length);
+    if (jsVal.length === rustVal.length) {
+      for (let i = 0; i < jsVal.length; i++) {
+        check(
+          tc.label + ` [${i}].caseId`,
+          jsVal[i].caseId,
+          rustVal[i].caseId
+        );
+        check(
+          tc.label + ` [${i}].expectedSteps`,
+          jsVal[i].expectedSteps,
+          rustVal[i].expectedSteps
+        );
+        check(
+          tc.label + ` [${i}].prism`,
+          jsVal[i].prism || null,
+          rustVal[i].prism || null
+        );
+        check(
+          tc.label + ` [${i}].denominator`,
+          jsVal[i].denominator || null,
+          rustVal[i].denominator || null
+        );
+      }
+    }
+  }
+
+  // ── buildDecompositionPlanInputV3 ────────────────────────────────────────
+
+  const decompTests = [
+    {
+      label: "decomp: two targets, empty state → two residual or option rows",
+      state: makeState("Any", "Any", []),
+      target: { affixes: [{ affixId: "maximum-life" }, { affixId: "attack-speed" }] },
+      gaConfig: {},
+    },
+    {
+      label: "decomp: single target already satisfied",
+      state: makeState("Any", "Any", [makeAffix("maximum-life")]),
+      target: { affixes: [{ affixId: "maximum-life" }] },
+      gaConfig: {},
+    },
+  ];
+
+  const decompEnv = rustMod.build_env(
+    JSON.stringify(CATALOG_DATA),
+    JSON.stringify(EMPTY_GA_CONFIG),
+    JSON.stringify({ affixes: [{ affixId: "maximum-life" }, { affixId: "attack-speed" }] })
+  );
+
+  for (const tc of decompTests) {
+    const jsEnvDecomp = jsWorker.buildEnv(CATALOG_DATA, tc.gaConfig || {}, tc.target || {});
+    const jsVal = jsWorker.buildDecompositionPlanInputV3(
+      tc.state, tc.target, CATALOG_DATA, tc.gaConfig
+    );
+    const rustRaw = JSON.parse(rustMod.build_decomposition_plan_input(
+      JSON.stringify(tc.state),
+      JSON.stringify(tc.target),
+      JSON.stringify(tc.gaConfig || {}),
+      decompEnv,
+    ));
+
+    check(tc.label + " [ok]", jsVal.ok, rustRaw.ok);
+    check(tc.label + " [targets.length]", jsVal.targets.length, rustRaw.targets.length);
+    check(
+      tc.label + " [residualTargets.length]",
+      jsVal.residualTargets.length,
+      rustRaw.residualTargets.length
+    );
+    // Check each target row option count matches
+    for (let i = 0; i < Math.min(jsVal.targets.length, rustRaw.targets.length); i++) {
+      check(
+        tc.label + ` [targets[${i}].options.length]`,
+        jsVal.targets[i].options.length,
+        rustRaw.targets[i].options.length
+      );
+    }
+  }
+
+  rustMod.free_env(decompEnv);
+  rustMod.free_env(env2Handle);
+
+  console.log(`Phase 2: ${pass} passed, ${fail} failed\n`);
+  return fail;
+}
+
 // ── Phase 2+: additional differential cases (added incrementally) ─────────────
 
 function runPhase2Plus() {
-  console.log("Phase 2+: no cases registered yet (added in Phase 2).");
   return 0;
 }
 
@@ -301,7 +541,8 @@ let totalFail = 0;
 
 if (onlyPhase === null || onlyPhase === 0) runPhase0(rustMod);
 if (onlyPhase === null || onlyPhase === 1) totalFail += runPhase1(jsWorker, rustMod);
-if (onlyPhase === null || onlyPhase >= 2)  totalFail += runPhase2Plus();
+if (onlyPhase === null || onlyPhase === 2) totalFail += runPhase2(jsWorker, rustMod);
+if (onlyPhase === null || onlyPhase >= 3)  totalFail += runPhase2Plus();
 
 if (totalFail > 0) {
   console.error(`${totalFail} test(s) failed.`);

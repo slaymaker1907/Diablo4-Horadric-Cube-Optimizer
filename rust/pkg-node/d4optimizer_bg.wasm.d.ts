@@ -2,9 +2,12 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const action_key: (a: number, b: number) => [number, number];
+export const analyze_feasibility: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const breaks_required_ga: (a: number, b: number, c: number) => number;
+export const build_decomposition_plan_input: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const build_env: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
 export const d4optimizer_version: () => [number, number];
+export const get_closed_form_plan_candidates: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const is_terminal: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const state_key: (a: number, b: number) => [number, number];
 export const state_key_u64: (a: number, b: number, c: number) => bigint;

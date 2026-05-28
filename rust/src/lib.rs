@@ -1,4 +1,7 @@
+mod closed_form;
+mod decomposition;
 mod env;
+mod feasibility;
 mod keys;
 mod terminal;
 mod types;
@@ -17,9 +20,6 @@ pub fn d4optimizer_version() -> String {
 
 /// Build the translation environment from the affix catalog, GA config, and
 /// target. Returns an opaque handle; pass it to the other functions.
-///
-/// Mirrors the relevant subset of JS `buildEnv` (d4cubeoptimv3-worker.js:364):
-/// affix token IDs, gear-slot IDs, class IDs, gaRequiredCounts, targetCounts.
 #[wasm_bindgen]
 pub fn build_env(data_json: &str, ga_config_json: &str, target_json: &str) -> u32 {
     let data: types::JsEnvData =
@@ -44,8 +44,7 @@ pub fn free_env(handle: u32) {
 
 // ── State / action keys ───────────────────────────────────────────────────────
 
-/// Canonical string key for a state. Matches JS `stateKey` exactly, including
-/// the `"any"` (lowercase) default for gearSlot.
+/// Canonical string key for a state. Matches JS `stateKey` exactly.
 #[wasm_bindgen]
 pub fn state_key(state_json: &str) -> String {
     let state: types::JsState =
@@ -61,8 +60,7 @@ pub fn action_key(action_json: &str) -> String {
     keys::action_key(&action)
 }
 
-/// Packed 57-bit state key as a u64. Uses the translation env to map affix
-/// string IDs to compact token integers. Intended for Phase 3 LAO* graph.
+/// Packed 57-bit state key as a u64.
 #[wasm_bindgen]
 pub fn state_key_u64(state_json: &str, env_handle: u32) -> u64 {
     let state: types::JsState =
@@ -94,6 +92,114 @@ pub fn breaks_required_ga(state_json: &str, env_handle: u32) -> bool {
         serde_json::from_str(state_json).expect("breaks_required_ga: invalid state JSON");
     env::with_env(env_handle, |e| terminal::breaks_required_ga(&state, e))
         .expect("breaks_required_ga: invalid env handle")
+}
+
+// ── Phase 2: feasibility + closed-form ───────────────────────────────────────
+
+/// F4–F7 feasibility check. Returns JSON `{ok, check, message, details}`.
+/// Mirrors JS `analyzeFeasibilityV3`.
+///
+/// `env_handle` must reference an env built with `build_env` using the same
+/// data/gaConfig/target combination (typically the same call).
+#[wasm_bindgen]
+pub fn analyze_feasibility(
+    state_json: &str,
+    target_json: &str,
+    ga_config_json: &str,
+    env_handle: u32,
+) -> String {
+    let state: types::JsState =
+        serde_json::from_str(state_json).expect("analyze_feasibility: invalid state JSON");
+    let target: types::JsTarget =
+        serde_json::from_str(target_json).expect("analyze_feasibility: invalid target JSON");
+    let ga_config: types::JsGaConfig =
+        if ga_config_json.is_empty() || ga_config_json == "null" {
+            types::JsGaConfig::default()
+        } else {
+            serde_json::from_str(ga_config_json)
+                .expect("analyze_feasibility: invalid gaConfig JSON")
+        };
+    let result = env::with_env(env_handle, |e| {
+        feasibility::analyze_feasibility(&state, &target, &ga_config, e)
+    })
+    .expect("analyze_feasibility: invalid env handle");
+    serde_json::to_string(&result).expect("analyze_feasibility: serialization failed")
+}
+
+/// Closed-form plan candidates for one (state, targetEntry, slotIndex).
+/// Returns JSON array of ClosedFormCandidate objects.
+/// Mirrors JS `getClosedFormPlanCandidatesV3`.
+///
+/// `options_json` fields (all optional):
+///   maxAffixSlots, allowDiscretionaryEnchant, touchOnlyImprovement,
+///   protectedAffixIds, target, gaConfig
+#[wasm_bindgen]
+pub fn get_closed_form_plan_candidates(
+    state_json: &str,
+    target_entry_json: &str,
+    slot_index: u32,
+    env_handle: u32,
+    options_json: &str,
+) -> String {
+    let state: types::JsState =
+        serde_json::from_str(state_json)
+            .expect("get_closed_form_plan_candidates: invalid state JSON");
+    let target_entry: types::TargetAffixEntry =
+        serde_json::from_str(target_entry_json)
+            .expect("get_closed_form_plan_candidates: invalid targetEntry JSON");
+    let options: types::ClosedFormOptions =
+        if options_json.is_empty() || options_json == "null" || options_json == "{}" {
+            types::ClosedFormOptions::default()
+        } else {
+            serde_json::from_str(options_json)
+                .expect("get_closed_form_plan_candidates: invalid options JSON")
+        };
+    let target_for_risk = options.target.as_ref();
+    let result = env::with_env(env_handle, |e| {
+        closed_form::get_closed_form_plan_candidates(
+            &state,
+            &target_entry,
+            slot_index as usize,
+            e,
+            &options,
+            target_for_risk,
+        )
+    })
+    .expect("get_closed_form_plan_candidates: invalid env handle");
+    serde_json::to_string(&result)
+        .expect("get_closed_form_plan_candidates: serialization failed")
+}
+
+/// Full decomposition plan input for a (state, target) pair.
+/// Returns JSON DecompositionPlanInput (ok, reason, feasibility, maxAffixSlots,
+/// targets, options, residualTargets).
+/// Mirrors JS `buildDecompositionPlanInputV3`.
+#[wasm_bindgen]
+pub fn build_decomposition_plan_input(
+    state_json: &str,
+    target_json: &str,
+    ga_config_json: &str,
+    env_handle: u32,
+) -> String {
+    let state: types::JsState =
+        serde_json::from_str(state_json)
+            .expect("build_decomposition_plan_input: invalid state JSON");
+    let target: types::JsTarget =
+        serde_json::from_str(target_json)
+            .expect("build_decomposition_plan_input: invalid target JSON");
+    let ga_config: types::JsGaConfig =
+        if ga_config_json.is_empty() || ga_config_json == "null" {
+            types::JsGaConfig::default()
+        } else {
+            serde_json::from_str(ga_config_json)
+                .expect("build_decomposition_plan_input: invalid gaConfig JSON")
+        };
+    let result = env::with_env(env_handle, |e| {
+        decomposition::build_decomposition_plan_input(&state, &target, &ga_config, e, None)
+    })
+    .expect("build_decomposition_plan_input: invalid env handle");
+    serde_json::to_string(&result)
+        .expect("build_decomposition_plan_input: serialization failed")
 }
 
 #[cfg(test)]

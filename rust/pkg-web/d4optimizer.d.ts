@@ -7,16 +7,30 @@
 export function action_key(action_json: string): string;
 
 /**
+ * F4–F7 feasibility check. Returns JSON `{ok, check, message, details}`.
+ * Mirrors JS `analyzeFeasibilityV3`.
+ *
+ * `env_handle` must reference an env built with `build_env` using the same
+ * data/gaConfig/target combination (typically the same call).
+ */
+export function analyze_feasibility(state_json: string, target_json: string, ga_config_json: string, env_handle: number): string;
+
+/**
  * Returns true if the state has lost a required GA. Matches JS `breaksRequiredGA`.
  */
 export function breaks_required_ga(state_json: string, env_handle: number): boolean;
 
 /**
+ * Full decomposition plan input for a (state, target) pair.
+ * Returns JSON DecompositionPlanInput (ok, reason, feasibility, maxAffixSlots,
+ * targets, options, residualTargets).
+ * Mirrors JS `buildDecompositionPlanInputV3`.
+ */
+export function build_decomposition_plan_input(state_json: string, target_json: string, ga_config_json: string, env_handle: number): string;
+
+/**
  * Build the translation environment from the affix catalog, GA config, and
  * target. Returns an opaque handle; pass it to the other functions.
- *
- * Mirrors the relevant subset of JS `buildEnv` (d4cubeoptimv3-worker.js:364):
- * affix token IDs, gear-slot IDs, class IDs, gaRequiredCounts, targetCounts.
  */
 export function build_env(data_json: string, ga_config_json: string, target_json: string): number;
 
@@ -31,19 +45,28 @@ export function d4optimizer_version(): string;
 export function free_env(handle: number): void;
 
 /**
+ * Closed-form plan candidates for one (state, targetEntry, slotIndex).
+ * Returns JSON array of ClosedFormCandidate objects.
+ * Mirrors JS `getClosedFormPlanCandidatesV3`.
+ *
+ * `options_json` fields (all optional):
+ *   maxAffixSlots, allowDiscretionaryEnchant, touchOnlyImprovement,
+ *   protectedAffixIds, target, gaConfig
+ */
+export function get_closed_form_plan_candidates(state_json: string, target_entry_json: string, slot_index: number, env_handle: number, options_json: string): string;
+
+/**
  * Returns JSON `{terminal: bool, success: bool}`. Matches JS `isTerminal`.
  */
 export function is_terminal(state_json: string, target_json: string, env_handle: number): string;
 
 /**
- * Canonical string key for a state. Matches JS `stateKey` exactly, including
- * the `"any"` (lowercase) default for gearSlot.
+ * Canonical string key for a state. Matches JS `stateKey` exactly.
  */
 export function state_key(state_json: string): string;
 
 /**
- * Packed 57-bit state key as a u64. Uses the translation env to map affix
- * string IDs to compact token integers. Intended for Phase 3 LAO* graph.
+ * Packed 57-bit state key as a u64.
  */
 export function state_key_u64(state_json: string, env_handle: number): bigint;
 
@@ -52,9 +75,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly action_key: (a: number, b: number) => [number, number];
+    readonly analyze_feasibility: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly breaks_required_ga: (a: number, b: number, c: number) => number;
+    readonly build_decomposition_plan_input: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly build_env: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly d4optimizer_version: () => [number, number];
+    readonly get_closed_form_plan_candidates: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly is_terminal: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly state_key: (a: number, b: number) => [number, number];
     readonly state_key_u64: (a: number, b: number, c: number) => bigint;

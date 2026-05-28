@@ -18,13 +18,49 @@ pub struct TranslationEnv {
     pub class_to_id: HashMap<String, u8>,
     pub id_to_class: Vec<String>,
 
-    // Affix metadata (needed for stateKeyV2 / residual in Phase 3)
+    // Affix metadata (Phase 1: token mapping)
     pub affix_categories: HashMap<String, Vec<String>>,
     pub affix_family: HashMap<String, String>,
 
     // Pre-computed from target + gaConfig
     pub ga_required_counts: HashMap<String, u32>,
     pub target_counts: HashMap<String, u32>,
+
+    // ── Phase 2: full affix catalog + category lookup tables ─────────────────
+
+    /// Full affix data by ID (includes gear_slots, class, operation_categories, etc.)
+    pub affix_map: HashMap<String, AffixData>,
+
+    /// Base category → affix IDs (for "Any" gear slot, "Any" class).
+    pub category_affix_ids: HashMap<String, Vec<String>>,
+
+    /// slot → category → affix IDs (filtered to legal gear slot).
+    pub category_affix_ids_by_slot: HashMap<String, HashMap<String, Vec<String>>>,
+
+    /// slot → class → category → affix IDs (filtered to slot AND class).
+    pub category_affix_ids_by_slot_by_class:
+        HashMap<String, HashMap<String, HashMap<String, Vec<String>>>>,
+
+    /// Ordered list of known gear slots (first element = "Any").
+    pub gear_slots: Vec<String>,
+
+    /// Ordered list of known classes (first element = "Any").
+    pub classes: Vec<String>,
+
+    /// Ordered category names from the catalog.
+    pub category_names: Vec<String>,
+
+    /// strictMode from gaConfig.
+    pub strict_mode: bool,
+
+    /// Source GA counts per affix (from gaConfig.currentGAAffixes).
+    pub source_ga_counts: HashMap<String, u32>,
+
+    /// For each family, the first target affix from that family (JS: wantedByFamily).
+    pub wanted_by_family: HashMap<String, String>,
+
+    /// maxAffixSlots from the data payload (if provided).
+    pub max_affix_slots_from_data: Option<u32>,
 }
 
 thread_local! {
@@ -34,7 +70,6 @@ thread_local! {
 pub fn store_env(env: TranslationEnv) -> u32 {
     ENV_ARENA.with(|arena| {
         let mut arena = arena.borrow_mut();
-        // Reuse freed slots before growing.
         if let Some(idx) = arena.iter().position(|e| e.is_none()) {
             arena[idx] = Some(env);
             return idx as u32;
@@ -68,15 +103,56 @@ where
 
 // ── Construction ─────────────────────────────────────────────────────────────
 
-const DEFAULT_GEAR_SLOT: &str = "Any";
-const DEFAULT_CLASS: &str = "Any";
+pub const DEFAULT_GEAR_SLOT: &str = "Any";
+pub const DEFAULT_CLASS: &str = "Any";
+const DEFAULT_MAX_AFFIX_SLOTS: u32 = 4;
+
+/// True if `affix` can appear on `gear_slot`.
+pub fn affix_supports_gear_slot(affix: &AffixData, gear_slot: &str) -> bool {
+    if gear_slot.is_empty() || gear_slot == DEFAULT_GEAR_SLOT {
+        return true;
+    }
+    match &affix.gear_slots {
+        None => true,
+        Some(slots) if slots.is_empty() => true,
+        Some(slots) => slots.iter().any(|s| s == DEFAULT_GEAR_SLOT || s == gear_slot),
+    }
+}
+
+/// True if `affix` can appear for the given character class.
+pub fn affix_supports_class(affix: &AffixData, class_name: &str) -> bool {
+    if class_name.is_empty() || class_name == DEFAULT_CLASS {
+        return true;
+    }
+    match &affix.class {
+        None => true,
+        Some(c) if c.is_empty() || c == DEFAULT_CLASS => true,
+        Some(c) => c == class_name,
+    }
+}
+
+/// Returns the effective max affix slots for a state + data combo.
+pub fn get_max_affix_slots(state: &crate::types::JsState, env: &TranslationEnv) -> usize {
+    if let Some(v) = env.max_affix_slots_from_data {
+        if v > 0 {
+            return v as usize;
+        }
+    }
+    if let Some(v) = state.max_affix_slots {
+        if v > 0 {
+            return v as usize;
+        }
+    }
+    DEFAULT_MAX_AFFIX_SLOTS as usize
+}
 
 pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> TranslationEnv {
-    // ── Affix token mapping ───────────────────────────────────────────────
+    // ── Affix token mapping ───────────────────────────────────────────────────
     let mut affix_id_to_token: HashMap<String, u16> = HashMap::new();
     let mut token_to_affix_id: Vec<String> = vec!["".to_string()]; // 0 = empty
     let mut affix_categories: HashMap<String, Vec<String>> = HashMap::new();
     let mut affix_family: HashMap<String, String> = HashMap::new();
+    let mut affix_map: HashMap<String, AffixData> = HashMap::new();
 
     for affix in &data.affixes {
         if !affix_id_to_token.contains_key(&affix.id) {
@@ -88,19 +164,22 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
             affix_categories.insert(affix.id.clone(), affix.categories.clone());
         }
         if let Some(ref fam) = affix.family {
-            affix_family.insert(affix.id.clone(), fam.clone());
+            if !fam.is_empty() {
+                affix_family.insert(affix.id.clone(), fam.clone());
+            }
         }
+        affix_map.insert(affix.id.clone(), affix.clone());
     }
 
-    // ── Gear slot mapping ─────────────────────────────────────────────────
+    // ── Gear slot mapping ─────────────────────────────────────────────────────
     let mut gear_slot_to_id: HashMap<String, u8> = HashMap::new();
     let mut id_to_gear_slot: Vec<String> = vec![];
 
     let mut gear_slots: Vec<String> = vec![DEFAULT_GEAR_SLOT.to_string()];
-    if let Some(slots) = data.gear_slots {
+    if let Some(slots) = &data.gear_slots {
         for s in slots {
-            if !s.is_empty() && !gear_slots.contains(&s) {
-                gear_slots.push(s);
+            if !s.is_empty() && !gear_slots.contains(s) {
+                gear_slots.push(s.clone());
             }
         }
     }
@@ -109,15 +188,15 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         id_to_gear_slot.push(slot.clone());
     }
 
-    // ── Class mapping ─────────────────────────────────────────────────────
+    // ── Class mapping ─────────────────────────────────────────────────────────
     let mut class_to_id: HashMap<String, u8> = HashMap::new();
     let mut id_to_class: Vec<String> = vec![];
 
     let mut classes: Vec<String> = vec![DEFAULT_CLASS.to_string()];
-    if let Some(cls_list) = data.classes {
+    if let Some(cls_list) = &data.classes {
         for c in cls_list {
-            if !c.is_empty() && !classes.contains(&c) {
-                classes.push(c);
+            if !c.is_empty() && !classes.contains(c) {
+                classes.push(c.clone());
             }
         }
     }
@@ -126,16 +205,92 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         id_to_class.push(cls.clone());
     }
 
-    // ── Target counts ─────────────────────────────────────────────────────
+    // ── Category affix ID lists ───────────────────────────────────────────────
+    let category_names: Vec<String> = data.categories.keys().cloned().collect();
+
+    // Base list (Any slot, Any class): just affix IDs from categories map
+    let mut category_affix_ids: HashMap<String, Vec<String>> = HashMap::new();
+    for (cat_name, id_list) in &data.categories {
+        let valid_ids: Vec<String> = id_list
+            .iter()
+            .filter(|id| affix_map.contains_key(*id))
+            .cloned()
+            .collect();
+        category_affix_ids.insert(cat_name.clone(), valid_ids);
+    }
+
+    // Per-slot: filter by gear slot legality
+    let mut category_affix_ids_by_slot: HashMap<String, HashMap<String, Vec<String>>> =
+        HashMap::new();
+    for slot in &gear_slots {
+        if slot == DEFAULT_GEAR_SLOT {
+            category_affix_ids_by_slot.insert(slot.clone(), category_affix_ids.clone());
+            continue;
+        }
+        let mut slot_map: HashMap<String, Vec<String>> = HashMap::new();
+        for (cat_name, ids) in &category_affix_ids {
+            let filtered: Vec<String> = ids
+                .iter()
+                .filter(|id| {
+                    affix_map
+                        .get(*id)
+                        .map(|a| affix_supports_gear_slot(a, slot))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            slot_map.insert(cat_name.clone(), filtered);
+        }
+        category_affix_ids_by_slot.insert(slot.clone(), slot_map);
+    }
+
+    // Per-slot-per-class: further filter by class
+    let mut category_affix_ids_by_slot_by_class: HashMap<
+        String,
+        HashMap<String, HashMap<String, Vec<String>>>,
+    > = HashMap::new();
+    for slot in &gear_slots {
+        let slot_base = category_affix_ids_by_slot
+            .get(slot)
+            .unwrap_or(&category_affix_ids);
+        let mut class_map: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+        for cls in &classes {
+            if cls == DEFAULT_CLASS {
+                class_map.insert(cls.clone(), slot_base.clone());
+                continue;
+            }
+            let mut cat_map: HashMap<String, Vec<String>> = HashMap::new();
+            for (cat_name, ids) in slot_base {
+                let filtered: Vec<String> = ids
+                    .iter()
+                    .filter(|id| {
+                        affix_map
+                            .get(*id)
+                            .map(|a| affix_supports_class(a, cls))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                cat_map.insert(cat_name.clone(), filtered);
+            }
+            class_map.insert(cls.clone(), cat_map);
+        }
+        category_affix_ids_by_slot_by_class.insert(slot.clone(), class_map);
+    }
+
+    // ── Target counts ─────────────────────────────────────────────────────────
     let mut target_counts: HashMap<String, u32> = HashMap::new();
+    let mut wanted_by_family: HashMap<String, String> = HashMap::new();
     for req in &target.affixes {
         if !req.affix_id.is_empty() {
             *target_counts.entry(req.affix_id.clone()).or_insert(0) += 1;
+            if let Some(fam) = affix_family.get(&req.affix_id) {
+                wanted_by_family.entry(fam.clone()).or_insert_with(|| req.affix_id.clone());
+            }
         }
     }
 
-    // ── GA required counts (mirrors JS buildEnv logic) ────────────────────
-    // For each source GA that is also a target, we require it to be preserved.
+    // ── GA required counts ────────────────────────────────────────────────────
     let mut source_ga_counts: HashMap<String, u32> = HashMap::new();
     for maybe_id in &ga_config.current_ga_affixes {
         if let Some(id) = maybe_id {
@@ -164,5 +319,17 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         affix_family,
         ga_required_counts,
         target_counts,
+        // Phase 2
+        affix_map,
+        category_affix_ids,
+        category_affix_ids_by_slot,
+        category_affix_ids_by_slot_by_class,
+        gear_slots,
+        classes,
+        category_names,
+        strict_mode: ga_config.strict_mode,
+        source_ga_counts,
+        wanted_by_family,
+        max_affix_slots_from_data: data.max_affix_slots,
     }
 }

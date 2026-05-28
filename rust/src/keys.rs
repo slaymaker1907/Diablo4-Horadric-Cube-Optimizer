@@ -138,6 +138,7 @@ mod tests {
                 })
                 .collect(),
             unsatisfactory_affix_ids: vec![],
+            max_affix_slots: None,
         }
     }
 

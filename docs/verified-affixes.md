@@ -1,9 +1,9 @@
 # Affix List
 ## Helm
+- Dexterity
 - Maximum Life
-- Life Regeneration
 - Maximum Resource
-- Vigor Regeneration
+- Resource Regeneration
 - Armor
 - Thorns
 - Lucky Hit Chance
@@ -15,16 +15,17 @@
 - Shadow Resistance
 - Physical Resistance
 - Resource Cost Reduction
-- Resource Generation
 - Cooldown Reduction
 - Impairment Reduction
+- Healing Received
+- Life Regeneration
 
 ## Chest
 - Dexterity
 - Life Regeneration
 - Life on Kill
 - Maximum Resource
-- Vigor Regeneration
+- Resource Regeneration
 - Armor
 - Thorns
 - Resistance to All Elements
@@ -36,22 +37,25 @@
 - Physical Resistance
 - Resource Cost Reduction
 - Impairment Reduction
+- Healing Received
+- Maximum Life
 
 ## Gloves
 - Dexterity
-- Maximum Life
 - Life Regeneration
+- Life On Hit
 - Armor
 - All Damage Multiplier
 - Attack Speed
 - Critical Strike Chance
 - Lucky Hit Chance
-- Damage Over Time Multiplier
-- Critical Strike Damage Multiplier
+- Vulnerable Damage Multiplier
 - Fire Damage Multiplier
+- Cold Damage Multiplier
 - Lightning Damage Multiplier
 - Physical Damage Multiplier
 - Poison Damage Multiplier
+- Shadow Damage Multiplier
 - Barrier Generation
 - Resistance to All Elements
 - Fire Resistance
@@ -63,72 +67,175 @@
 - Resource Cost Reduction
 - Cooldown Reduction
 - Lucky Hit: Up to a 15% Chance to Restore Primary Resource
+- Critical Strike Damage Multiplier
+- Maximum Life
 
 ## Pants
-- Maximum Life
+- Dexterity
 - Life Regeneration
 - Life on Kill
-- Vigor Regeneration
+- Potion Capacity
+- Resource Regeneration
+- Armor
 - Thorns
 - Healing Received
 - Barrier Generation
+- Resistance to All Elements
+- Fire Resistance
+- Cold Resistance
+- Lightning Resistance
+- Poison Resistance
+- Shadow Resistance
+- Physical Resistance
 - Dodge Chance
+- Impairment Reduction
+- Maximum Life
 
 ## Boots
+- Dexterity
+- Maximum Life
 - Life Regeneration
 - Life on Kill
-- Vigor Regeneration
+- Resource Regeneration
 - Armor
 - Healing Received
 - Barrier Generation
+- Resistance to All Elements
+- Fire Resistance
+- Cold Resistance
+- Lightning Resistance
+- Poison Resistance
+- Shadow Resistance
+- Physical Resistance
 - Impairment Reduction
 - Dodge Chance
+- Movement Speed
+- Maximum Evade Charge
+- Attacks Reduce Evade's Cooldown by Seconds
+- Evade Grants Movement Speed for Seconds
 
 ## Weapons
 - Weapon Damage
 - Dexterity
-- Maximum Life
-- Life On Hit
-- Life on Kill
+- Resource on Kill
+- All Damage Multiplier
 - Critical Strike Damage Multiplier
 - Damage Over Time Multiplier
+- Fire Damage Multiplier
+- Cold Damage Multiplier
+- Lightning Damage Multiplier
+- Physical Damage Multiplier
+- Poison Damage Multiplier
+- Shadow Damage Multiplier
 - Resource Cost Reduction
 - Lucky Hit: Up to a 15% Chance to Restore Primary Resource
+- Maximum Life
+- Life on Kill
+- Life on Hit
 
 ## Amulet
-- Maximum Life
+- Dexterity
 - Life Regeneration
 - Life On Hit
-- Vigor On Kill
+- Resource on Kill
 - Armor
 - All Damage Multiplier
 - Attack Speed
+- Critical Strike Chance
 - Lucky Hit Chance
 - Movement Speed
 - Vulnerable Damage Multiplier
 - Damage Over Time Multiplier
 - Critical Strike Damage Multiplier
 - Fire Damage Multiplier
+- Cold Damage Multiplier
 - Lightning Damage Multiplier
 - Physical Damage Multiplier
 - Poison Damage Multiplier
+- Shadow Damage Multiplier
+- Resistance to All Elements
+- Fire Resistance
+- Cold Resistance
+- Lightning Resistance
+- Poison Resistance
+- Shadow Resistance
+- Physical Resistance
 - Resource Cost Reduction
 - Cooldown Reduction
+- Maximum Resource
+- Maximum Life
 
 ## Ring
+- Dexterity
 - Maximum Life
 - Life Regeneration
 - Life On Hit
 - Life on Kill
-- Vigor On Kill
+- Resource on Kill
 - Armor
-- Attack Speed
-- Critical Strike Chance
+- All Damage Multiplier
 - Lucky Hit Chance
 - Critical Strike Damage Multiplier
 - Vulnerable Damage Multiplier
 - Damage Over Time Multiplier
+- Fire Damage Multiplier
+- Cold Damage Multiplier
+- Lightning Damage Multiplier
+- Physical Damage Multiplier
+- Poison Damage Multiplier
+- Shadow Damage Multiplier
+- Resistance to All Elements
+- Fire Resistance
+- Cold Resistance
+- Lightning Resistance
+- Poison Resistance
+- Shadow Resistance
+- Physical Resistance
+- Resource Cost Reduction
+- Resource Regeneration
+- Cooldown Reduction
+- Attack Speed
+- Critical Strike Chance
+
+## Offhand
+- Dexterity
+- Maximum Life
+- Life On Hit
+- Life on Kill
+- Maximum Resource
+- Resource on Kill
+- All Damage Multiplier
+- Critical Strike Chance
+- Critical Strike Damage Multiplier
+- Damage Over Time Multiplier
+- Fire Damage Multiplier
+- Cold Damage Multiplier
+- Lightning Damage Multiplier
+- Physical Damage Multiplier
+- Poison Damage Multiplier
+- Shadow Damage Multiplier
 - Resource Cost Reduction
 - Cooldown Reduction
+- Lucky Hit: Up to a 15% Chance to Restore Primary Resource
+- Weapon Damage
+- Lucky Hit Chance
 
-
+## Shield
+- Dexterity
+- Life Regeneration
+- Life On Hit
+- Resource on Kill
+- Armor
+- Thorns
+- Critical Strike Chance
+- Resistance to All Elements
+- Fire Resistance
+- Cold Resistance
+- Lightning Resistance
+- Poison Resistance
+- Shadow Resistance
+- Physical Resistance
+- Cooldown Reduction
+- Impairment Reduction
+- Healing Received
+- Damage Reduction

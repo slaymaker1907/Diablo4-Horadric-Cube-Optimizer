@@ -34,7 +34,7 @@ This folder is the curated entry point for humans and AIs working on the v3 opti
 - Residual helper semantics still reused by v3: [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js)
 - Exact small ILP engine: [ilp.js](../ilp.js)
 - Slot legality table: [gear-slot-legality.js](../gear-slot-legality.js)
-- Human-readable slot legality source: [gear_to_affix.md](../gear_to_affix.md)
+- Verified affix legality source: [docs/verified-affixes.md](verified-affixes.md) (unverified leftovers in [docs/maybe-affixes.md](maybe-affixes.md))
 - Game mechanics reference (prisms, operations, GA rules): [docs/game-mechanics.md](game-mechanics.md)
 
 ## Validation Shortcuts

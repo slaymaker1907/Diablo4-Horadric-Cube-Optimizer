@@ -2,10 +2,3 @@ training-data*
 old/
 eval-results.json
 .claude/
-
-# Companion data snapshots — downloaded at runtime by scripts/build-slot-legality.js
-# Run "node scripts/build-slot-legality.js" to refresh.
-scripts/data/Affixes.enUS.json
-scripts/data/ItemTypes.enUS.json
-# Generated diff output from the build script
-scripts/data/slot-legality.diff.md

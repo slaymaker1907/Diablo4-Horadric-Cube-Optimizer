@@ -1,14 +1,11 @@
 #!/usr/bin/env node
 // Differential testing harness: runs payloads through both the JS and Rust/WASM
-// implementations of optimizePayloadV3 and asserts results agree within tolerance.
+// implementations and asserts results agree within tolerance.
 //
 // Usage:
-//   node scripts/diff-test-rust-vs-js.js          # run all registered cases
-//   node scripts/diff-test-rust-vs-js.js --phase 0 # Phase 0: WASM smoke test only
-//
-// Tolerances match the worker's own convergence constants:
-//   absolute: 1e-9  (RESIDUAL_EPSILON)
-//   relative: 1e-6  (RESIDUAL_PHASE2_EPSILON)
+//   node scripts/diff-test-rust-vs-js.js           # run all phases
+//   node scripts/diff-test-rust-vs-js.js --phase 0  # smoke test only
+//   node scripts/diff-test-rust-vs-js.js --phase 1  # Phase 1 leaf functions
 
 "use strict";
 
@@ -32,84 +29,282 @@ function assertFloatEq(label, a, b) {
 
 // ── Phase 0: WASM module smoke test ──────────────────────────────────────────
 
-function runPhase0() {
+function runPhase0(rustMod) {
   console.log("Phase 0: WASM smoke test");
-
-  let rustMod;
-  try {
-    rustMod = require("../rust/pkg-node/d4optimizer.js");
-  } catch (e) {
-    throw new Error(`Failed to load rust/pkg-node/d4optimizer.js: ${e.message}\nRun scripts/build-wasm.sh first.`);
-  }
-
   const version = rustMod.d4optimizer_version();
-  assert.ok(typeof version === "string" && version.length > 0, "d4optimizer_version() returns non-empty string");
+  assert.ok(typeof version === "string" && version.length > 0,
+    "d4optimizer_version() returns non-empty string");
   assert.match(version, /^v4-rust-/, "version starts with v4-rust-");
   console.log(`  d4optimizer_version() = "${version}"  OK`);
-
   console.log("Phase 0: PASSED\n");
 }
 
-// ── Phase 1+: optimizePayloadV3 differential tests ───────────────────────────
-// Populated incrementally as algorithm phases are ported.
+// ── Shared test fixtures ──────────────────────────────────────────────────────
 
-const differentialCases = [
-  // { name: "...", payload: {...}, options: {...} }
-  // Will be added in Phase 1.
-];
+function makeAffix(affixId, isGA = false, isEnchanted = false) {
+  return { affixId, isGA, isEnchanted };
+}
 
-function runDifferential() {
-  if (differentialCases.length === 0) {
-    console.log("No differential cases registered yet (will be added in Phase 1).");
-    return;
-  }
+function makeState(gearSlot, cls, affixes, isLegendary = false) {
+  return { isLegendary, gearSlot, class: cls, affixes };
+}
 
-  const jsWorker = (() => {
-    const saved = process.env.D4_USE_RUST;
-    process.env.D4_USE_RUST = "false";
-    // Clear require cache so the env var is picked up.
-    delete require.cache[require.resolve("../d4cubeoptimv3-worker.js")];
-    const w = require("../d4cubeoptimv3-worker.js");
-    process.env.D4_USE_RUST = saved;
-    return w;
-  })();
+// Minimal affix catalog with a handful of real-looking affixes across
+// two categories. Sufficient to exercise buildEnv / isTerminal / breaksRequiredGA.
+const CATALOG_DATA = {
+  affixes: [
+    { id: "maximum-life",            categories: ["Aggressive"], family: "" },
+    { id: "attack-speed",            categories: ["Aggressive"], family: "" },
+    { id: "critical-strike-chance",  categories: ["Aggressive"], family: "" },
+    { id: "damage-reduction",        categories: ["Protector"],  family: "" },
+    { id: "all-stats",               categories: ["Pragmatic"],  family: "" },
+    { id: "elemental-damage-fire",   categories: ["Aggressive"], family: "elemental-damage" },
+    { id: "elemental-damage-cold",   categories: ["Aggressive"], family: "elemental-damage" },
+  ],
+  categories: {
+    Aggressive: ["maximum-life", "attack-speed", "critical-strike-chance",
+                 "elemental-damage-fire", "elemental-damage-cold"],
+    Protector:  ["damage-reduction"],
+    Pragmatic:  ["all-stats"],
+  },
+  gearSlots: ["Any", "Amulet", "Ring", "Helm"],
+  classes:   ["Any", "Barbarian"],
+};
 
-  const rustWorkerModule = (() => {
-    process.env.D4_USE_RUST = "true";
-    delete require.cache[require.resolve("../d4cubeoptimv3-worker.js")];
-    const w = require("../d4cubeoptimv3-worker.js");
-    return w;
-  })();
+const EMPTY_GA_CONFIG  = { currentGAAffixes: [] };
+const GA_MAX_LIFE      = { currentGAAffixes: ["maximum-life"] };
+const GA_ATTACK_SPEED  = { currentGAAffixes: ["attack-speed"] };
 
-  let passed = 0;
-  let failed = 0;
+// ── Phase 1: leaf function differential tests ─────────────────────────────────
 
-  for (const tc of differentialCases) {
+function runPhase1(jsWorker, rustMod) {
+  console.log("Phase 1: leaf function differential tests");
+  let pass = 0;
+  let fail = 0;
+
+  function check(label, jsVal, rustVal) {
     try {
-      const jsResult = jsWorker.optimizePayloadV3(tc.payload, tc.options || {});
-      const rustResult = rustWorkerModule.optimizePayloadV3(tc.payload, tc.options || {});
-
-      assertFloatEq(`${tc.name}.expectedSteps`, jsResult.expectedSteps, rustResult.expectedSteps);
-      assert.equal(jsResult.action && jsResult.action.type, rustResult.action && rustResult.action.type,
-        `${tc.name}: action.type mismatch`);
-
-      console.log(`  PASS: ${tc.name}`);
-      passed++;
+      assert.deepEqual(jsVal, rustVal, `${label}: mismatch`);
+      console.log(`  PASS: ${label}`);
+      pass++;
     } catch (e) {
-      console.error(`  FAIL: ${tc.name}: ${e.message}`);
-      failed++;
+      console.error(`  FAIL: ${label}`);
+      console.error(`        JS:   ${JSON.stringify(jsVal)}`);
+      console.error(`        Rust: ${JSON.stringify(rustVal)}`);
+      fail++;
     }
   }
 
-  console.log(`\nDifferential: ${passed} passed, ${failed} failed`);
-  if (failed > 0) process.exit(1);
+  // ── stateKey ────────────────────────────────────────────────────────────
+
+  const stateKeyTests = [
+    {
+      label: "stateKey: empty affixes",
+      state: makeState("Any", "Any", []),
+    },
+    {
+      label: "stateKey: legendary flag",
+      state: makeState("Any", "Any", [], true),
+    },
+    {
+      label: "stateKey: single affix",
+      state: makeState("Amulet", "Barbarian", [makeAffix("maximum-life")]),
+    },
+    {
+      label: "stateKey: affixes sorted",
+      // maximum-life sorts after attack-speed — Rust must output them sorted
+      state: makeState("Helm", "Any", [
+        makeAffix("maximum-life"),
+        makeAffix("attack-speed"),
+      ]),
+    },
+    {
+      label: "stateKey: GA and enchanted flags",
+      state: makeState("Ring", "Any", [
+        makeAffix("maximum-life", true,  false),
+        makeAffix("attack-speed", false, true),
+      ]),
+    },
+    {
+      label: "stateKey: four affixes",
+      state: makeState("Amulet", "Barbarian", [
+        makeAffix("damage-reduction"),
+        makeAffix("maximum-life",   true, false),
+        makeAffix("attack-speed",   false, true),
+        makeAffix("all-stats"),
+      ]),
+    },
+    {
+      label: "stateKey: missing gearSlot defaults to 'any'",
+      state: { isLegendary: false, affixes: [], class: "Any" },
+    },
+    {
+      label: "stateKey: missing class defaults to 'Any'",
+      state: { isLegendary: false, affixes: [], gearSlot: "Helm" },
+    },
+  ];
+
+  for (const tc of stateKeyTests) {
+    const jsVal  = jsWorker.stateKey(tc.state);
+    const rustVal = rustMod.state_key(JSON.stringify(tc.state));
+    check(tc.label, jsVal, rustVal);
+  }
+
+  // ── actionKey ────────────────────────────────────────────────────────────
+
+  const actionKeyTests = [
+    {
+      label: "actionKey: add",
+      action: { type: "add", prism: "Aggressive" },
+    },
+    {
+      label: "actionKey: enchant with all fields",
+      action: { type: "enchant", prism: "Protector", sourceIndex: 2,
+                targetAffixId: "damage-reduction" },
+    },
+    {
+      label: "actionKey: remove, no target",
+      action: { type: "remove", prism: "Pragmatic", sourceIndex: 0 },
+    },
+    {
+      label: "actionKey: all optional fields absent",
+      action: { type: "add" },
+    },
+  ];
+
+  for (const tc of actionKeyTests) {
+    const jsVal  = jsWorker.actionKey(tc.action);
+    const rustVal = rustMod.action_key(JSON.stringify(tc.action));
+    check(tc.label, jsVal, rustVal);
+  }
+
+  // ── buildEnv + isTerminal + breaksRequiredGA ─────────────────────────────
+
+  // Build one Rust env for the no-GA target cases.
+  const TARGET_TWO = { affixes: [
+    { affixId: "maximum-life" }, { affixId: "attack-speed" }
+  ] };
+  const jsEnvNoGA  = jsWorker.buildEnv(CATALOG_DATA, EMPTY_GA_CONFIG, TARGET_TWO);
+  const envNoGA    = rustMod.build_env(
+    JSON.stringify(CATALOG_DATA),
+    JSON.stringify(EMPTY_GA_CONFIG),
+    JSON.stringify(TARGET_TWO),
+  );
+
+  // Build one Rust env for the GA-required case.
+  const TARGET_LIFE = { affixes: [{ affixId: "maximum-life" }] };
+  const jsEnvGA    = jsWorker.buildEnv(CATALOG_DATA, GA_MAX_LIFE, TARGET_LIFE);
+  const envGA      = rustMod.build_env(
+    JSON.stringify(CATALOG_DATA),
+    JSON.stringify(GA_MAX_LIFE),
+    JSON.stringify(TARGET_LIFE),
+  );
+
+  const termTests = [
+    {
+      label: "isTerminal: not terminal — missing both targets",
+      state: makeState("Any", "Any", [makeAffix("all-stats")]),
+      target: TARGET_TWO, jsEnv: jsEnvNoGA, rustEnv: envNoGA,
+    },
+    {
+      label: "isTerminal: not terminal — only one target met",
+      state: makeState("Any", "Any", [makeAffix("maximum-life")]),
+      target: TARGET_TWO, jsEnv: jsEnvNoGA, rustEnv: envNoGA,
+    },
+    {
+      label: "isTerminal: success — both targets met",
+      state: makeState("Any", "Any", [makeAffix("maximum-life"), makeAffix("attack-speed")]),
+      target: TARGET_TWO, jsEnv: jsEnvNoGA, rustEnv: envNoGA,
+    },
+    {
+      label: "isTerminal: failure — GA broken (non-GA present)",
+      state: makeState("Any", "Any", [makeAffix("maximum-life", false, false)]),
+      target: TARGET_LIFE, jsEnv: jsEnvGA, rustEnv: envGA,
+    },
+    {
+      label: "isTerminal: success — GA preserved",
+      state: makeState("Any", "Any", [makeAffix("maximum-life", true, false)]),
+      target: TARGET_LIFE, jsEnv: jsEnvGA, rustEnv: envGA,
+    },
+  ];
+
+  for (const tc of termTests) {
+    const jsVal   = jsWorker.isTerminal(tc.state, tc.target, tc.jsEnv);
+    const rustVal = JSON.parse(
+      rustMod.is_terminal(JSON.stringify(tc.state), JSON.stringify(tc.target), tc.rustEnv)
+    );
+    check(tc.label, jsVal, rustVal);
+  }
+
+  const gaTests = [
+    {
+      label: "breaksRequiredGA: no GA config — never breaks",
+      state: makeState("Any", "Any", [makeAffix("maximum-life")]),
+      jsEnv: jsEnvNoGA, rustEnv: envNoGA,
+    },
+    {
+      label: "breaksRequiredGA: GA present — no break",
+      state: makeState("Any", "Any", [makeAffix("maximum-life", true, false)]),
+      jsEnv: jsEnvGA, rustEnv: envGA,
+    },
+    {
+      label: "breaksRequiredGA: GA absent — breaks",
+      state: makeState("Any", "Any", [makeAffix("maximum-life", false, false)]),
+      jsEnv: jsEnvGA, rustEnv: envGA,
+    },
+    {
+      label: "breaksRequiredGA: affix missing entirely — breaks",
+      state: makeState("Any", "Any", [makeAffix("attack-speed")]),
+      jsEnv: jsEnvGA, rustEnv: envGA,
+    },
+  ];
+
+  for (const tc of gaTests) {
+    const jsVal   = jsWorker.breaksRequiredGA(tc.state, tc.jsEnv);
+    const rustVal = rustMod.breaks_required_ga(JSON.stringify(tc.state), tc.rustEnv);
+    check(tc.label, jsVal, rustVal);
+  }
+
+  // Cleanup Rust env handles.
+  rustMod.free_env(envNoGA);
+  rustMod.free_env(envGA);
+
+  console.log(`Phase 1: ${pass} passed, ${fail} failed\n`);
+  return fail;
+}
+
+// ── Phase 2+: additional differential cases (added incrementally) ─────────────
+
+function runPhase2Plus() {
+  console.log("Phase 2+: no cases registered yet (added in Phase 2).");
+  return 0;
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-const args = process.argv.slice(2);
-const phaseArg = args.indexOf("--phase");
-const onlyPhase = phaseArg >= 0 ? Number(args[phaseArg + 1]) : null;
+const args       = process.argv.slice(2);
+const phaseArg   = args.indexOf("--phase");
+const onlyPhase  = phaseArg >= 0 ? Number(args[phaseArg + 1]) : null;
 
-if (onlyPhase === null || onlyPhase === 0) runPhase0();
-if (onlyPhase === null || onlyPhase >= 1) runDifferential();
+let rustMod;
+try {
+  rustMod = require("../rust/pkg-node/d4optimizer.js");
+} catch (e) {
+  console.error(`Failed to load rust/pkg-node/d4optimizer.js: ${e.message}`);
+  console.error("Run scripts/build-wasm.sh first.");
+  process.exit(1);
+}
+
+const jsWorker = require("../d4cubeoptimv3-worker.js");
+
+let totalFail = 0;
+
+if (onlyPhase === null || onlyPhase === 0) runPhase0(rustMod);
+if (onlyPhase === null || onlyPhase === 1) totalFail += runPhase1(jsWorker, rustMod);
+if (onlyPhase === null || onlyPhase >= 2)  totalFail += runPhase2Plus();
+
+if (totalFail > 0) {
+  console.error(`${totalFail} test(s) failed.`);
+  process.exit(1);
+}
+console.log("All diff-tests passed.");

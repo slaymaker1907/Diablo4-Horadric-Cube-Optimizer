@@ -1,8 +1,62 @@
 /* @ts-self-types="./d4optimizer.d.ts" */
 
 /**
- * Returns the version string for this WASM build.
- * Used by the JS loader to confirm the module loaded successfully.
+ * Canonical string key for an action. Matches JS `actionKey` exactly.
+ * @param {string} action_json
+ * @returns {string}
+ */
+export function action_key(action_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(action_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.action_key(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Returns true if the state has lost a required GA. Matches JS `breaksRequiredGA`.
+ * @param {string} state_json
+ * @param {number} env_handle
+ * @returns {boolean}
+ */
+export function breaks_required_ga(state_json, env_handle) {
+    const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.breaks_required_ga(ptr0, len0, env_handle);
+    return ret !== 0;
+}
+
+/**
+ * Build the translation environment from the affix catalog, GA config, and
+ * target. Returns an opaque handle; pass it to the other functions.
+ *
+ * Mirrors the relevant subset of JS `buildEnv` (d4cubeoptimv3-worker.js:364):
+ * affix token IDs, gear-slot IDs, class IDs, gaRequiredCounts, targetCounts.
+ * @param {string} data_json
+ * @param {string} ga_config_json
+ * @param {string} target_json
+ * @returns {number}
+ */
+export function build_env(data_json, ga_config_json, target_json) {
+    const ptr0 = passStringToWasm0(data_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.build_env(ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret >>> 0;
+}
+
+/**
+ * Returns the version string. Used by the JS loader to confirm WASM loaded.
  * @returns {string}
  */
 export function d4optimizer_version() {
@@ -16,6 +70,73 @@ export function d4optimizer_version() {
     } finally {
         wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
+}
+
+/**
+ * Release a previously built environment handle.
+ * @param {number} handle
+ */
+export function free_env(handle) {
+    wasm.free_env(handle);
+}
+
+/**
+ * Returns JSON `{terminal: bool, success: bool}`. Matches JS `isTerminal`.
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+export function is_terminal(state_json, target_json, env_handle) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.is_terminal(ptr0, len0, ptr1, len1, env_handle);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Canonical string key for a state. Matches JS `stateKey` exactly, including
+ * the `"any"` (lowercase) default for gearSlot.
+ * @param {string} state_json
+ * @returns {string}
+ */
+export function state_key(state_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.state_key(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Packed 57-bit state key as a u64. Uses the translation env to map affix
+ * string IDs to compact token integers. Intended for Phase 3 LAO* graph.
+ * @param {string} state_json
+ * @param {number} env_handle
+ * @returns {bigint}
+ */
+export function state_key_u64(state_json, env_handle) {
+    const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.state_key_u64(ptr0, len0, env_handle);
+    return BigInt.asUintN(64, ret);
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -48,6 +169,43 @@ function getUint8ArrayMemory0() {
     return cachedUint8ArrayMemory0;
 }
 
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
@@ -61,6 +219,21 @@ function decodeText(ptr, len) {
     }
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
+}
+
+let WASM_VECTOR_LEN = 0;
 
 let wasmModule, wasmInstance, wasm;
 function __wbg_finalize_init(instance, module) {

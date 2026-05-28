@@ -6002,6 +6002,10 @@ if (typeof module !== "undefined" && module.exports) {
     // Re-export key base-worker helpers used by tests.
     buildEnv: buildEnv,
     stateKey: stateKey,
+    actionKey: actionKey,
+    isTerminal: isTerminal,
+    breaksRequiredGA: breaksRequiredGA,
+    getAffixCounts: getAffixCounts,
     getActionOutcomes: getActionOutcomes,
     getValidActions: getValidActions,
     getEligibleByCategory: getEligibleByCategory,

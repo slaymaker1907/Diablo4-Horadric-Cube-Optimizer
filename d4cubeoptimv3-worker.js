@@ -39,6 +39,28 @@ if (typeof module !== "undefined" && module.exports) {
   };
 }
 
+// D4_USE_RUST=true enables the Rust/WASM optimiser path (v4).
+// Set process.env.D4_USE_RUST="true" in Node or window.D4_USE_RUST=true in
+// the browser before loading this worker. Defaults to false; JS path is
+// always available as fallback.
+const D4_USE_RUST =
+  (typeof process !== "undefined" && process.env && process.env.D4_USE_RUST === "true") ||
+  (typeof self !== "undefined" && self.D4_USE_RUST === true);
+
+let rustWorker = null;
+
+if (D4_USE_RUST) {
+  if (typeof module !== "undefined" && module.exports) {
+    try {
+      rustWorker = require("./rust/pkg-node/d4optimizer.js");
+    } catch (_) {
+      // Built artifacts not present; fall back to JS path silently.
+    }
+  }
+  // Browser Web Worker path: async WASM init is wired up in Phase 5.
+  // The pkg-web/ artifacts are committed for future use.
+}
+
 const DEFAULT_MAX_AFFIX_SLOTS = 4;
 const FEASIBILITY_STRATEGY = "v3-feasibility";
 const FALLBACK_STRATEGY = "v3-v2-fallback";

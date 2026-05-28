@@ -2918,7 +2918,7 @@
 				.filter(({ entry }) => {
 					if (mode === "added") { return false; }
 					if ((mode === "removed" || mode === "changed") && entry.isEnchanted) { return false; }
-					if (prism && prism !== "None" && mode === "changed") {
+					if (prism && prism !== "None") {
 						const affix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
 						if (!affix || !getAffixCategoriesForMode(affix, mode).includes(prism)) { return false; }
 					}

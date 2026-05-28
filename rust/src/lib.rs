@@ -1,8 +1,12 @@
+mod actions;
 mod closed_form;
 mod decomposition;
 mod env;
 mod feasibility;
 mod keys;
+mod mc;
+mod optimizer;
+mod residual;
 mod terminal;
 mod types;
 
@@ -200,6 +204,92 @@ pub fn build_decomposition_plan_input(
     .expect("build_decomposition_plan_input: invalid env handle");
     serde_json::to_string(&result)
         .expect("build_decomposition_plan_input: serialization failed")
+}
+
+// ── Phase 3–5: Residual solver + optimizer + MC ──────────────────────────────
+
+/// Runs the full LAO* residual solver for a given payload.
+/// `payload_json` must be a serialized `OptimizePayload`.
+/// Returns JSON result with `{action, expectedSteps, diagnostics, ...}`.
+/// `solve_ilp_json` is called with plan-input JSON; return null/"" to skip ILP.
+#[wasm_bindgen]
+pub fn optimize_payload(payload_json: &str, solve_ilp_fn: &js_sys::Function) -> String {
+    let payload: types::OptimizePayload =
+        match serde_json::from_str(payload_json) {
+            Ok(p) => p,
+            Err(e) => return format!("{{\"error\":\"optimize_payload: invalid JSON: {}\"}}", e),
+        };
+    let env = env::build_env(
+        payload.data.clone(),
+        payload.ga_config.clone(),
+        payload.target.clone(),
+    );
+    let solve_fn = make_js_ilp_callback(solve_ilp_fn.clone());
+    let result = optimizer::optimize_payload_v3(&payload, &env, &solve_fn, 2, 6);
+    serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Runs MC verification after the initial optimize.
+/// `intermediate_json` is the result from `optimize_payload`.
+/// `solve_ilp_fn` and optional `on_progress_fn` are JS callbacks.
+#[wasm_bindgen]
+pub fn run_mc_verification(
+    payload_json: &str,
+    intermediate_json: &str,
+    solve_ilp_fn: &js_sys::Function,
+    on_progress_fn: Option<js_sys::Function>,
+) -> String {
+    let payload: types::OptimizePayload =
+        match serde_json::from_str(payload_json) {
+            Ok(p) => p,
+            Err(e) => return format!("{{\"error\":\"run_mc_verification: invalid payload JSON: {}\"}}", e),
+        };
+    let intermediate: serde_json::Value =
+        serde_json::from_str(intermediate_json).unwrap_or(serde_json::json!(null));
+
+    let env = env::build_env(
+        payload.data.clone(),
+        payload.ga_config.clone(),
+        payload.target.clone(),
+    );
+    let solve_fn = make_js_ilp_callback(solve_ilp_fn.clone());
+    let progress_fn: Option<js_sys::Function> = on_progress_fn;
+    let on_progress_cb: Option<&dyn Fn(serde_json::Value)> = if let Some(ref f) = progress_fn {
+        let f_ref = f;
+        Some(&move |v: serde_json::Value| {
+            let _ = f_ref.call1(
+                &wasm_bindgen::JsValue::NULL,
+                &wasm_bindgen::JsValue::from_str(
+                    &serde_json::to_string(&v).unwrap_or_default(),
+                ),
+            );
+        })
+    } else {
+        None
+    };
+
+    let result = mc::run_mc_verification_v3(
+        &payload,
+        &env,
+        intermediate,
+        &solve_fn,
+        on_progress_cb,
+    );
+    serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn make_js_ilp_callback(
+    f: js_sys::Function,
+) -> impl Fn(&str) -> Option<serde_json::Value> {
+    move |plan_input_json: &str| -> Option<serde_json::Value> {
+        let arg = wasm_bindgen::JsValue::from_str(plan_input_json);
+        let result = f.call1(&wasm_bindgen::JsValue::NULL, &arg).ok()?;
+        let json_str = result.as_string()?;
+        if json_str.is_empty() || json_str == "null" {
+            return None;
+        }
+        serde_json::from_str(&json_str).ok()
+    }
 }
 
 #[cfg(test)]

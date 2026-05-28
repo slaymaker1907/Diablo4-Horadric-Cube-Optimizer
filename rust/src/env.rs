@@ -61,6 +61,20 @@ pub struct TranslationEnv {
 
     /// maxAffixSlots from the data payload (if provided).
     pub max_affix_slots_from_data: Option<u32>,
+
+    // ── Phase 3: v2 / residual solver fields ─────────────────────────────────
+
+    /// family → placeholder "other" affix ID (elemental-damage, specific-resistance).
+    pub family_other_id: HashMap<String, String>,
+
+    /// Counts of affixes in gaConfig.unsatisfactoryAffixIds (needs-improvement).
+    pub unsatisfactory_counts: HashMap<String, u32>,
+
+    /// Static impossibility reason from target family analysis (empty = ok).
+    pub impossible_target_ga_reason: String,
+
+    /// Number of non-null entries in gaConfig.currentGAAffixes.
+    pub source_total_ga_count: u32,
 }
 
 thread_local! {
@@ -308,6 +322,69 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         }
     }
 
+    // ── Family other IDs + synthetic placeholder affixes ─────────────────────
+    const ELEMENTAL_DAMAGE_FAMILY: &str = "elemental-damage";
+    const SPECIFIC_RESISTANCE_FAMILY: &str = "specific-resistance";
+
+    let mut family_other_id: HashMap<String, String> = HashMap::new();
+    family_other_id.insert(ELEMENTAL_DAMAGE_FAMILY.to_string(), "elemental-damage-other".to_string());
+    family_other_id.insert(SPECIFIC_RESISTANCE_FAMILY.to_string(), "specific-resistance-other".to_string());
+
+    // Add synthetic "other" placeholder affixes for each family that has members.
+    for (family, other_id) in &family_other_id {
+        if affix_map.contains_key(other_id) {
+            continue;
+        }
+        let seed = affix_map.values().find(|a| {
+            a.family.as_deref().unwrap_or("") == family
+        }).cloned();
+        if let Some(seed_affix) = seed {
+            let other_affix = AffixData {
+                id: other_id.clone(),
+                categories: seed_affix.categories.clone(),
+                family: Some(family.clone()),
+                roll_weight: 1.0,
+                family_roll_weight: 0.0,
+                class: None,
+                gear_slots: seed_affix.gear_slots.clone(),
+                operation_categories: None,
+            };
+            affix_map.insert(other_id.clone(), other_affix);
+        }
+    }
+
+    // ── Unsatisfactory counts (v2 / residual) ─────────────────────────────────
+    let mut unsatisfactory_counts: HashMap<String, u32> = HashMap::new();
+    for affix_id in &ga_config.unsatisfactory_affix_ids {
+        if !affix_id.is_empty() {
+            *unsatisfactory_counts.entry(affix_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // ── Impossible target GA reason ───────────────────────────────────────────
+    let source_total_ga_count = ga_config
+        .current_ga_affixes
+        .iter()
+        .filter(|x| x.is_some())
+        .count() as u32;
+
+    let impossible_target_ga_reason = {
+        let mut family_counts: HashMap<String, u32> = HashMap::new();
+        for (affix_id, &count) in &target_counts {
+            let fam = affix_family.get(affix_id).map(|s| s.as_str()).unwrap_or("");
+            if !fam.is_empty() {
+                *family_counts.entry(fam.to_string()).or_insert(0) += count;
+            }
+        }
+        if family_counts.get(ELEMENTAL_DAMAGE_FAMILY).copied().unwrap_or(0) > 1 {
+            "Impossible target: only one Elemental Damage type can exist on an item.".to_string()
+        } else if family_counts.get(SPECIFIC_RESISTANCE_FAMILY).copied().unwrap_or(0) > 1 {
+            "Impossible target: only one Specific Resistance type can exist on an item.".to_string()
+        } else {
+            String::new()
+        }
+    };
+
     TranslationEnv {
         affix_id_to_token,
         token_to_affix_id,
@@ -331,5 +408,10 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         source_ga_counts,
         wanted_by_family,
         max_affix_slots_from_data: data.max_affix_slots,
+        // Phase 3
+        family_other_id,
+        unsatisfactory_counts,
+        impossible_target_ga_reason,
+        source_total_ga_count,
     }
 }

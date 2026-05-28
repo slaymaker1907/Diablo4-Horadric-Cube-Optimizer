@@ -9,11 +9,15 @@ export const build_env: (a: number, b: number, c: number, d: number, e: number, 
 export const d4optimizer_version: () => [number, number];
 export const get_closed_form_plan_candidates: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const is_terminal: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const optimize_payload: (a: number, b: number, c: any) => [number, number];
+export const run_mc_verification: (a: number, b: number, c: number, d: number, e: any, f: number) => [number, number];
 export const state_key: (a: number, b: number) => [number, number];
 export const state_key_u64: (a: number, b: number, c: number) => bigint;
 export const free_env: (a: number) => void;
-export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_start: () => void;

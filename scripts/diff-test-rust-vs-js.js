@@ -514,6 +514,139 @@ function runPhase2(jsWorker, rustMod) {
   return fail;
 }
 
+// ── Phase 3: optimizer differential tests ────────────────────────────────────
+
+function makeIlpCallback(jsWorker) {
+  return (planInputJson) => {
+    try {
+      const planInput = JSON.parse(planInputJson);
+      // Re-link targets[i].options to the same objects as planInput.options
+      // (JS reference sharing is lost through JSON serialization).
+      if (Array.isArray(planInput.options) && Array.isArray(planInput.targets)) {
+        const byId = Object.create(null);
+        for (const o of planInput.options) { if (o && o.id) byId[o.id] = o; }
+        for (const row of planInput.targets) {
+          if (Array.isArray(row.options)) {
+            row.options = row.options.map((o) => (o && o.id && byId[o.id]) ? byId[o.id] : o);
+          }
+        }
+      }
+      return JSON.stringify(jsWorker.solveDecompositionPlanV3(planInput));
+    } catch (_) { return null; }
+  };
+}
+
+function runPhase3(jsWorker, rustMod) {
+  console.log("Phase 3: optimizer differential tests");
+  let pass = 0;
+  let fail = 0;
+
+  function checkFloat(label, jsVal, rustVal) {
+    try {
+      if (!floatEq(jsVal, rustVal)) {
+        throw new Error(`${label}: JS=${jsVal} Rust=${rustVal} diff=${Math.abs(jsVal - rustVal)}`);
+      }
+      console.log(`  PASS: ${label}`);
+      pass++;
+    } catch (e) {
+      console.error(`  FAIL: ${label}`);
+      console.error(`        ${e.message}`);
+      fail++;
+    }
+  }
+
+  function checkStr(label, jsVal, rustVal) {
+    try {
+      assert.equal(jsVal, rustVal, `${label}: mismatch`);
+      console.log(`  PASS: ${label}`);
+      pass++;
+    } catch (e) {
+      console.error(`  FAIL: ${label}`);
+      console.error(`        JS:   ${jsVal}`);
+      console.error(`        Rust: ${rustVal}`);
+      fail++;
+    }
+  }
+
+  const solveIlp = makeIlpCallback(jsWorker);
+
+  const optimizerTests = [
+    {
+      label: "optimizer: simple enchant deterministic (strategy=decomposition)",
+      state: { isLegendary: false, gearSlot: "Any", class: "Any", affixes: [
+        { affixId: "damage-reduction", isGA: false, isEnchanted: false },
+        { affixId: "all-stats", isGA: false, isEnchanted: false },
+        { affixId: "critical-strike-chance", isGA: false, isEnchanted: false },
+      ] },
+      target: { affixes: [{ affixId: "maximum-life" }, { affixId: "attack-speed" }] },
+      data: CATALOG_DATA,
+      gaConfig: {},
+    },
+    {
+      label: "optimizer: single target missing, residual solver",
+      state: { isLegendary: false, gearSlot: "Any", class: "Any", affixes: [
+        { affixId: "attack-speed", isGA: false, isEnchanted: false },
+      ] },
+      target: { affixes: [{ affixId: "maximum-life" }] },
+      data: CATALOG_DATA,
+      gaConfig: {},
+    },
+    {
+      label: "optimizer: already satisfied state",
+      state: { isLegendary: false, gearSlot: "Any", class: "Any", affixes: [
+        { affixId: "maximum-life", isGA: false, isEnchanted: false },
+      ] },
+      target: { affixes: [{ affixId: "maximum-life" }] },
+      data: CATALOG_DATA,
+      gaConfig: {},
+    },
+  ];
+
+  for (const tc of optimizerTests) {
+    const payload = {
+      state: tc.state,
+      target: tc.target,
+      data: tc.data,
+      gaConfig: tc.gaConfig,
+    };
+
+    const jsResult = jsWorker.optimizePayloadV3(payload, { refineDepth: 0 });
+    const rustResult = JSON.parse(rustMod.optimize_payload(JSON.stringify(payload), solveIlp));
+
+    // Compare expectedSteps (primary metric)
+    const jsSteps = jsResult.expectedSteps;
+    const rustSteps = rustResult.expectedSteps;
+    if (jsSteps == null && rustSteps == null) {
+      console.log(`  PASS: ${tc.label} [both null steps]`);
+      pass++;
+    } else if (jsSteps == null || rustSteps == null) {
+      console.error(`  FAIL: ${tc.label} [steps null mismatch JS=${jsSteps} Rust=${rustSteps}]`);
+      fail++;
+    } else {
+      checkFloat(tc.label + " [expectedSteps]", jsSteps, rustSteps);
+    }
+
+    // Compare strategy
+    const jsStrategy = jsResult.diagnostics && jsResult.diagnostics.strategy;
+    const rustStrategy = rustResult.diagnostics && rustResult.diagnostics.strategy;
+    checkStr(tc.label + " [strategy]", jsStrategy, rustStrategy);
+
+    // If both have actions, compare action type
+    if (jsResult.action && rustResult.action) {
+      checkStr(tc.label + " [action.type]", jsResult.action.type, rustResult.action.type);
+    } else if (!jsResult.action && !rustResult.action) {
+      console.log(`  PASS: ${tc.label} [both no action]`);
+      pass++;
+    } else {
+      console.error(`  FAIL: ${tc.label} [action presence mismatch JS=${!!jsResult.action} Rust=${!!rustResult.action}]`);
+      fail++;
+    }
+  }
+
+  console.log(`Phase 3: ${pass} passed, ${fail} failed\n`);
+  return fail;
+}
+
 // ── Phase 2+: additional differential cases (added incrementally) ─────────────
 
 function runPhase2Plus() {
@@ -542,7 +675,8 @@ let totalFail = 0;
 if (onlyPhase === null || onlyPhase === 0) runPhase0(rustMod);
 if (onlyPhase === null || onlyPhase === 1) totalFail += runPhase1(jsWorker, rustMod);
 if (onlyPhase === null || onlyPhase === 2) totalFail += runPhase2(jsWorker, rustMod);
-if (onlyPhase === null || onlyPhase >= 3)  totalFail += runPhase2Plus();
+if (onlyPhase === null || onlyPhase === 3) totalFail += runPhase3(jsWorker, rustMod);
+if (onlyPhase === null || onlyPhase >= 4)  totalFail += runPhase2Plus();
 
 if (totalFail > 0) {
   console.error(`${totalFail} test(s) failed.`);

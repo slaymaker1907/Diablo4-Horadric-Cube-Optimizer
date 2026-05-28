@@ -5855,9 +5855,123 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   };
 }
 
+// ── ILP callback for Rust WASM path ──────────────────────────────────────────
+// The Rust optimizer calls this with a serialized DecompositionPlanInput and
+// expects a serialized solveDecompositionPlanV3 result back.
+//
+// Rust JSON serialization creates separate copies of option objects in both
+// planInput.options and targets[i].options. solveDecompositionPlanV3 relies
+// on buildDecompositionILPProblemV3 mutating planInput.options and those
+// mutations being visible via the same object references in targets[i].options.
+// We fix this by re-linking before calling the solver.
+function makeRustIlpCallback() {
+  return function rustIlpCallback(planInputJson) {
+    try {
+      const planInput = JSON.parse(planInputJson);
+      // Re-link targets[i].options to reference the same objects as planInput.options.
+      if (Array.isArray(planInput.options) && Array.isArray(planInput.targets)) {
+        const byId = Object.create(null);
+        for (const o of planInput.options) {
+          if (o && o.id) byId[o.id] = o;
+        }
+        for (const row of planInput.targets) {
+          if (Array.isArray(row.options)) {
+            row.options = row.options.map((o) => (o && o.id && byId[o.id]) ? byId[o.id] : o);
+          }
+        }
+      }
+      const solution = solveDecompositionPlanV3(planInput);
+      return JSON.stringify(solution);
+    } catch (_) {
+      return null;
+    }
+  };
+}
+
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
+
+  // ── Rust WASM path ────────────────────────────────────────────────────────
+  if (D4_USE_RUST && rustWorker && typeof rustWorker.optimize_payload === "function") {
+    const payloadJson = JSON.stringify(payload);
+    const ilpCb = makeRustIlpCallback();
+    let result;
+    try {
+      const resultJson = rustWorker.optimize_payload(payloadJson, ilpCb);
+      result = JSON.parse(resultJson);
+    } catch (e) {
+      // Fall back to JS path on error
+      result = null;
+    }
+
+    if (result) {
+      const wantsVerification = payload.tightenStepsLevel === "light"
+        || payload.tightenStepsLevel === "heavy"
+        || payload.tightenStepsLevel === "adaptive";
+
+      if (!wantsVerification) {
+        self.postMessage({ type: "done", runId, ...result });
+        return;
+      }
+
+      let firstProgressSent = false;
+      let finalResult;
+      if (typeof rustWorker.run_mc_verification === "function") {
+        // Use Rust MC path
+        try {
+          const intermediateJson = JSON.stringify(result);
+          const onProgressCb = (progressJson) => {
+            try {
+              const progress = JSON.parse(progressJson);
+              const msg = {
+                type: "verifying",
+                runId,
+                completed: progress.completed,
+                total: progress.total,
+              };
+              if (!firstProgressSent && progress.intermediateResult) {
+                msg.intermediateResult = progress.intermediateResult;
+                firstProgressSent = true;
+              }
+              if (progress.intermediateMean !== undefined) {
+                msg.intermediateMean = progress.intermediateMean;
+              }
+              self.postMessage(msg);
+            } catch (_) {}
+          };
+          const finalJson = rustWorker.run_mc_verification(payloadJson, intermediateJson, ilpCb, onProgressCb);
+          finalResult = JSON.parse(finalJson);
+        } catch (_) {
+          // Fall back to JS MC
+          finalResult = runMCVerificationV3(payload, result, {
+            stopView,
+            onProgress: (progress) => {
+              const msg = { type: "verifying", runId, completed: progress.completed, total: progress.total };
+              if (!firstProgressSent && progress.intermediateResult) { msg.intermediateResult = progress.intermediateResult; firstProgressSent = true; }
+              if (progress.intermediateMean !== undefined) { msg.intermediateMean = progress.intermediateMean; }
+              self.postMessage(msg);
+            },
+          });
+        }
+      } else {
+        // JS MC with Rust optimizer result as intermediate
+        finalResult = runMCVerificationV3(payload, result, {
+          stopView,
+          onProgress: (progress) => {
+            const msg = { type: "verifying", runId, completed: progress.completed, total: progress.total };
+            if (!firstProgressSent && progress.intermediateResult) { msg.intermediateResult = progress.intermediateResult; firstProgressSent = true; }
+            if (progress.intermediateMean !== undefined) { msg.intermediateMean = progress.intermediateMean; }
+            self.postMessage(msg);
+          },
+        });
+      }
+      self.postMessage({ type: "done", runId, ...finalResult });
+      return;
+    }
+  }
+
+  // ── JS path (default) ─────────────────────────────────────────────────────
   const result = optimizePayloadV3(payload, {
     stopView,
     refineDepth: 2,      // two concrete Bellman-backup steps
@@ -6014,5 +6128,6 @@ if (typeof module !== "undefined" && module.exports) {
     affixSupportsClass: affixSupportsClass,
     getEffectiveAffixRollWeight: getEffectiveAffixRollWeight,
     buildFamilyCountsForPool: buildFamilyCountsForPool,
+    makeRustIlpCallback: makeRustIlpCallback,
   };
 }

@@ -259,6 +259,23 @@ pub struct DecompositionPlanInput {
     pub residual_targets: Vec<ResidualTargetInfo>,
 }
 
+/// Full optimizer payload. Used by optimize_payload WASM export.
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct OptimizePayload {
+    pub state: JsState,
+    pub target: JsTarget,
+    #[serde(default)]
+    pub data: JsEnvData,
+    #[serde(rename = "gaConfig", default)]
+    pub ga_config: JsGaConfig,
+    #[serde(rename = "timeMs", default)]
+    pub time_ms: Option<f64>,
+    #[serde(rename = "tightenStepsLevel", default)]
+    pub tighten_steps_level: Option<String>,
+    #[serde(rename = "tightenStepsOverrides", default)]
+    pub tighten_steps_overrides: Option<serde_json::Value>,
+}
+
 /// Options passed to get_closed_form_plan_candidates.
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct ClosedFormOptions {

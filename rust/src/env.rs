@@ -298,8 +298,18 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
     for req in &target.affixes {
         if !req.affix_id.is_empty() {
             *target_counts.entry(req.affix_id.clone()).or_insert(0) += 1;
-            if let Some(fam) = affix_family.get(&req.affix_id) {
-                wanted_by_family.entry(fam.clone()).or_insert_with(|| req.affix_id.clone());
+            // Use catalog family first; fall back to inferred family so that
+            // "elemental-damage-physical" / "specific-resistance-fire" etc. are
+            // recognised even when the catalog entry is a plain string with no
+            // explicit family field.
+            let fam = affix_family
+                .get(&req.affix_id)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| crate::actions::infer_affix_family(&req.affix_id));
+            if !fam.is_empty() {
+                wanted_by_family
+                    .entry(fam.to_string())
+                    .or_insert_with(|| req.affix_id.clone());
             }
         }
     }
@@ -331,12 +341,20 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
     family_other_id.insert(SPECIFIC_RESISTANCE_FAMILY.to_string(), "specific-resistance-other".to_string());
 
     // Add synthetic "other" placeholder affixes for each family that has members.
+    // Seed by family field OR inferred family (for JS catalog entries that don't
+    // set an explicit family on individual elemental-damage-* variants).
     for (family, other_id) in &family_other_id {
         if affix_map.contains_key(other_id) {
             continue;
         }
         let seed = affix_map.values().find(|a| {
-            a.family.as_deref().unwrap_or("") == family
+            let explicit = a.family.as_deref().unwrap_or("");
+            if explicit == family { return true; }
+            if explicit.is_empty() {
+                let inferred = crate::actions::infer_affix_family(&a.id);
+                if inferred == family { return true; }
+            }
+            false
         }).cloned();
         if let Some(seed_affix) = seed {
             let other_affix = AffixData {

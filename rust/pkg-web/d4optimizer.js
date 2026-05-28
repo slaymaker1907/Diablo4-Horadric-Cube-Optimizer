@@ -1,0 +1,522 @@
+/* @ts-self-types="./d4optimizer.d.ts" */
+
+/**
+ * Canonical string key for an action. Matches JS `actionKey` exactly.
+ * @param {string} action_json
+ * @returns {string}
+ */
+export function action_key(action_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(action_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.action_key(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * F4–F7 feasibility check. Returns JSON `{ok, check, message, details}`.
+ * Mirrors JS `analyzeFeasibilityV3`.
+ *
+ * `env_handle` must reference an env built with `build_env` using the same
+ * data/gaConfig/target combination (typically the same call).
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {string} ga_config_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+export function analyze_feasibility(state_json, target_json, ga_config_json, env_handle) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.analyze_feasibility(ptr0, len0, ptr1, len1, ptr2, len2, env_handle);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Returns true if the state has lost a required GA. Matches JS `breaksRequiredGA`.
+ * @param {string} state_json
+ * @param {number} env_handle
+ * @returns {boolean}
+ */
+export function breaks_required_ga(state_json, env_handle) {
+    const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.breaks_required_ga(ptr0, len0, env_handle);
+    return ret !== 0;
+}
+
+/**
+ * Full decomposition plan input for a (state, target) pair.
+ * Returns JSON DecompositionPlanInput (ok, reason, feasibility, maxAffixSlots,
+ * targets, options, residualTargets).
+ * Mirrors JS `buildDecompositionPlanInputV3`.
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {string} ga_config_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+export function build_decomposition_plan_input(state_json, target_json, ga_config_json, env_handle) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.build_decomposition_plan_input(ptr0, len0, ptr1, len1, ptr2, len2, env_handle);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Build the translation environment from the affix catalog, GA config, and
+ * target. Returns an opaque handle; pass it to the other functions.
+ * @param {string} data_json
+ * @param {string} ga_config_json
+ * @param {string} target_json
+ * @returns {number}
+ */
+export function build_env(data_json, ga_config_json, target_json) {
+    const ptr0 = passStringToWasm0(data_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(ga_config_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.build_env(ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret >>> 0;
+}
+
+/**
+ * Returns the version string. Used by the JS loader to confirm WASM loaded.
+ * @returns {string}
+ */
+export function d4optimizer_version() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.d4optimizer_version();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
+ * Release a previously built environment handle.
+ * @param {number} handle
+ */
+export function free_env(handle) {
+    wasm.free_env(handle);
+}
+
+/**
+ * Closed-form plan candidates for one (state, targetEntry, slotIndex).
+ * Returns JSON array of ClosedFormCandidate objects.
+ * Mirrors JS `getClosedFormPlanCandidatesV3`.
+ *
+ * `options_json` fields (all optional):
+ *   maxAffixSlots, allowDiscretionaryEnchant, touchOnlyImprovement,
+ *   protectedAffixIds, target, gaConfig
+ * @param {string} state_json
+ * @param {string} target_entry_json
+ * @param {number} slot_index
+ * @param {number} env_handle
+ * @param {string} options_json
+ * @returns {string}
+ */
+export function get_closed_form_plan_candidates(state_json, target_entry_json, slot_index, env_handle, options_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_entry_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(options_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.get_closed_form_plan_candidates(ptr0, len0, ptr1, len1, slot_index, env_handle, ptr2, len2);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Returns JSON `{terminal: bool, success: bool}`. Matches JS `isTerminal`.
+ * @param {string} state_json
+ * @param {string} target_json
+ * @param {number} env_handle
+ * @returns {string}
+ */
+export function is_terminal(state_json, target_json, env_handle) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(target_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.is_terminal(ptr0, len0, ptr1, len1, env_handle);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Runs the full LAO* residual solver for a given payload.
+ * `payload_json` must be a serialized `OptimizePayload`.
+ * Returns JSON result with `{action, expectedSteps, diagnostics, ...}`.
+ * `solve_ilp_json` is called with plan-input JSON; return null/"" to skip ILP.
+ * @param {string} payload_json
+ * @param {Function} solve_ilp_fn
+ * @returns {string}
+ */
+export function optimize_payload(payload_json, solve_ilp_fn) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(payload_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.optimize_payload(ptr0, len0, solve_ilp_fn);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Runs MC verification after the initial optimize.
+ * `intermediate_json` is the result from `optimize_payload`.
+ * `solve_ilp_fn` and optional `on_progress_fn` are JS callbacks.
+ * @param {string} payload_json
+ * @param {string} intermediate_json
+ * @param {Function} solve_ilp_fn
+ * @param {Function | null} [on_progress_fn]
+ * @returns {string}
+ */
+export function run_mc_verification(payload_json, intermediate_json, solve_ilp_fn, on_progress_fn) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(payload_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(intermediate_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.run_mc_verification(ptr0, len0, ptr1, len1, solve_ilp_fn, isLikeNone(on_progress_fn) ? 0 : addToExternrefTable0(on_progress_fn));
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Canonical string key for a state. Matches JS `stateKey` exactly.
+ * @param {string} state_json
+ * @returns {string}
+ */
+export function state_key(state_json) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.state_key(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Packed 57-bit state key as a u64.
+ * @param {string} state_json
+ * @param {number} env_handle
+ * @returns {bigint}
+ */
+export function state_key_u64(state_json, env_handle) {
+    const ptr0 = passStringToWasm0(state_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.state_key_u64(ptr0, len0, env_handle);
+    return BigInt.asUintN(64, ret);
+}
+function __wbg_get_imports() {
+    const import0 = {
+        __proto__: null,
+        __wbg___wbindgen_string_get_72bdf95d3ae505b1: function(arg0, arg1) {
+            const obj = arg1;
+            const ret = typeof(obj) === 'string' ? obj : undefined;
+            var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len1 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg___wbindgen_throw_1506f2235d1bdba0: function(arg0, arg1) {
+            throw new Error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbg_call_9c758de292015997: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = arg0.call(arg1, arg2);
+            return ret;
+        }, arguments); },
+        __wbg_now_190933fa139cc119: function() {
+            const ret = Date.now();
+            return ret;
+        },
+        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
+            // Cast intrinsic for `Ref(String) -> Externref`.
+            const ret = getStringFromWasm0(arg0, arg1);
+            return ret;
+        },
+        __wbindgen_init_externref_table: function() {
+            const table = wasm.__wbindgen_externrefs;
+            const offset = table.grow(4);
+            table.set(0, undefined);
+            table.set(offset + 0, undefined);
+            table.set(offset + 1, null);
+            table.set(offset + 2, true);
+            table.set(offset + 3, false);
+        },
+    };
+    return {
+        __proto__: null,
+        "./d4optimizer_bg.js": import0,
+    };
+}
+
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_externrefs.set(idx, obj);
+    return idx;
+}
+
+let cachedDataViewMemory0 = null;
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+
+function getStringFromWasm0(ptr, len) {
+    return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint8ArrayMemory0 = null;
+function getUint8ArrayMemory0() {
+    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
+        cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
+    }
+    return cachedUint8ArrayMemory0;
+}
+
+function handleError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        const idx = addToExternrefTable0(e);
+        wasm.__wbindgen_exn_store(idx);
+    }
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
+}
+
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
+let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+cachedTextDecoder.decode();
+const MAX_SAFARI_DECODE_BYTES = 2146435072;
+let numBytesDecoded = 0;
+function decodeText(ptr, len) {
+    numBytesDecoded += len;
+    if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
+        cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+        cachedTextDecoder.decode();
+        numBytesDecoded = len;
+    }
+    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
+}
+
+let WASM_VECTOR_LEN = 0;
+
+let wasmModule, wasmInstance, wasm;
+function __wbg_finalize_init(instance, module) {
+    wasmInstance = instance;
+    wasm = instance.exports;
+    wasmModule = module;
+    cachedDataViewMemory0 = null;
+    cachedUint8ArrayMemory0 = null;
+    wasm.__wbindgen_start();
+    return wasm;
+}
+
+async function __wbg_load(module, imports) {
+    if (typeof Response === 'function' && module instanceof Response) {
+        if (typeof WebAssembly.instantiateStreaming === 'function') {
+            try {
+                return await WebAssembly.instantiateStreaming(module, imports);
+            } catch (e) {
+                const validResponse = module.ok && expectedResponseType(module.type);
+
+                if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
+                    console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
+
+                } else { throw e; }
+            }
+        }
+
+        const bytes = await module.arrayBuffer();
+        return await WebAssembly.instantiate(bytes, imports);
+    } else {
+        const instance = await WebAssembly.instantiate(module, imports);
+
+        if (instance instanceof WebAssembly.Instance) {
+            return { instance, module };
+        } else {
+            return instance;
+        }
+    }
+
+    function expectedResponseType(type) {
+        switch (type) {
+            case 'basic': case 'cors': case 'default': return true;
+        }
+        return false;
+    }
+}
+
+function initSync(module) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (module !== undefined) {
+        if (Object.getPrototypeOf(module) === Object.prototype) {
+            ({module} = module)
+        } else {
+            console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
+        }
+    }
+
+    const imports = __wbg_get_imports();
+    if (!(module instanceof WebAssembly.Module)) {
+        module = new WebAssembly.Module(module);
+    }
+    const instance = new WebAssembly.Instance(module, imports);
+    return __wbg_finalize_init(instance, module);
+}
+
+async function __wbg_init(module_or_path) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (module_or_path !== undefined) {
+        if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
+            ({module_or_path} = module_or_path)
+        } else {
+            console.warn('using deprecated parameters for the initialization function; pass a single object instead')
+        }
+    }
+
+    if (module_or_path === undefined) {
+        module_or_path = new URL('d4optimizer_bg.wasm', import.meta.url);
+    }
+    const imports = __wbg_get_imports();
+
+    if (typeof module_or_path === 'string' || (typeof Request === 'function' && module_or_path instanceof Request) || (typeof URL === 'function' && module_or_path instanceof URL)) {
+        module_or_path = fetch(module_or_path);
+    }
+
+    const { instance, module } = await __wbg_load(await module_or_path, imports);
+
+    return __wbg_finalize_init(instance, module);
+}
+
+export { initSync, __wbg_init as default };

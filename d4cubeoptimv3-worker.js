@@ -39,6 +39,49 @@ if (typeof module !== "undefined" && module.exports) {
   };
 }
 
+// D4_USE_RUST=true enables the Rust/WASM optimiser path (v4) for Node tests.
+// In the browser, pass `useRust: true` in each "run" message instead.
+const D4_USE_RUST =
+  (typeof process !== "undefined" && process.env && process.env.D4_USE_RUST === "true") ||
+  (typeof self !== "undefined" && self.D4_USE_RUST === true);
+
+let rustWorker = null;
+let _rustWorkerLoading = null; // in-flight Promise for browser lazy WASM init
+let _rustWorkerFailed = false; // true after a failed load; skip Rust thereafter
+
+if (D4_USE_RUST && typeof module !== "undefined" && module.exports) {
+  try {
+    rustWorker = require("./rust/pkg-node/d4optimizer.js");
+  } catch (_) {
+    // Built artifacts not present; fall back to JS path silently.
+  }
+}
+
+// Lazy WASM loader for classic browser Web Workers.
+// Called before the first Rust-path run; resolves immediately on repeat calls.
+async function ensureRustWorker() {
+  if (rustWorker || _rustWorkerFailed) return;
+  if (_rustWorkerLoading) { await _rustWorkerLoading; return; }
+  if (typeof importScripts === "undefined") return; // not a classic worker
+
+  _rustWorkerLoading = (async () => {
+    try {
+      importScripts("./rust/pkg-no-modules/d4optimizer.js");
+      // wasm_bindgen is now a global set by the imported script.
+      // Pass the .wasm URL explicitly because document.currentScript is
+      // unavailable in workers, so the auto-detect path cannot be used.
+      await wasm_bindgen("./rust/pkg-no-modules/d4optimizer_bg.wasm"); // eslint-disable-line no-undef
+      rustWorker = wasm_bindgen; // eslint-disable-line no-undef
+    } catch (e) {
+      console.warn("[d4optimizer] WASM load failed; falling back to JS:", e);
+      _rustWorkerFailed = true;
+    } finally {
+      _rustWorkerLoading = null;
+    }
+  })();
+  await _rustWorkerLoading;
+}
+
 const DEFAULT_MAX_AFFIX_SLOTS = 4;
 const FEASIBILITY_STRATEGY = "v3-feasibility";
 const FALLBACK_STRATEGY = "v3-v2-fallback";
@@ -5833,9 +5876,123 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   };
 }
 
+// ── ILP callback for Rust WASM path ──────────────────────────────────────────
+// The Rust optimizer calls this with a serialized DecompositionPlanInput and
+// expects a serialized solveDecompositionPlanV3 result back.
+//
+// Rust JSON serialization creates separate copies of option objects in both
+// planInput.options and targets[i].options. solveDecompositionPlanV3 relies
+// on buildDecompositionILPProblemV3 mutating planInput.options and those
+// mutations being visible via the same object references in targets[i].options.
+// We fix this by re-linking before calling the solver.
+function makeRustIlpCallback() {
+  return function rustIlpCallback(planInputJson) {
+    try {
+      const planInput = JSON.parse(planInputJson);
+      // Re-link targets[i].options to reference the same objects as planInput.options.
+      if (Array.isArray(planInput.options) && Array.isArray(planInput.targets)) {
+        const byId = Object.create(null);
+        for (const o of planInput.options) {
+          if (o && o.id) byId[o.id] = o;
+        }
+        for (const row of planInput.targets) {
+          if (Array.isArray(row.options)) {
+            row.options = row.options.map((o) => (o && o.id && byId[o.id]) ? byId[o.id] : o);
+          }
+        }
+      }
+      const solution = solveDecompositionPlanV3(planInput);
+      return JSON.stringify(solution);
+    } catch (_) {
+      return null;
+    }
+  };
+}
+
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
+
+  // ── Rust WASM path ────────────────────────────────────────────────────────
+  if ((D4_USE_RUST || payload.useRust) && rustWorker && typeof rustWorker.optimize_payload === "function") {
+    const payloadJson = JSON.stringify(payload);
+    const ilpCb = makeRustIlpCallback();
+    let result;
+    try {
+      const resultJson = rustWorker.optimize_payload(payloadJson, ilpCb);
+      result = JSON.parse(resultJson);
+    } catch (e) {
+      // Fall back to JS path on error
+      result = null;
+    }
+
+    if (result) {
+      const wantsVerification = payload.tightenStepsLevel === "light"
+        || payload.tightenStepsLevel === "heavy"
+        || payload.tightenStepsLevel === "adaptive";
+
+      if (!wantsVerification) {
+        self.postMessage({ type: "done", runId, ...result });
+        return;
+      }
+
+      let firstProgressSent = false;
+      let finalResult;
+      if (typeof rustWorker.run_mc_verification === "function") {
+        // Use Rust MC path
+        try {
+          const intermediateJson = JSON.stringify(result);
+          const onProgressCb = (progressJson) => {
+            try {
+              const progress = JSON.parse(progressJson);
+              const msg = {
+                type: "verifying",
+                runId,
+                completed: progress.completed,
+                total: progress.total,
+              };
+              if (!firstProgressSent && progress.intermediateResult) {
+                msg.intermediateResult = progress.intermediateResult;
+                firstProgressSent = true;
+              }
+              if (progress.intermediateMean !== undefined) {
+                msg.intermediateMean = progress.intermediateMean;
+              }
+              self.postMessage(msg);
+            } catch (_) {}
+          };
+          const finalJson = rustWorker.run_mc_verification(payloadJson, intermediateJson, ilpCb, onProgressCb);
+          finalResult = JSON.parse(finalJson);
+        } catch (_) {
+          // Fall back to JS MC
+          finalResult = runMCVerificationV3(payload, result, {
+            stopView,
+            onProgress: (progress) => {
+              const msg = { type: "verifying", runId, completed: progress.completed, total: progress.total };
+              if (!firstProgressSent && progress.intermediateResult) { msg.intermediateResult = progress.intermediateResult; firstProgressSent = true; }
+              if (progress.intermediateMean !== undefined) { msg.intermediateMean = progress.intermediateMean; }
+              self.postMessage(msg);
+            },
+          });
+        }
+      } else {
+        // JS MC with Rust optimizer result as intermediate
+        finalResult = runMCVerificationV3(payload, result, {
+          stopView,
+          onProgress: (progress) => {
+            const msg = { type: "verifying", runId, completed: progress.completed, total: progress.total };
+            if (!firstProgressSent && progress.intermediateResult) { msg.intermediateResult = progress.intermediateResult; firstProgressSent = true; }
+            if (progress.intermediateMean !== undefined) { msg.intermediateMean = progress.intermediateMean; }
+            self.postMessage(msg);
+          },
+        });
+      }
+      self.postMessage({ type: "done", runId, ...finalResult });
+      return;
+    }
+  }
+
+  // ── JS path (default) ─────────────────────────────────────────────────────
   const result = optimizePayloadV3(payload, {
     stopView,
     refineDepth: 2,      // two concrete Bellman-backup steps
@@ -5877,7 +6034,7 @@ function runOptimizationV3(payload, runId) {
 }
 
 if (typeof self !== "undefined") {
-  self.onmessage = (event) => {
+  self.onmessage = async (event) => {
     const payload = event.data || {};
 
     if (payload.type === "set-scorer-model") {
@@ -5891,6 +6048,9 @@ if (typeof self !== "undefined") {
     if (payload.type === "run") {
       const runId = Number(payload.runId) || 0;
       try {
+        if (payload.useRust && !rustWorker && !_rustWorkerFailed) {
+          await ensureRustWorker();
+        }
         runOptimizationV3(payload, runId);
       } catch (error) {
         self.postMessage({
@@ -5980,6 +6140,10 @@ if (typeof module !== "undefined" && module.exports) {
     // Re-export key base-worker helpers used by tests.
     buildEnv: buildEnv,
     stateKey: stateKey,
+    actionKey: actionKey,
+    isTerminal: isTerminal,
+    breaksRequiredGA: breaksRequiredGA,
+    getAffixCounts: getAffixCounts,
     getActionOutcomes: getActionOutcomes,
     getValidActions: getValidActions,
     getEligibleByCategory: getEligibleByCategory,
@@ -5988,5 +6152,6 @@ if (typeof module !== "undefined" && module.exports) {
     affixSupportsClass: affixSupportsClass,
     getEffectiveAffixRollWeight: getEffectiveAffixRollWeight,
     buildFamilyCountsForPool: buildFamilyCountsForPool,
+    makeRustIlpCallback: makeRustIlpCallback,
   };
 }

@@ -12,6 +12,9 @@ const FILE_MAP = {
 	"gear-slot-legality.js": "gear-slot-legality.js",
 	"ilp.js": "ilp.js",
 	"config.js": "config.js",
+	// Rust/WASM browser artifacts (committed; no deploy build step required).
+	"rust/pkg-web/d4optimizer.js": "rust/pkg-web/d4optimizer.js",
+	"rust/pkg-web/d4optimizer_bg.wasm": "rust/pkg-web/d4optimizer_bg.wasm",
 };
 
 // Root-level files that are never deployment candidates regardless of extension.

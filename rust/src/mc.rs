@@ -363,14 +363,17 @@ pub fn run_mc_verification_v3(
             let action = if let Some(cached) = action_cache.get(&key) {
                 cached.clone()
             } else {
+                // Sub-call must inherit `time_ms` so the residual solver uses
+                // the same state-limit budget as the parent call. Mirrors JS
+                // `optimizePayloadV3({ ...payload, state })` in runMCVerificationV3.
                 let sub_payload = OptimizePayload {
                     state: state.clone(),
                     target: payload.target.clone(),
                     data: payload.data.clone(),
                     ga_config: payload.ga_config.clone(),
-                    time_ms: None,
-                    tighten_steps_level: None,
-                    tighten_steps_overrides: None,
+                    time_ms: payload.time_ms,
+                    tighten_steps_level: payload.tighten_steps_level.clone(),
+                    tighten_steps_overrides: payload.tighten_steps_overrides.clone(),
                 };
                 let sub_result = optimize_payload_v3(&sub_payload, env, solve_ilp, 0, 1);
                 let act = if sub_result["action"].is_null() {

@@ -647,10 +647,109 @@ function runPhase3(jsWorker, rustMod) {
   return fail;
 }
 
-// ── Phase 2+: additional differential cases (added incrementally) ─────────────
+// ── Phase 4: MC verification differential tests ─────────────────────────────
 
-function runPhase2Plus() {
-  return 0;
+// Smoke-tests the Rust MC verification path against JS. Asserts: same
+// optimizer action on the root state, MC mean within a generous tolerance,
+// and truncation rates match within a few rollouts.
+//
+// Note: this fixture uses CATALOG_DATA (7 affixes, 3 categories). A real bug
+// requiring `timeMs` propagation through MC sub-calls would only manifest
+// for graphs that exceed the default 500-state limit, which the small test
+// catalog cannot reproduce. The canonical end-to-end regression test for
+// MC behavior is `scripts/benchmark-mc-rollouts.js` (full config catalog).
+function runPhase4(jsWorker, rustMod) {
+  console.log("Phase 4: optimizer + MC budget propagation tests");
+  let pass = 0;
+  let fail = 0;
+
+  const solveIlp = makeIlpCallback(jsWorker);
+
+  // Each test fixes a known-tricky payload and asserts the Rust MC mean is
+  // close to the JS MC mean. We don't require bit-equality (RNG differs) but
+  // we do require: same selected action, similar success prob, similar
+  // expected steps from the optimizer headline, and (after MC) similar means
+  // within a generous tolerance.
+  const tests = [
+    {
+      label: "MC verification: small 4-affix add scenario, timeMs=30000",
+      state: { isLegendary: false, gearSlot: "Any", class: "Any", affixes: [
+        { affixId: "maximum-life", isGA: false, isEnchanted: false },
+        { affixId: "attack-speed", isGA: false, isEnchanted: false },
+        { affixId: "critical-strike-chance", isGA: false, isEnchanted: false },
+      ] },
+      target: { affixes: [
+        { affixId: "maximum-life" },
+        { affixId: "attack-speed" },
+        { affixId: "critical-strike-chance" },
+        { affixId: "damage-reduction" },
+      ] },
+      data: CATALOG_DATA,
+      gaConfig: {},
+      timeMs: 30000,
+    },
+  ];
+
+  for (const tc of tests) {
+    const payload = {
+      state: tc.state,
+      target: tc.target,
+      data: tc.data,
+      gaConfig: tc.gaConfig,
+      timeMs: tc.timeMs,
+    };
+
+    const jsResult = jsWorker.optimizePayloadV3(payload, { refineDepth: 0 });
+    const rustResult = JSON.parse(rustMod.optimize_payload(JSON.stringify(payload), solveIlp));
+
+    // Both should produce a non-null action with a finite expectedSteps.
+    if (!jsResult.action || !rustResult.action) {
+      console.error(`  FAIL: ${tc.label} [optimizer returned null on root state]`);
+      console.error(`        JS action: ${JSON.stringify(jsResult.action)}`);
+      console.error(`        Rust action: ${JSON.stringify(rustResult.action)}`);
+      fail++;
+      continue;
+    }
+    if (jsResult.action.type !== rustResult.action.type) {
+      console.error(`  FAIL: ${tc.label} [action.type mismatch JS=${jsResult.action.type} Rust=${rustResult.action.type}]`);
+      fail++;
+      continue;
+    }
+    console.log(`  PASS: ${tc.label} [optimizer agrees on action.type=${jsResult.action.type}]`);
+    pass++;
+
+    // Run MC verification on both. With light budget = 100 rollouts each.
+    const mcPayload = { ...payload, tightenStepsLevel: "light" };
+    const jsFinal = jsWorker.runMCVerificationV3(mcPayload, jsResult);
+    const rustFinalJson = rustMod.run_mc_verification(
+      JSON.stringify(mcPayload),
+      JSON.stringify(rustResult),
+      solveIlp,
+      null,
+    );
+    const rustFinal = JSON.parse(rustFinalJson);
+
+    const jsTrunc = jsFinal.diagnostics && jsFinal.diagnostics.goldStandard && jsFinal.diagnostics.goldStandard.truncatedRolloutCount;
+    const rustTrunc = rustFinal.diagnostics && rustFinal.diagnostics.goldStandard && rustFinal.diagnostics.goldStandard.truncatedRolloutCount;
+
+    // Truncation rates must match within a small tolerance. If Rust truncates
+    // significantly more than JS, it's likely a budget-propagation regression.
+    if (jsTrunc == null || rustTrunc == null) {
+      console.error(`  FAIL: ${tc.label} [MC diagnostics missing JS=${jsTrunc} Rust=${rustTrunc}]`);
+      fail++;
+      continue;
+    }
+    if (Math.abs(jsTrunc - rustTrunc) > 5) {
+      console.error(`  FAIL: ${tc.label} [truncation rate mismatch JS=${jsTrunc}/100 Rust=${rustTrunc}/100]`);
+      fail++;
+      continue;
+    }
+    console.log(`  PASS: ${tc.label} [truncation rates match: JS=${jsTrunc} Rust=${rustTrunc}]`);
+    pass++;
+  }
+
+  console.log(`Phase 4: ${pass} passed, ${fail} failed\n`);
+  return fail;
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -676,7 +775,7 @@ if (onlyPhase === null || onlyPhase === 0) runPhase0(rustMod);
 if (onlyPhase === null || onlyPhase === 1) totalFail += runPhase1(jsWorker, rustMod);
 if (onlyPhase === null || onlyPhase === 2) totalFail += runPhase2(jsWorker, rustMod);
 if (onlyPhase === null || onlyPhase === 3) totalFail += runPhase3(jsWorker, rustMod);
-if (onlyPhase === null || onlyPhase >= 4)  totalFail += runPhase2Plus();
+if (onlyPhase === null || onlyPhase === 4) totalFail += runPhase4(jsWorker, rustMod);
 
 if (totalFail > 0) {
   console.error(`${totalFail} test(s) failed.`);

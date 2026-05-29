@@ -13,6 +13,12 @@ const FILE_MAP = {
 	"ilp.js": "ilp.js",
 	"config.js": "config.js",
 	// Rust/WASM browser artifacts (committed; no deploy build step required).
+	// pkg-no-modules is the build the classic Web Worker actually loads via
+	// importScripts (global `wasm_bindgen`); pkg-web is the ES-module build kept
+	// for completeness. Both must ship or the live worker's WASM load 404s and
+	// silently falls back to the JS solver.
+	"rust/pkg-no-modules/d4optimizer.js": "rust/pkg-no-modules/d4optimizer.js",
+	"rust/pkg-no-modules/d4optimizer_bg.wasm": "rust/pkg-no-modules/d4optimizer_bg.wasm",
 	"rust/pkg-web/d4optimizer.js": "rust/pkg-web/d4optimizer.js",
 	"rust/pkg-web/d4optimizer_bg.wasm": "rust/pkg-web/d4optimizer_bg.wasm",
 };
@@ -53,6 +59,7 @@ function syncFiles() {
 			fs.writeFileSync(dstPath, frontmatter + srcContent, "utf8");
 			console.log(`  index.html  (frontmatter preserved)`);
 		} else {
+			fs.mkdirSync(path.dirname(dstPath), { recursive: true });
 			fs.copyFileSync(srcPath, dstPath);
 			console.log(`  ${dstName}`);
 		}

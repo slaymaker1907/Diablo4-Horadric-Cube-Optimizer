@@ -75,6 +75,45 @@ pub struct TranslationEnv {
 
     /// Number of non-null entries in gaConfig.currentGAAffixes.
     pub source_total_ga_count: u32,
+
+    // ── Integer hot-path fields (zero-alloc inner loop) ───────────────────────
+
+    /// Category names in lexicographic order, including "_" at its correct position.
+    pub category_to_id: HashMap<String, u16>,
+    /// Indexed by category ID; same sorted order.
+    pub id_to_category: Vec<String>,
+    /// Category ID of the string "_" (None-prism sentinel for action_sort_key).
+    pub prism_none_id: u16,
+
+    /// "trash<sig>" strings → their unified token ID.
+    pub trash_sig_to_token: HashMap<String, u16>,
+    /// For each real affix token, the unified token ID of its trash pseudo-token.
+    /// Indexed by token; index 0 = 0 (unused).
+    pub token_to_trash_token: Vec<u16>,
+    /// Unified token ID of the string "_" (None-target sentinel for action_sort_key).
+    pub affix_none_token: u16,
+
+    /// Family ID for each real affix token (0 = no family).
+    /// Indexed by token; size = total token count.
+    pub token_family_id: Vec<u8>,
+    /// Canonical token for each real affix token (result of canonicalize_affix_id).
+    pub token_canonical: Vec<u16>,
+    /// How many times each token appears in the target spec.
+    pub token_target_count: Vec<u32>,
+    /// How many GAs of each token are required (from ga_required_counts).
+    pub token_ga_required: Vec<u32>,
+
+    /// Family IDs (index 0 = "" / no family, index 1..K = real families).
+    pub family_names: Vec<String>,
+    /// Family name → family ID.
+    pub family_name_to_id: HashMap<String, u8>,
+    /// For each family ID, the token of the "other" placeholder (0 = none).
+    pub family_other_token: Vec<u16>,
+    /// For each family ID, the token of the wanted affix (0 = none).
+    pub family_wanted_token: Vec<u16>,
+
+    /// Deduplicated set of token IDs required by the target.
+    pub required_target_tokens: Vec<u16>,
 }
 
 thread_local! {
@@ -161,19 +200,12 @@ pub fn get_max_affix_slots(state: &crate::types::JsState, env: &TranslationEnv) 
 }
 
 pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> TranslationEnv {
-    // ── Affix token mapping ───────────────────────────────────────────────────
-    let mut affix_id_to_token: HashMap<String, u16> = HashMap::new();
-    let mut token_to_affix_id: Vec<String> = vec!["".to_string()]; // 0 = empty
+    // ── Pass 1: build affix metadata (affix_map, affix_categories, affix_family) ─
     let mut affix_categories: HashMap<String, Vec<String>> = HashMap::new();
     let mut affix_family: HashMap<String, String> = HashMap::new();
     let mut affix_map: HashMap<String, AffixData> = HashMap::new();
 
     for affix in &data.affixes {
-        if !affix_id_to_token.contains_key(&affix.id) {
-            let token = token_to_affix_id.len() as u16;
-            token_to_affix_id.push(affix.id.clone());
-            affix_id_to_token.insert(affix.id.clone(), token);
-        }
         if !affix.categories.is_empty() {
             affix_categories.insert(affix.id.clone(), affix.categories.clone());
         }
@@ -183,6 +215,74 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
             }
         }
         affix_map.insert(affix.id.clone(), affix.clone());
+    }
+
+    // ── Pass 2: compute trash signatures for all unique affixes ──────────────
+    let mut unique_affix_ids: Vec<&str> = data.affixes.iter().map(|a| a.id.as_str()).collect();
+    unique_affix_ids.sort_unstable();
+    unique_affix_ids.dedup();
+
+    // Helper: compute trash signature string for an affix ID.
+    let compute_trash_sig = |id: &str| -> String {
+        let affix = affix_map.get(id);
+        let mut cats: Vec<String> = affix.map(|a| a.categories.clone()).unwrap_or_default();
+        cats.sort_unstable();
+        let cat_str = cats.join("&");
+        let family = affix_family
+            .get(id)
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| crate::actions::infer_affix_family(id));
+        if !family.is_empty() {
+            format!("{}::{}", cat_str, family)
+        } else {
+            cat_str
+        }
+    };
+
+    let mut trash_sigs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for &id in &unique_affix_ids {
+        trash_sigs.insert(format!("trash<{}>", compute_trash_sig(id)));
+    }
+
+    // ── Pass 3: build unified sorted token list ───────────────────────────────
+    // Unified token list = sorted(all_affix_ids + all_trash_sig_strings + "_").
+    // Token 0 = empty slot marker (not in the list, inserted at index 0 separately).
+    let mut unified: Vec<String> = unique_affix_ids
+        .iter()
+        .map(|s| s.to_string())
+        .chain(trash_sigs.iter().cloned())
+        .chain(std::iter::once("_".to_string()))
+        .collect();
+    unified.sort_unstable();
+
+    let mut affix_id_to_token: HashMap<String, u16> = HashMap::new();
+    let mut token_to_affix_id: Vec<String> = vec!["".to_string()]; // index 0 = empty
+    let mut trash_sig_to_token: HashMap<String, u16> = HashMap::new();
+    let mut affix_none_token: u16 = 0;
+
+    for s in &unified {
+        let token = token_to_affix_id.len() as u16;
+        token_to_affix_id.push(s.clone());
+        if s == "_" {
+            affix_none_token = token;
+        } else if s.starts_with("trash<") {
+            trash_sig_to_token.insert(s.clone(), token);
+        } else {
+            affix_id_to_token.insert(s.clone(), token);
+        }
+    }
+
+    // For each real affix token → precompute its trash token.
+    let total_tokens = token_to_affix_id.len();
+    let mut token_to_trash_token: Vec<u16> = vec![0u16; total_tokens];
+    for &id in &unique_affix_ids {
+        if let Some(&real_tok) = affix_id_to_token.get(id) {
+            let sig = compute_trash_sig(id);
+            let trash_str = format!("trash<{}>", sig);
+            if let Some(&trash_tok) = trash_sig_to_token.get(&trash_str) {
+                token_to_trash_token[real_tok as usize] = trash_tok;
+            }
+        }
     }
 
     // ── Gear slot mapping ─────────────────────────────────────────────────────
@@ -403,6 +503,136 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         }
     };
 
+    // ── Integer hot-path precomputation ──────────────────────────────────────
+
+    // Category IDs in lexicographic order (including "_" at its sorted position).
+    let mut all_cats_with_sentinel: Vec<String> = data.categories.keys().cloned().collect();
+    all_cats_with_sentinel.push("_".to_string());
+    all_cats_with_sentinel.sort_unstable();
+    let mut category_to_id: HashMap<String, u16> = HashMap::new();
+    let mut id_to_category: Vec<String> = Vec::new();
+    let mut prism_none_id: u16 = 0;
+    for (i, cat) in all_cats_with_sentinel.iter().enumerate() {
+        category_to_id.insert(cat.clone(), i as u16);
+        id_to_category.push(cat.clone());
+        if cat == "_" {
+            prism_none_id = i as u16;
+        }
+    }
+
+    // Family system.
+    let mut family_names: Vec<String> = vec!["".to_string()]; // 0 = no family
+    let mut family_name_to_id: HashMap<String, u8> = HashMap::new();
+    {
+        let mut unique_fams: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for id in &unique_affix_ids {
+            let fam = affix_family
+                .get(*id)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| crate::actions::infer_affix_family(id));
+            if !fam.is_empty() {
+                unique_fams.insert(fam.to_string());
+            }
+        }
+        for (fam, _) in &family_other_id {
+            unique_fams.insert(fam.clone());
+        }
+        for (i, fam) in unique_fams.iter().enumerate() {
+            let fid = (i + 1) as u8;
+            family_name_to_id.insert(fam.clone(), fid);
+            family_names.push(fam.clone());
+        }
+    }
+    let num_families = family_names.len();
+
+    // Per-token data arrays (size = total_tokens).
+    let mut token_family_id: Vec<u8> = vec![0u8; total_tokens];
+    let mut token_target_count: Vec<u32> = vec![0u32; total_tokens];
+    let mut token_ga_required: Vec<u32> = vec![0u32; total_tokens];
+
+    for &id in &unique_affix_ids {
+        if let Some(&tok) = affix_id_to_token.get(id) {
+            let fam = affix_family
+                .get(id)
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| crate::actions::infer_affix_family(id));
+            if !fam.is_empty() {
+                if let Some(&fid) = family_name_to_id.get(fam) {
+                    token_family_id[tok as usize] = fid;
+                }
+            }
+            if let Some(&cnt) = target_counts.get(id) {
+                token_target_count[tok as usize] = cnt;
+            }
+            if let Some(&cnt) = ga_required_counts.get(id) {
+                token_ga_required[tok as usize] = cnt;
+            }
+        }
+    }
+    // Also handle synthetic "other" tokens added to affix_map after the unique_affix_ids pass.
+    for (id, data_entry) in &affix_map {
+        if let Some(&tok) = affix_id_to_token.get(id) {
+            if token_family_id[tok as usize] == 0 {
+                if let Some(ref fam) = data_entry.family {
+                    if !fam.is_empty() {
+                        if let Some(&fid) = family_name_to_id.get(fam.as_str()) {
+                            token_family_id[tok as usize] = fid;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // family_other_token and family_wanted_token.
+    let mut family_other_token: Vec<u16> = vec![0u16; num_families];
+    let mut family_wanted_token: Vec<u16> = vec![0u16; num_families];
+    for (fam, other_id) in &family_other_id {
+        if let Some(&fid) = family_name_to_id.get(fam.as_str()) {
+            if let Some(&tok) = affix_id_to_token.get(other_id.as_str()) {
+                family_other_token[fid as usize] = tok;
+            }
+        }
+    }
+    for (fam, wanted_id) in &wanted_by_family {
+        if let Some(&fid) = family_name_to_id.get(fam.as_str()) {
+            if let Some(&tok) = affix_id_to_token.get(wanted_id.as_str()) {
+                family_wanted_token[fid as usize] = tok;
+            }
+        }
+    }
+
+    // token_canonical: canonicalize_affix_id result for each real token.
+    let mut token_canonical: Vec<u16> = (0..total_tokens as u16).collect();
+    for &id in &unique_affix_ids {
+        if let Some(&tok) = affix_id_to_token.get(id) {
+            let fid = token_family_id[tok as usize];
+            let canonical = if fid == 0 {
+                tok
+            } else {
+                let wanted = family_wanted_token[fid as usize];
+                if wanted != 0 && tok == wanted {
+                    tok
+                } else {
+                    let other = family_other_token[fid as usize];
+                    if other != 0 { other } else { tok }
+                }
+            };
+            token_canonical[tok as usize] = canonical;
+        }
+    }
+
+    // required_target_tokens: deduplicated set of tokens required by target.
+    let required_target_tokens: Vec<u16> = {
+        let mut set: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        for id in target_counts.keys() {
+            if let Some(&tok) = affix_id_to_token.get(id) {
+                set.insert(tok);
+            }
+        }
+        set.into_iter().collect()
+    };
+
     TranslationEnv {
         affix_id_to_token,
         token_to_affix_id,
@@ -431,5 +661,21 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         unsatisfactory_counts,
         impossible_target_ga_reason,
         source_total_ga_count,
+        // Integer hot-path
+        category_to_id,
+        id_to_category,
+        prism_none_id,
+        trash_sig_to_token,
+        token_to_trash_token,
+        affix_none_token,
+        token_family_id,
+        token_canonical,
+        token_target_count,
+        token_ga_required,
+        family_names,
+        family_name_to_id,
+        family_other_token,
+        family_wanted_token,
+        required_target_tokens,
     }
 }

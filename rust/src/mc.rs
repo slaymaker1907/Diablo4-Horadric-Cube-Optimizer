@@ -5,16 +5,16 @@ use serde_json::{json, Value};
 use crate::env::TranslationEnv;
 use crate::feasibility::analyze_feasibility;
 use crate::optimizer::{get_residual_env_overrides, optimize_payload_v3, SolveIlpFn};
+use crate::intern::{intern_state, iresidual_key_v3, istate_key_v1, effective_residual_token};
 use crate::residual::{
     action_to_json, attach_unsatisfactory_to_state, build_residual_reachable_graph_v3,
-    extract_residual_policy_indices, get_action_outcomes, get_residual_affix_token_v3,
-    get_residual_relevant_affix_ids_v3, has_duplicate_affix_ids_v2, normalize_outcome_state_v2,
-    residual_state_key_v3, solve_residual_lao_phase1_v3, solve_residual_lao_phase2_v3,
+    extract_residual_policy_indices, get_action_outcomes,
+    get_residual_relevant_tokens_v3, has_duplicate_affix_ids_v2, normalize_outcome_state_v2,
+    solve_residual_lao_phase1_v3, solve_residual_lao_phase2_v3,
     BuildGraphOptions, ResidualContext, RESIDUAL_EPSILON, RESIDUAL_PHASE2_EPSILON,
 };
 use crate::terminal::is_terminal;
 use crate::types::{AffixEntry, JsAction, JsState, OptimizePayload};
-use crate::keys::state_key as compute_state_key;
 
 const MC_LIGHT_ROLLOUTS: usize = 100;
 const MC_HEAVY_ROLLOUTS: usize = 500;
@@ -324,7 +324,7 @@ pub fn expand_family_other_in_state(
 
 #[derive(Clone)]
 struct SlotSignature {
-    token: String,
+    token: u16,
     is_ga: bool,
     is_enchanted: bool,
 }
@@ -337,7 +337,7 @@ struct PolicyEntry {
 }
 
 struct PolicyTable {
-    entries: HashMap<String, PolicyEntry>,
+    entries: HashMap<u128, PolicyEntry>,
     context: ResidualContext,
 }
 
@@ -351,8 +351,10 @@ fn slot_signature_for_index(
     if slot.affix_id.is_empty() {
         return None;
     }
+    let raw_token = env.affix_id_to_token.get(&slot.affix_id).copied().unwrap_or(0);
+    let token = effective_residual_token(raw_token, &context.relevant_tokens, env);
     Some(SlotSignature {
-        token: get_residual_affix_token_v3(slot, context, env),
+        token,
         is_ga: slot.is_ga,
         is_enchanted: slot.is_enchanted,
     })
@@ -402,14 +404,15 @@ fn build_policy_table(
     let policy_indices = extract_residual_policy_indices(&graph, &phase1, &phase2);
 
     let context = ResidualContext {
-        relevant_affix_ids: get_residual_relevant_affix_ids_v3(
+        relevant_tokens: get_residual_relevant_tokens_v3(
             &payload.target,
             &payload.ga_config,
             Some(&feasibility),
+            env,
         ),
     };
 
-    let mut entries: HashMap<String, PolicyEntry> = HashMap::with_capacity(graph.nodes.len());
+    let mut entries: HashMap<u128, PolicyEntry> = HashMap::with_capacity(graph.nodes.len());
     for (i, node) in graph.nodes.iter().enumerate() {
         let action_idx = match policy_indices[i] {
             Some(idx) => idx,
@@ -426,7 +429,7 @@ fn build_policy_table(
             continue;
         }
         entries.insert(
-            node.key.clone(),
+            node.key,
             PolicyEntry {
                 action,
                 source_slot_signature,
@@ -445,11 +448,10 @@ fn lookup_policy_action(
     ga_config: &crate::types::JsGaConfig,
     env: &TranslationEnv,
 ) -> Option<Value> {
-    // Mirror the preprocessing the optimizer does at the top of
-    // solve_residual_payload_v3 so the abstract key matches graph nodes.
     let attached = attach_unsatisfactory_to_state(state, ga_config);
     let normalized = normalize_outcome_state_v2(attached);
-    let key = residual_state_key_v3(&normalized, &table.context, env);
+    let istate = intern_state(&normalized, env);
+    let key = iresidual_key_v3(&istate, &table.context.relevant_tokens, env);
     let entry = table.entries.get(&key)?;
     let mut action = entry.action.clone();
     if let Some(ref src_sig) = entry.source_slot_signature {
@@ -457,7 +459,8 @@ fn lookup_policy_action(
             if slot.affix_id.is_empty() {
                 return None;
             }
-            let tok = get_residual_affix_token_v3(slot, &table.context, env);
+            let raw = env.affix_id_to_token.get(&slot.affix_id).copied().unwrap_or(0);
+            let tok = effective_residual_token(raw, &table.context.relevant_tokens, env);
             if tok == src_sig.token
                 && slot.is_ga == src_sig.is_ga
                 && slot.is_enchanted == src_sig.is_enchanted
@@ -493,9 +496,9 @@ pub fn run_mc_verification_v3(
         return intermediate_result;
     }
 
-    let mut action_cache: HashMap<String, Option<Value>> = HashMap::new();
+    let mut action_cache: HashMap<u64, Option<Value>> = HashMap::new();
 
-    let root_key = compute_state_key(&payload.state);
+    let root_key = istate_key_v1(&intern_state(&payload.state, env));
     action_cache.insert(root_key, Some(intermediate_result["action"].clone()));
 
     // Build the residual-graph policy table once. On a hit during a rollout,
@@ -546,7 +549,7 @@ pub fn run_mc_verification_v3(
                 break;
             }
 
-            let key = compute_state_key(&state);
+            let key = istate_key_v1(&intern_state(&state, env));
             let action = if let Some(cached) = action_cache.get(&key) {
                 cached.clone()
             } else if let Some(policy_action) = policy_table

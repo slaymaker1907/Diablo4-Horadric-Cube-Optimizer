@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 use crate::actions::{
     action_cost, canonicalize_affix_id_for_state, get_affix_family,
     get_category_affixes_for_state, get_eligible_by_category, get_valid_actions_v2,
-    get_affix_categories_for_op, violates_family_uniqueness, is_protected_ga,
+    violates_family_uniqueness,
 };
 use crate::env::TranslationEnv;
-use crate::keys::action_key;
-use crate::types::{AffixData, AffixEntry, FeasibilityResult, JsAction, JsGaConfig, JsState, JsTarget, TargetAffixEntry};
+use crate::intern::{intern_state, intern_action, iresidual_key_v3, istate_key_v1, istate_key_v2, action_sort_key};
+use crate::types::{AffixData, AffixEntry, FeasibilityResult, JsAction, JsGaConfig, JsState, JsTarget};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -38,11 +38,13 @@ pub struct ActionEntry {
     pub action: JsAction,
     pub cube_cost: f64,
     pub transitions: Vec<Transition>,
+    /// Pre-computed sort key; replaces per-call `action_key()` string allocation.
+    pub sort_key: u64,
 }
 
 #[derive(Debug)]
 pub struct GraphNode {
-    pub key: String,
+    pub key: u128,
     pub state: JsState,
     pub success: bool,
     pub dead_reason: String,
@@ -51,7 +53,7 @@ pub struct GraphNode {
 
 pub struct ResidualGraph {
     pub ok: bool,
-    pub root_key: String,
+    pub root_key: u128,
     pub root_index: usize,
     pub nodes: Vec<GraphNode>,
     pub dead_states: usize,
@@ -193,9 +195,9 @@ pub fn canonicalize_unsatisfactory_ids(state: JsState) -> JsState {
 
     // Also sort affixes
     next.affixes.sort_by(|a, b| {
-        let at = format!("{}|{}|{}", a.affix_id, if a.is_ga { 1 } else { 0 }, if a.is_enchanted { 1 } else { 0 });
-        let bt = format!("{}|{}|{}", b.affix_id, if b.is_ga { 1 } else { 0 }, if b.is_enchanted { 1 } else { 0 });
-        at.cmp(&bt)
+        a.affix_id.cmp(&b.affix_id)
+            .then_with(|| (a.is_ga as u8).cmp(&(b.is_ga as u8)))
+            .then_with(|| (a.is_enchanted as u8).cmp(&(b.is_enchanted as u8)))
     });
 
     next
@@ -322,16 +324,16 @@ pub fn sum_effective_weights(pool: &[&AffixData]) -> f64 {
         .sum()
 }
 
-/// Merge outcomes by state key (summing probabilities), then renormalize.
-pub fn merge_outcomes(outcomes: Vec<Outcome>) -> Vec<Outcome> {
-    let mut merged: HashMap<String, Outcome> = HashMap::new();
+/// Merge outcomes by integer state key (summing probabilities), then renormalize.
+pub fn merge_outcomes(outcomes: Vec<Outcome>, env: &TranslationEnv) -> Vec<Outcome> {
+    let mut merged: HashMap<u64, Outcome> = HashMap::new();
     let mut total = 0.0;
 
     for outcome in outcomes {
         if !outcome.probability.is_finite() || outcome.probability <= 0.0 {
             continue;
         }
-        let key = crate::keys::state_key(&outcome.state);
+        let key = istate_key_v1(&intern_state(&outcome.state, env));
         total += outcome.probability;
         if let Some(existing) = merged.get_mut(&key) {
             existing.probability += outcome.probability;
@@ -385,7 +387,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                 }
                 outcomes.push(Outcome { probability: p, state: next });
             }
-            merge_outcomes(outcomes)
+            merge_outcomes(outcomes, env)
         }
 
         "remove" => {
@@ -407,7 +409,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                 next.affixes.remove(*idx);
                 outcomes.push(Outcome { probability: p, state: next });
             }
-            merge_outcomes(outcomes)
+            merge_outcomes(outcomes, env)
         }
 
         "focused" => {
@@ -446,7 +448,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                     outcomes.push(Outcome { probability: source_p * affix_p, state: next });
                 }
             }
-            merge_outcomes(outcomes)
+            merge_outcomes(outcomes, env)
         }
 
         "chaotic" => {
@@ -495,7 +497,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                     }
                 }
             }
-            merge_outcomes(outcomes)
+            merge_outcomes(outcomes, env)
         }
 
         "enchant" => {
@@ -564,14 +566,14 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
 }
 
 /// Mirrors JS `getActionOutcomesV2`.
-/// Merges outcomes by v2 state key, handles unsatisfactory transitions.
+/// Merges outcomes by v2 integer state key, handles unsatisfactory transitions.
 pub fn get_action_outcomes_v2(
     state: &JsState,
     action: &JsAction,
     env: &TranslationEnv,
 ) -> Vec<Outcome> {
     let base_outcomes = get_action_outcomes(state, action, env);
-    let mut merged: HashMap<String, Outcome> = HashMap::new();
+    let mut merged: HashMap<u128, Outcome> = HashMap::new();
     let mut total_prob = 0.0;
 
     for outcome in base_outcomes {
@@ -579,7 +581,7 @@ pub fn get_action_outcomes_v2(
         if has_duplicate_affix_ids_v2(&next) {
             continue;
         }
-        let key = state_key_v2(&next, env);
+        let key = istate_key_v2(&intern_state(&next, env), env);
         total_prob += outcome.probability;
         if let Some(existing) = merged.get_mut(&key) {
             existing.probability += outcome.probability;
@@ -719,7 +721,7 @@ pub fn classify_dead_reason(state: &JsState, target: &JsTarget, env: &Translatio
 // ── Residual abstraction context ──────────────────────────────────────────────
 
 pub struct ResidualContext {
-    pub relevant_affix_ids: HashSet<String>,
+    pub relevant_tokens: HashSet<u16>,
 }
 
 /// Get the affix signature for the residual abstraction (categories + family).
@@ -736,48 +738,20 @@ fn get_residual_affix_signature_v3(affix_id: &str, env: &TranslationEnv) -> Stri
     }
 }
 
-/// Get the residual token for an affix entry.
-pub fn get_residual_affix_token_v3(entry: &AffixEntry, context: &ResidualContext, env: &TranslationEnv) -> String {
+/// Get the residual integer token for an affix entry (0 = empty/unknown).
+pub fn get_residual_affix_token_v3(entry: &AffixEntry, context: &ResidualContext, env: &TranslationEnv) -> u16 {
     if entry.affix_id.is_empty() {
-        return String::new();
+        return 0;
     }
-    if context.relevant_affix_ids.contains(&entry.affix_id) {
-        return entry.affix_id.clone();
-    }
-    format!("trash<{}>", get_residual_affix_signature_v3(&entry.affix_id, env))
+    let token = env.affix_id_to_token.get(&entry.affix_id).copied().unwrap_or(0);
+    crate::intern::effective_residual_token(token, &context.relevant_tokens, env)
 }
 
-/// Mirrors JS `residualStateKeyV3`.
-pub fn residual_state_key_v3(state: &JsState, context: &ResidualContext, env: &TranslationEnv) -> String {
-    let mut tokens: Vec<String> = state
-        .affixes
-        .iter()
-        .filter(|e| !e.affix_id.is_empty())
-        .map(|e| {
-            format!(
-                "{}|{}|{}",
-                get_residual_affix_token_v3(e, context, env),
-                if e.is_ga { 1 } else { 0 },
-                if e.is_enchanted { 1 } else { 0 }
-            )
-        })
-        .collect();
-    tokens.sort();
-
-    let unsatisfactory: Vec<String> = {
-        let mut ids = state.unsatisfactory_affix_ids.clone();
-        ids.sort();
-        ids
-    };
-
-    format!(
-        "L{}#S{}#C{}#A{}#U{}",
-        if state.is_legendary { 1 } else { 0 },
-        state.gear_slot.as_deref().unwrap_or("Any"),
-        state.class.as_deref().unwrap_or("Any"),
-        tokens.join(","),
-        unsatisfactory.join(","),
-    )
+/// Returns a u128 residual state key via the integer hot-path.
+/// Kept for internal use; prefer `iresidual_key_v3` directly.
+#[allow(dead_code)]
+pub fn residual_state_key_v3_u128(state: &JsState, context: &ResidualContext, env: &TranslationEnv) -> u128 {
+    iresidual_key_v3(&intern_state(state, env), &context.relevant_tokens, env)
 }
 
 /// Get the set of relevant (non-trash) affix IDs for the residual abstraction.
@@ -827,11 +801,25 @@ pub fn get_residual_relevant_affix_ids_v3(
     ids.into_iter().filter(|s| !s.is_empty()).collect()
 }
 
+/// Token-based version of `get_residual_relevant_affix_ids_v3` for the integer hot-path.
+pub fn get_residual_relevant_tokens_v3(
+    target: &JsTarget,
+    ga_config: &JsGaConfig,
+    feasibility: Option<&FeasibilityResult>,
+    env: &TranslationEnv,
+) -> HashSet<u16> {
+    get_residual_relevant_affix_ids_v3(target, ga_config, feasibility)
+        .iter()
+        .filter_map(|id| env.affix_id_to_token.get(id).copied())
+        .filter(|&tok| tok != 0)
+        .collect()
+}
+
 // ── Graph node creation ───────────────────────────────────────────────────────
 
 fn create_residual_graph_node_v3(
     state: JsState,
-    key: String,
+    key: u128,
     target: &JsTarget,
     env: &TranslationEnv,
 ) -> GraphNode {
@@ -841,18 +829,12 @@ fn create_residual_graph_node_v3(
     } else {
         classify_dead_reason(&state, target, env)
     };
-    let action_entries: Vec<ActionEntry> = if success || !dead_reason.is_empty() {
-        vec![]
-    } else {
-        // Actions computed at BFS expansion time (after node creation).
-        vec![]
-    };
     GraphNode {
         key,
         state,
         success,
         dead_reason,
-        action_entries,
+        action_entries: vec![],
     }
 }
 
@@ -875,7 +857,7 @@ pub fn build_residual_reachable_graph_v3(
     let limit = options.state_limit.unwrap_or(RESIDUAL_STATE_LIMIT);
 
     let context = ResidualContext {
-        relevant_affix_ids: get_residual_relevant_affix_ids_v3(target, ga_config, options.feasibility),
+        relevant_tokens: get_residual_relevant_tokens_v3(target, ga_config, options.feasibility, env),
     };
 
     let attached_root = if options.root_already_attached {
@@ -884,18 +866,16 @@ pub fn build_residual_reachable_graph_v3(
         attach_unsatisfactory_to_state(root_state, ga_config)
     };
     let root = normalize_outcome_state_v2(attached_root);
-    let root_key = residual_state_key_v3(&root, &context, env);
+    let root_key = iresidual_key_v3(&intern_state(&root, env), &context.relevant_tokens, env);
 
-    let mut key_to_index: HashMap<String, usize> = HashMap::new();
-    key_to_index.insert(root_key.clone(), 0);
+    let mut key_to_index: HashMap<u128, usize> = HashMap::new();
+    key_to_index.insert(root_key, 0);
 
-    // Pre-compute valid actions for root node.
-    let root_actions = get_valid_actions_v2(&root, target, env);
     let root_success = is_success_state_v2(&root, target, env);
     let root_dead = if root_success { String::new() } else { classify_dead_reason(&root, target, env) };
 
     let root_node = GraphNode {
-        key: root_key.clone(),
+        key: root_key,
         state: root,
         success: root_success,
         dead_reason: root_dead.clone(),
@@ -915,17 +895,16 @@ pub fn build_residual_reachable_graph_v3(
             }
         }
 
-        // Get actions for this node.
         let actions = get_valid_actions_v2(&nodes[queue_index].state.clone(), target, env);
         let mut action_entries: Vec<ActionEntry> = Vec::new();
 
         for action in &actions {
             let raw_outcomes = get_action_outcomes_v2(&nodes[queue_index].state.clone(), action, env);
-            let mut merged: HashMap<String, (f64, JsState)> = HashMap::new();
+            let mut merged: HashMap<u128, (f64, JsState)> = HashMap::new();
 
             for outcome in raw_outcomes {
                 let child = normalize_outcome_state_v2(outcome.state);
-                let child_key = residual_state_key_v3(&child, &context, env);
+                let child_key = iresidual_key_v3(&intern_state(&child, env), &context.relevant_tokens, env);
                 if let Some((prob, _)) = merged.get_mut(&child_key) {
                     *prob += outcome.probability;
                 } else {
@@ -950,7 +929,7 @@ pub fn build_residual_reachable_graph_v3(
                         };
                     }
                     let idx = nodes.len();
-                    key_to_index.insert(child_key.clone(), idx);
+                    key_to_index.insert(child_key, idx);
                     let child_success = is_success_state_v2(&child_state, target, env);
                     let child_dead = if child_success {
                         String::new()
@@ -973,6 +952,7 @@ pub fn build_residual_reachable_graph_v3(
             }
 
             action_entries.push(ActionEntry {
+                sort_key: action_sort_key(&intern_action(action, env), env),
                 action: action.clone(),
                 cube_cost: action_cost(action, &nodes[queue_index].state.clone()),
                 transitions,
@@ -1048,7 +1028,7 @@ pub fn get_resolved_action_weighted_cost_v3(
     (entry.cube_cost * optimal_success + leave_weighted_cost) / leave_prob
 }
 
-/// Select best action index for phase 1 (highest success prob, tie-break by key).
+/// Select best action index for phase 1 (highest success prob, tie-break by sort_key).
 fn select_best_phase1_action_index_v3(
     node: &GraphNode,
     state_index: usize,
@@ -1056,18 +1036,17 @@ fn select_best_phase1_action_index_v3(
 ) -> i32 {
     let mut best_index: i32 = -1;
     let mut best_value = -1.0f64;
-    let mut best_key = String::new();
+    let mut best_sort_key: u64 = u64::MAX;
 
     for (i, entry) in node.action_entries.iter().enumerate() {
         let candidate = get_resolved_action_success_v3(entry, state_index, values);
-        let key = action_key(&entry.action);
         if candidate > best_value + RESIDUAL_ACTION_EPSILON
             || (f64::abs(candidate - best_value) <= RESIDUAL_ACTION_EPSILON
-                && (best_index < 0 || key < best_key))
+                && (best_index < 0 || entry.sort_key < best_sort_key))
         {
             best_index = i as i32;
             best_value = candidate;
-            best_key = key;
+            best_sort_key = entry.sort_key;
         }
     }
 
@@ -1201,7 +1180,7 @@ pub fn solve_residual_lao_phase2_v3(
             let best_cost = match &eligible[index] {
                 Some(indices) => {
                     let mut best = f64::INFINITY;
-                    let mut best_key = String::new();
+                    let mut best_sort_key: u64 = u64::MAX;
                     let mut best_idx: i32 = -1;
                     for &action_idx in indices {
                         let entry = &node.action_entries[action_idx];
@@ -1211,13 +1190,12 @@ pub fn solve_residual_lao_phase2_v3(
                             optimal_success,
                             &costs,
                         );
-                        let key = action_key(&entry.action);
                         if candidate < best - RESIDUAL_ACTION_EPSILON
                             || (f64::abs(candidate - best) <= RESIDUAL_ACTION_EPSILON
-                                && (best_idx < 0 || key < best_key))
+                                && (best_idx < 0 || entry.sort_key < best_sort_key))
                         {
                             best = candidate;
-                            best_key = key;
+                            best_sort_key = entry.sort_key;
                             best_idx = action_idx as i32;
                         }
                     }
@@ -1322,7 +1300,7 @@ pub fn extract_residual_policy_indices(
         };
 
         let mut best_cost = f64::INFINITY;
-        let mut best_key = String::new();
+        let mut best_sort_key: u64 = u64::MAX;
         let mut best_idx: Option<usize> = None;
         for &action_idx in indices {
             let entry = &node.action_entries[action_idx];
@@ -1332,13 +1310,12 @@ pub fn extract_residual_policy_indices(
                 optimal_success,
                 &phase2.costs,
             );
-            let key = action_key(&entry.action);
             if candidate < best_cost - RESIDUAL_ACTION_EPSILON
                 || (f64::abs(candidate - best_cost) <= RESIDUAL_ACTION_EPSILON
-                    && (best_idx.is_none() || key < best_key))
+                    && (best_idx.is_none() || entry.sort_key < best_sort_key))
             {
                 best_cost = candidate;
-                best_key = key;
+                best_sort_key = entry.sort_key;
                 best_idx = Some(action_idx);
             }
         }

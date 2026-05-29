@@ -13,14 +13,10 @@ pub const RE_ENCHANT_TIE_BREAK_COST: f64 = 0.5;
 
 /// Infer family from affix ID prefix (for synthetic / unlisted IDs).
 pub fn infer_affix_family(affix_id: &str) -> &'static str {
-    if affix_id.starts_with(&format!("{}-", ELEMENTAL_DAMAGE_FAMILY))
-        || affix_id == "elemental-damage-other"
-    {
+    if affix_id.starts_with("elemental-damage-") || affix_id == "elemental-damage-other" {
         return ELEMENTAL_DAMAGE_FAMILY;
     }
-    if affix_id.starts_with(&format!("{}-", SPECIFIC_RESISTANCE_FAMILY))
-        || affix_id == "specific-resistance-other"
-    {
+    if affix_id.starts_with("specific-resistance-") || affix_id == "specific-resistance-other" {
         return SPECIFIC_RESISTANCE_FAMILY;
     }
     ""
@@ -152,7 +148,7 @@ pub fn get_category_affixes_for_state<'a>(
         .collect();
 
     if !op_type.is_empty() {
-        result.retain(|affix| get_affix_categories_for_op(affix, op_type).contains(&category.to_string()));
+        result.retain(|affix| get_affix_categories_for_op(affix, op_type).iter().any(|c| c == category));
     }
 
     result
@@ -177,7 +173,7 @@ pub fn get_eligible_by_category<'a>(
                 Some(a) => a,
                 None => return false,
             };
-            get_affix_categories_for_op(affix, op_type).contains(&category.to_string())
+            get_affix_categories_for_op(affix, op_type).iter().any(|c| c == category)
         })
         .collect()
 }

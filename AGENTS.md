@@ -84,7 +84,7 @@ Callbacks: `{ solveILP: js_sys::Function, onProgress?: js_sys::Function, stopBuf
 
 ### Build
 
-Run `bash scripts/build-wasm.sh` after any Rust change. This produces `rust/pkg-node/` (for Node tests) and `rust/pkg-web/` (for the browser). **Commit the built `.wasm` and binding `.js` files** — there is no CI build step, so artifacts must be checked in to preserve the "no deploy build step" constraint.
+Run `bash scripts/build-wasm.sh` after any Rust change. This produces `rust/pkg-node/` (for Node tests) and `rust/pkg-web/` (for the browser). The `rust/pkg-*/` directories are gitignored in this repo — **do not commit them here**. Deployment copies `pkg-web/` into `slaymaker1907.github.io` via `scripts/sync-github-pages.js`.
 
 ### Key footgun: `time_ms` inheritance in MC sub-calls
 

@@ -2138,17 +2138,6 @@
 			});
 		}
 
-		function syncAffixAlignment() {
-			const currentAffixes = document.getElementById("current-affixes");
-			const targetAffixes = document.getElementById("target-affixes");
-			if (!currentAffixes || !targetAffixes) return;
-			// Reset first so the measurement reflects the natural layout.
-			currentAffixes.style.marginTop = "0px";
-			const gap = targetAffixes.getBoundingClientRect().top
-				- currentAffixes.getBoundingClientRect().top;
-			currentAffixes.style.marginTop = Math.max(0, gap) + "px";
-		}
-
 		function renderAll() {
 			sanitizeState();
 			renderAffixOptions();
@@ -2163,7 +2152,6 @@
 			renderCandidates(lastDiagnostics);
 			renderHistory();
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
-			requestAnimationFrame(syncAffixAlignment);
 		}
 
 		// ── Skill filter helpers ──────────────────────────────────────────────

@@ -3,17 +3,10 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::env::TranslationEnv;
-use crate::feasibility::analyze_feasibility;
-use crate::optimizer::{get_residual_env_overrides, optimize_payload_v3, SolveIlpFn};
-use crate::residual::{
-    action_to_json, attach_unsatisfactory_to_state, build_residual_reachable_graph_v3,
-    extract_residual_policy_indices, get_action_outcomes, get_residual_affix_token_v3,
-    get_residual_relevant_affix_ids_v3, has_duplicate_affix_ids_v2, normalize_outcome_state_v2,
-    residual_state_key_v3, solve_residual_lao_phase1_v3, solve_residual_lao_phase2_v3,
-    BuildGraphOptions, ResidualContext, RESIDUAL_EPSILON, RESIDUAL_PHASE2_EPSILON,
-};
+use crate::optimizer::{optimize_payload_v3, SolveIlpFn};
+use crate::residual::{get_action_outcomes, has_duplicate_affix_ids_v2};
 use crate::terminal::is_terminal;
-use crate::types::{AffixEntry, JsAction, JsState, OptimizePayload};
+use crate::types::{AffixEntry, JsState, OptimizePayload};
 use crate::keys::state_key as compute_state_key;
 
 const MC_LIGHT_ROLLOUTS: usize = 100;
@@ -300,178 +293,6 @@ pub fn expand_family_other_in_state(
     }
 }
 
-// ── Policy table (Option 2: memoized residual policy for MC fast-path) ────────
-//
-// At the start of MC, we build the residual graph from the root state and run
-// LAO* on it. From the solution we extract a `state_key → best_action` table.
-// During rollouts, before falling back to a full `optimize_payload_v3` sub-call,
-// we consult the table: if the rollout's current state abstracts to a node in
-// the graph, we get the policy action in O(1).
-//
-// Two wrinkles:
-//   (1) The policy key is the residual **abstract** state key (which collapses
-//       irrelevant affixes to family signatures), not the raw `state_key`.
-//       Multiple concrete states can map to the same abstract key — that's the
-//       whole point of the abstraction.
-//   (2) Actions with `sourceIndex` reference a specific slot index in the
-//       graph node's concrete state. We rewrite `sourceIndex` to point at the
-//       matching slot (by `(token, isGA, isEnchanted)` signature) in the MC's
-//       concrete state.
-//
-// Misses (residual graph absent, abstract key not in table, no matching slot)
-// fall through to the existing `optimize_payload_v3` path — zero correctness
-// risk; the table is purely an optimization.
-
-#[derive(Clone)]
-struct SlotSignature {
-    token: String,
-    is_ga: bool,
-    is_enchanted: bool,
-}
-
-struct PolicyEntry {
-    action: JsAction,
-    /// Set for actions that reference a slot via `sourceIndex` (remove,
-    /// focused, chaotic, enchant). `None` for `add`.
-    source_slot_signature: Option<SlotSignature>,
-}
-
-struct PolicyTable {
-    entries: HashMap<String, PolicyEntry>,
-    context: ResidualContext,
-}
-
-fn slot_signature_for_index(
-    state: &JsState,
-    idx: usize,
-    context: &ResidualContext,
-    env: &TranslationEnv,
-) -> Option<SlotSignature> {
-    let slot = state.affixes.get(idx)?;
-    if slot.affix_id.is_empty() {
-        return None;
-    }
-    Some(SlotSignature {
-        token: get_residual_affix_token_v3(slot, context, env),
-        is_ga: slot.is_ga,
-        is_enchanted: slot.is_enchanted,
-    })
-}
-
-fn build_policy_table(
-    payload: &OptimizePayload,
-    env: &TranslationEnv,
-) -> Option<PolicyTable> {
-    let feasibility = analyze_feasibility(&payload.state, &payload.target, &payload.ga_config, env);
-    if !feasibility.ok {
-        return None;
-    }
-
-    let (state_limit, max_iterations) = get_residual_env_overrides(payload.time_ms);
-
-    let attached_root = attach_unsatisfactory_to_state(&payload.state, &payload.ga_config);
-    let root = normalize_outcome_state_v2(attached_root);
-
-    let graph = build_residual_reachable_graph_v3(
-        &root,
-        &payload.target,
-        &payload.ga_config,
-        env,
-        BuildGraphOptions {
-            state_limit: Some(state_limit),
-            feasibility: Some(&feasibility),
-            root_already_attached: true,
-        },
-    );
-    if !graph.ok {
-        return None;
-    }
-
-    let phase1 = solve_residual_lao_phase1_v3(&graph, max_iterations, RESIDUAL_EPSILON);
-    if !phase1.converged {
-        return None;
-    }
-    let phase2 = solve_residual_lao_phase2_v3(
-        &graph,
-        &phase1,
-        max_iterations,
-        RESIDUAL_EPSILON,
-        RESIDUAL_PHASE2_EPSILON,
-    );
-
-    let policy_indices = extract_residual_policy_indices(&graph, &phase1, &phase2);
-
-    let context = ResidualContext {
-        relevant_affix_ids: get_residual_relevant_affix_ids_v3(
-            &payload.target,
-            &payload.ga_config,
-            Some(&feasibility),
-        ),
-    };
-
-    let mut entries: HashMap<String, PolicyEntry> = HashMap::with_capacity(graph.nodes.len());
-    for (i, node) in graph.nodes.iter().enumerate() {
-        let action_idx = match policy_indices[i] {
-            Some(idx) => idx,
-            None => continue,
-        };
-        let action = node.action_entries[action_idx].action.clone();
-        let source_slot_signature = action
-            .source_index
-            .and_then(|si| usize::try_from(si).ok())
-            .and_then(|idx| slot_signature_for_index(&node.state, idx, &context, env));
-        // Sanity: if the action declares a sourceIndex but we couldn't extract
-        // a signature, skip the entry — we'd have no way to remap it.
-        if action.source_index.is_some() && source_slot_signature.is_none() {
-            continue;
-        }
-        entries.insert(
-            node.key.clone(),
-            PolicyEntry {
-                action,
-                source_slot_signature,
-            },
-        );
-    }
-
-    Some(PolicyTable { entries, context })
-}
-
-/// Look up the policy action for a concrete MC state. Returns the action as
-/// JSON (matching the action_cache format) on a hit, or `None` on a miss.
-fn lookup_policy_action(
-    state: &JsState,
-    table: &PolicyTable,
-    ga_config: &crate::types::JsGaConfig,
-    env: &TranslationEnv,
-) -> Option<Value> {
-    // Mirror the preprocessing the optimizer does at the top of
-    // solve_residual_payload_v3 so the abstract key matches graph nodes.
-    let attached = attach_unsatisfactory_to_state(state, ga_config);
-    let normalized = normalize_outcome_state_v2(attached);
-    let key = residual_state_key_v3(&normalized, &table.context, env);
-    let entry = table.entries.get(&key)?;
-    let mut action = entry.action.clone();
-    if let Some(ref src_sig) = entry.source_slot_signature {
-        let matched_idx = normalized.affixes.iter().enumerate().find_map(|(idx, slot)| {
-            if slot.affix_id.is_empty() {
-                return None;
-            }
-            let tok = get_residual_affix_token_v3(slot, &table.context, env);
-            if tok == src_sig.token
-                && slot.is_ga == src_sig.is_ga
-                && slot.is_enchanted == src_sig.is_enchanted
-            {
-                Some(idx as i32)
-            } else {
-                None
-            }
-        })?;
-        action.source_index = Some(matched_idx);
-    }
-    Some(action_to_json(&action))
-}
-
 // ── Main MC verification loop ─────────────────────────────────────────────────
 
 pub fn run_mc_verification_v3(
@@ -497,13 +318,6 @@ pub fn run_mc_verification_v3(
 
     let root_key = compute_state_key(&payload.state);
     action_cache.insert(root_key, Some(intermediate_result["action"].clone()));
-
-    // Build the residual-graph policy table once. On a hit during a rollout,
-    // we get the policy action in O(1) instead of recomputing the optimizer
-    // for that state. Misses fall through to the existing sub-call path.
-    let policy_table = build_policy_table(payload, env);
-    let mut policy_hits: usize = 0;
-    let mut policy_misses: usize = 0;
 
     let mut step_counts: Vec<usize> = Vec::with_capacity(budget.max_rollouts);
     let mut truncated_rollout_count: usize = 0;
@@ -549,21 +363,22 @@ pub fn run_mc_verification_v3(
             let key = compute_state_key(&state);
             let action = if let Some(cached) = action_cache.get(&key) {
                 cached.clone()
-            } else if let Some(policy_action) = policy_table
-                .as_ref()
-                .and_then(|pt| lookup_policy_action(&state, pt, &payload.ga_config, env))
-            {
-                policy_hits += 1;
-                let act = Some(policy_action);
-                action_cache.insert(key, act.clone());
-                act
             } else {
-                if policy_table.is_some() {
-                    policy_misses += 1;
-                }
+                // Recompute the optimal action for this concrete state via the
+                // full optimizer (ILP/decomposition + residual), exactly mirroring
+                // JS `optimizePayloadV3({ ...payload, state })` in
+                // runMCVerificationV3. The result is memoized per concrete
+                // state_key, so each distinct state is optimized at most once.
+                //
+                // NOTE: an earlier residual-only "policy table" fast-path was
+                // removed here — it extracted actions purely from the residual
+                // LAO* graph and so bypassed the ILP/decomposition branch the
+                // optimizer uses for many states, yielding a *different* (and
+                // therefore biased) MC step distribution than JS. See the MC
+                // mean-divergence investigation.
+                //
                 // Sub-call must inherit `time_ms` so the residual solver uses
-                // the same state-limit budget as the parent call. Mirrors JS
-                // `optimizePayloadV3({ ...payload, state })` in runMCVerificationV3.
+                // the same state-limit budget as the parent call.
                 let sub_payload = OptimizePayload {
                     state: state.clone(),
                     target: payload.target.clone(),
@@ -683,12 +498,6 @@ pub fn run_mc_verification_v3(
                 "aborted": aborted,
                 "earlyConverged": early_converged,
                 "adaptive": budget.adaptive,
-                "policyTable": json!({
-                    "built": policy_table.is_some(),
-                    "size": policy_table.as_ref().map(|t| t.entries.len()).unwrap_or(0),
-                    "hits": policy_hits,
-                    "misses": policy_misses,
-                }),
             }),
         );
     }

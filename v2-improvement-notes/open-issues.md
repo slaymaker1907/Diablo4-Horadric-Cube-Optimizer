@@ -7,6 +7,7 @@
 
 ## Watch Items
 
+- `scripts/diff-test-rust-vs-js.js` Phase 4 only compares MC action type + truncation rate, not the MC **mean**. That blind spot let the biased residual-only policy-table fast-path pass for a while (Rust mean diverged from JS while action type + truncation matched). Add a mean-vs-mean guard (compare within a CI-half-width tolerance) so a future MC policy/sampling regression cannot land silently.
 - Revisit the exact interpretation of protected affixes in F4 when the decomposition layer is implemented.
 - Extend F5 further if later work adds class-specific legality or weighted per-slot roll tables beyond the current shared slot-legality filter.
 - Keep discretionary Case `E` enchant opt-in until the global assignment layer can model the shared one-shot enchant resource explicitly.

@@ -1010,19 +1010,25 @@
 			<div class="modal-body">
 				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Result Verification</label>
 				<div class="field">
-					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-						<input type="checkbox" id="tighten-steps-toggle">
-						<span>
-							Tighten Steps Estimate
-							<span style="color:var(--muted);font-size:0.85em;">(adaptive, up to 2 min)</span>
-							<button id="tighten-steps-info-btn" type="button" title="About Tighten Steps Estimate"
-									style="background:none;border:1px solid var(--muted);border-radius:50%;padding:0 3px;margin-left:4px;cursor:pointer;font-size:0.8rem;color:var(--muted);vertical-align:middle;line-height:1.4;">ℹ</button>
-						</span>
+					<label for="tighten-steps-select" style="display:flex;align-items:center;gap:6px;">
+						<span>Tighten Steps Estimate</span>
+						<button id="tighten-steps-info-btn" type="button" title="About Tighten Steps Estimate"
+								style="background:none;border:1px solid var(--muted);border-radius:50%;padding:0 3px;cursor:pointer;font-size:0.8rem;color:var(--muted);vertical-align:middle;line-height:1.4;">ℹ</button>
 					</label>
+					<select id="tighten-steps-select">
+						<option value="none">None — fastest, no verification</option>
+						<option value="light">Looser estimate — ~100 simulations</option>
+						<option value="adaptive">Tight estimate — adaptive, up to 2 min</option>
+					</select>
 				</div>
 				<div id="tighten-steps-info-box" style="display:none;font-size:0.84rem;color:var(--muted);margin:6px 0 0;line-height:1.45;">
 					<p style="margin:0 0 8px;">The <strong>Expected Cube Steps</strong> number is the optimizer's best estimate of how many cube actions you'll need on average. For complex starting states it can be loose — sometimes overshooting by 2–3×.</p>
-					<p style="margin:0 0 8px;">When enabled, the optimizer runs simulated playthroughs after computing its initial estimate, and keeps simulating until the result is within ±10% of itself (adaptive mode, up to 2 min). This is the most accurate estimate available.</p>
+					<p style="margin:0 0 8px;">When set above <strong>None</strong>, the optimizer runs simulated playthroughs after computing its initial estimate and reports their average:</p>
+					<ul style="margin:0 0 8px;padding-left:18px;">
+						<li><strong>None</strong> — no simulation; fastest. Shows only the initial estimate.</li>
+						<li><strong>Looser estimate</strong> — ~100 simulations; a quick sanity-check mean with a wider confidence interval.</li>
+						<li><strong>Tight estimate</strong> — keeps simulating until the mean is within ±10% of itself (adaptive, up to 2 min). The most accurate estimate available, but can be slow on complex states.</li>
+					</ul>
 					<p style="margin:0;">The recommended action does <em>not</em> change — only the displayed step count. While verification runs, <strong>Optimize</strong> stays disabled and the status shows <em>"Verifying…"</em>; click <strong>Stop</strong> to abort early. The displayed number already includes a one-step refinement that runs automatically regardless of this setting.</p>
 				</div>
 
@@ -1382,10 +1388,13 @@
 				overrideClassSelect.appendChild(opt);
 			});
 
-			// Tighten Steps Estimate toggle + info button (within the Settings modal).
-			const tightenStepsToggle = document.getElementById("tighten-steps-toggle");
-			tightenStepsToggle.addEventListener("change", () => {
-				const lvl = tightenStepsToggle.checked ? "adaptive" : "none";
+			// Tighten Steps Estimate dropdown + info button (within the Settings modal).
+			// Exposes three of the supported levels: none / light ("looser") /
+			// adaptive ("tight"). The solver already implements all levels; this only
+			// selects which budget runMCVerification uses.
+			const tightenStepsSelect = document.getElementById("tighten-steps-select");
+			tightenStepsSelect.addEventListener("change", () => {
+				const lvl = TIGHTEN_LEVELS.includes(tightenStepsSelect.value) ? tightenStepsSelect.value : "none";
 				appState.tightenStepsLevel = lvl;
 				saveTightenStepsLevel(lvl);
 			});
@@ -1410,8 +1419,13 @@
 				overrideClassSelect.value = "Any";
 				document.getElementById("override-affix-input").value = "";
 				document.getElementById("override-add-error").textContent = "";
-				// Sync toggles with current state on each open.
-				tightenStepsToggle.checked = appState.tightenStepsLevel === "adaptive";
+				// Sync controls with current state on each open. The dropdown only
+				// lists none/light/adaptive; any other persisted level (e.g. heavy)
+				// falls back to "none" in the UI without altering appState.
+				tightenStepsSelect.value =
+					["none", "light", "adaptive"].includes(appState.tightenStepsLevel)
+						? appState.tightenStepsLevel
+						: "none";
 				useRustToggle.checked = appState.useRust === true;
 				renderOverridesTable();
 				settingsModal.showModal();
@@ -1864,7 +1878,7 @@
 			if (looseOptions.length > 0 || diagnostics.looseEstimate === true) {
 				appendDiagnosticLine(
 					"Note: this estimate may be a loose lower bound (Add → stuck-state recovery is hard to compute in closed form). " +
-					"Enable \"Tighten Steps Estimate\" in Settings for a Monte Carlo verification — the recommended action is unaffected."
+					"Set \"Tighten Steps Estimate\" in Settings to Looser or Tight for a Monte Carlo verification — the recommended action is unaffected."
 				);
 			}
 

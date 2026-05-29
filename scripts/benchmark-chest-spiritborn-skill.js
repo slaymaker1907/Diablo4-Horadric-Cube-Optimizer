@@ -260,6 +260,12 @@ function run() {
     console.log(`  initial action: JS=${JSON.stringify(jsOpt.action && jsOpt.action.type)} ` +
       `Rust=${JSON.stringify(rustOpt.action && rustOpt.action.type)}  ` +
       `expectedSteps JS=${fmt(jsOpt.expectedSteps)} Rust=${fmt(rustOpt.expectedSteps)}`);
+    {
+      const je = jsOpt.expectedSteps, re = rustOpt.expectedSteps;
+      const rel = Math.abs(je - re) / Math.max(1e-12, Math.abs(je));
+      console.log(`  expectedSteps full precision: JS=${je} Rust=${re}  ` +
+        `${je === re ? "EXACT" : `relDiff=${rel.toExponential(3)}`}`);
+    }
     gsLine("JS", jsOptMs, jsMcMs, jsMc.diagnostics && jsMc.diagnostics.goldStandard);
     gsLine("Rust", rustOptMs, rustMcMs, rustMc.diagnostics && rustMc.diagnostics.goldStandard);
     console.log("");

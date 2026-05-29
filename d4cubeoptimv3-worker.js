@@ -57,6 +57,26 @@ if (D4_USE_RUST && typeof module !== "undefined" && module.exports) {
   }
 }
 
+// Cache-busting version for the WASM artifacts, read from this worker's own
+// `?v=` query string (set by d4cubeoptimv3.html's WORKER_VERSION). The worker
+// loads the Rust loader JS and the `.wasm` binary via unversioned relative URLs,
+// so without this the browser can keep serving a stale `.wasm` after a deploy
+// even when the worker JS itself was refreshed. Appending the same version to
+// those URLs makes a WORKER_VERSION bump reliably re-fetch the new WASM.
+const _WASM_CACHE_VERSION = (() => {
+  try {
+    if (typeof self !== "undefined" && self.location && self.location.href) {
+      return new URL(self.location.href).searchParams.get("v") || "";
+    }
+  } catch (_) { /* location/URL unavailable */ }
+  return "";
+})();
+function _wasmUrl(path) {
+  return _WASM_CACHE_VERSION
+    ? `${path}?v=${encodeURIComponent(_WASM_CACHE_VERSION)}`
+    : path;
+}
+
 // Lazy WASM loader for classic browser Web Workers.
 // Called before the first Rust-path run; resolves immediately on repeat calls.
 async function ensureRustWorker() {
@@ -66,11 +86,11 @@ async function ensureRustWorker() {
 
   _rustWorkerLoading = (async () => {
     try {
-      importScripts("./rust/pkg-no-modules/d4optimizer.js");
+      importScripts(_wasmUrl("./rust/pkg-no-modules/d4optimizer.js"));
       // wasm_bindgen is now a global set by the imported script.
       // Pass the .wasm URL explicitly because document.currentScript is
       // unavailable in workers, so the auto-detect path cannot be used.
-      await wasm_bindgen("./rust/pkg-no-modules/d4optimizer_bg.wasm"); // eslint-disable-line no-undef
+      await wasm_bindgen(_wasmUrl("./rust/pkg-no-modules/d4optimizer_bg.wasm")); // eslint-disable-line no-undef
       rustWorker = wasm_bindgen; // eslint-disable-line no-undef
     } catch (e) {
       console.warn("[d4optimizer] WASM load failed; falling back to JS:", e);

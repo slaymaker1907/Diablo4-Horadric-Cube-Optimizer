@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::actions::{
     action_cost, canonicalize_affix_id_for_state, get_affix_family,
-    get_category_affixes_for_state, get_eligible_by_category, get_valid_actions_v2,
+    get_category_affixes_for_state, get_category_pool_weights_for_state,
+    get_eligible_by_category, get_valid_actions_v2,
     get_affix_categories_for_op, violates_family_uniqueness, is_protected_ga,
 };
 use crate::env::TranslationEnv;
@@ -365,14 +366,15 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
             if list.is_empty() || state.affixes.len() >= 4 {
                 return vec![];
             }
-            let total_weight = sum_effective_weights(&list);
+            let weights = get_category_pool_weights_for_state(state, env, prism, "add");
+            let family_counts = &weights.0;
+            let total_weight = weights.1;
             if total_weight <= 0.0 {
                 return vec![];
             }
-            let family_counts = build_family_counts_for_pool(&list);
             let mut outcomes: Vec<Outcome> = Vec::new();
             for affix in &list {
-                let p = get_effective_affix_roll_weight(affix, &family_counts) / total_weight;
+                let p = get_effective_affix_roll_weight(affix, family_counts) / total_weight;
                 let canonical_id = canonicalize_affix_id_for_state(&affix.id, env);
                 let mut next = clone_state_v1(state);
                 next.affixes.push(AffixEntry {
@@ -423,16 +425,17 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
             if list.is_empty() {
                 return vec![];
             }
-            let total_weight = sum_effective_weights(&list);
+            let weights = get_category_pool_weights_for_state(state, env, prism, "focused");
+            let family_counts = &weights.0;
+            let total_weight = weights.1;
             if total_weight <= 0.0 {
                 return vec![];
             }
             let source_p = 1.0 / eligible.len() as f64;
-            let family_counts = build_family_counts_for_pool(&list);
             let mut outcomes: Vec<Outcome> = Vec::new();
             for (idx, _) in &eligible {
                 for affix in &list {
-                    let affix_p = get_effective_affix_roll_weight(affix, &family_counts) / total_weight;
+                    let affix_p = get_effective_affix_roll_weight(affix, family_counts) / total_weight;
                     let canonical_id = canonicalize_affix_id_for_state(&affix.id, env);
                     let mut next = clone_state_v1(state);
                     next.affixes[*idx] = AffixEntry {
@@ -471,13 +474,14 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                     if list.is_empty() {
                         continue;
                     }
-                    let total_weight = sum_effective_weights(&list);
+                    let weights = get_category_pool_weights_for_state(state, env, cat, "chaotic");
+                    let family_counts = &weights.0;
+                    let total_weight = weights.1;
                     if total_weight <= 0.0 {
                         continue;
                     }
-                    let family_counts = build_family_counts_for_pool(&list);
                     for affix in &list {
-                        let affix_p = get_effective_affix_roll_weight(affix, &family_counts) / total_weight;
+                        let affix_p = get_effective_affix_roll_weight(affix, family_counts) / total_weight;
                         let canonical_id = canonicalize_affix_id_for_state(&affix.id, env);
                         let mut next = clone_state_v1(state);
                         next.affixes[*idx] = AffixEntry {
@@ -599,6 +603,227 @@ pub fn get_action_outcomes_v2(
             o
         })
         .collect()
+}
+
+/// True if the affixes of `state` (optionally excluding one slot) contain two
+/// members of the same non-empty family.
+fn kept_has_family_collision(state: &JsState, env: &TranslationEnv, exclude_idx: Option<usize>) -> bool {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (j, e) in state.affixes.iter().enumerate() {
+        if Some(j) == exclude_idx {
+            continue;
+        }
+        let fam = get_affix_family(&e.affix_id, env);
+        if fam.is_empty() {
+            continue;
+        }
+        if !seen.insert(fam) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if the affixes of `state` (optionally excluding one slot) contain a
+/// duplicate affix id.
+fn kept_has_duplicate(state: &JsState, exclude_idx: Option<usize>) -> bool {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (j, e) in state.affixes.iter().enumerate() {
+        if Some(j) == exclude_idx {
+            continue;
+        }
+        if !seen.insert(e.affix_id.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+enum Placement {
+    Append,
+    Replace(usize),
+}
+
+/// Residual-token-grouped outcome enumeration for `add`/`focused`/`chaotic`.
+///
+/// Within a fixed placement context (append for `add`, a specific replaced slot
+/// for `focused`/`chaotic`) the residual child key is uniquely determined by the
+/// placed affix's residual token (the rest of the state is fixed and the
+/// unsatisfactory marking depends only on the resulting concrete affix multiset,
+/// which is identical for any two affixes sharing a residual token). So we group
+/// the pool by `(context, placed residual token)`, sum effective weights of the
+/// affixes that survive the family-uniqueness and no-duplicate filters, and clone
+/// /normalize/key exactly one representative child per group. This yields the
+/// identical merged residual transition set as `get_action_outcomes_v2` followed
+/// by the BFS residual merge, but with O(distinct residual tokens) heavy work
+/// instead of O(pool size).
+fn grouped_residual_outcomes(
+    state: &JsState,
+    action: &JsAction,
+    context: &ResidualContext,
+    env: &TranslationEnv,
+) -> HashMap<String, (f64, JsState)> {
+    let mut merged: HashMap<String, (f64, JsState)> = HashMap::new();
+
+    let prism = match action.prism.as_deref() {
+        Some(p) => p,
+        None => return merged,
+    };
+
+    // Build the list of placement contexts (each gets its own representative
+    // children, since the replaced/kept affixes differ per slot).
+    let placements: Vec<Placement> = match action.action_type.as_str() {
+        "add" => {
+            if state.affixes.len() >= 4 {
+                return merged;
+            }
+            vec![Placement::Append]
+        }
+        "focused" | "chaotic" => {
+            let eligible = get_eligible_by_category(state, env, prism, action.action_type.as_str());
+            if eligible.is_empty() {
+                return merged;
+            }
+            eligible.iter().map(|(idx, _)| Placement::Replace(*idx)).collect()
+        }
+        _ => return merged,
+    };
+
+    // Pool categories: chaotic re-rolls across every category; add/focused use the
+    // action's prism category.
+    let categories: Vec<String> = match action.action_type.as_str() {
+        "chaotic" => env.category_names.clone(),
+        _ => vec![prism.to_string()],
+    };
+
+    // (context index, placed residual token) -> residual child key, so repeated
+    // affixes in the same group only sum weight instead of rebuilding the child.
+    let mut token_key: HashMap<(usize, String), String> = HashMap::new();
+    let mut total: f64 = 0.0;
+
+    for (ctx_id, placement) in placements.iter().enumerate() {
+        let exclude_idx = match placement {
+            Placement::Append => None,
+            Placement::Replace(idx) => Some(*idx),
+        };
+        // If the affixes we keep already collide (family or duplicate), every
+        // candidate child is invalid — matching the v2 path returning nothing for
+        // this context.
+        if kept_has_family_collision(state, env, exclude_idx)
+            || kept_has_duplicate(state, exclude_idx)
+        {
+            continue;
+        }
+
+        for cat in &categories {
+            let list = get_category_affixes_for_state(state, env, cat, action.action_type.as_str());
+            if list.is_empty() {
+                continue;
+            }
+            let weights = get_category_pool_weights_for_state(state, env, cat, action.action_type.as_str());
+            let family_counts = &weights.0;
+            let total_weight = weights.1;
+            if total_weight <= 0.0 {
+                continue;
+            }
+
+            for affix in &list {
+                let w = get_effective_affix_roll_weight(affix, family_counts) / total_weight;
+                if !(w.is_finite() && w > 0.0) {
+                    continue;
+                }
+                let canonical_id = canonicalize_affix_id_for_state(&affix.id, env);
+
+                // Cheap per-affix filters on the resulting concrete affix multiset.
+                let placed_fam = get_affix_family(&canonical_id, env);
+                let fam_violation = !placed_fam.is_empty()
+                    && state.affixes.iter().enumerate().any(|(j, e)| {
+                        Some(j) != exclude_idx && get_affix_family(&e.affix_id, env) == placed_fam
+                    });
+                if fam_violation {
+                    continue;
+                }
+                let dup = state.affixes.iter().enumerate().any(|(j, e)| {
+                    Some(j) != exclude_idx && e.affix_id == canonical_id
+                });
+                if dup {
+                    continue;
+                }
+
+                let placed_entry = AffixEntry {
+                    affix_id: canonical_id,
+                    is_ga: false,
+                    is_enchanted: false,
+                };
+                let token = get_residual_affix_token_v3(&placed_entry, context, env);
+                let tk = (ctx_id, token);
+
+                total += w;
+                if let Some(rk) = token_key.get(&tk) {
+                    if let Some((p, _)) = merged.get_mut(rk) {
+                        *p += w;
+                    }
+                    continue;
+                }
+
+                // First surviving affix for this (context, token): build the
+                // representative child once.
+                let mut next = clone_state_v1(state);
+                match placement {
+                    Placement::Append => next.affixes.push(placed_entry),
+                    Placement::Replace(idx) => next.affixes[*idx] = placed_entry,
+                }
+                let marked = mark_unsatisfactory_transition(state, next, action, env);
+                let rk = residual_state_key_v3(&marked, context, env);
+                merged
+                    .entry(rk.clone())
+                    .and_modify(|(p, _)| *p += w)
+                    .or_insert((w, marked));
+                token_key.insert(tk, rk);
+            }
+        }
+    }
+
+    if total <= RESIDUAL_EPSILON {
+        return HashMap::new();
+    }
+    for (_, (p, _)) in merged.iter_mut() {
+        *p /= total;
+    }
+    merged
+}
+
+/// Residual-abstraction-aware outcome enumeration for the BFS graph builder.
+///
+/// Returns `residual_key -> (probability, representative child state)`, with
+/// probabilities normalized to sum to 1 over surviving outcomes — identical to
+/// running `get_action_outcomes_v2` then merging by `residual_state_key_v3`, but
+/// `add`/`focused`/`chaotic` use residual-token grouping to avoid cloning one
+/// child per pool affix. `remove`/`enchant` (whose pools are just eligible slots)
+/// delegate to the v2 path and merge.
+pub fn get_residual_action_outcomes_v3(
+    state: &JsState,
+    action: &JsAction,
+    context: &ResidualContext,
+    env: &TranslationEnv,
+) -> HashMap<String, (f64, JsState)> {
+    match action.action_type.as_str() {
+        "add" | "focused" | "chaotic" => grouped_residual_outcomes(state, action, context, env),
+        _ => {
+            let raw_outcomes = get_action_outcomes_v2(state, action, env);
+            let mut merged: HashMap<String, (f64, JsState)> = HashMap::new();
+            for outcome in raw_outcomes {
+                let child = normalize_outcome_state_v2(outcome.state);
+                let child_key = residual_state_key_v3(&child, context, env);
+                if let Some((prob, _)) = merged.get_mut(&child_key) {
+                    *prob += outcome.probability;
+                } else {
+                    merged.insert(child_key, (outcome.probability, child));
+                }
+            }
+            merged
+        }
+    }
 }
 
 /// Mirrors JS `stateKeyV2`: includes unsatisfactory IDs and trash tokens.
@@ -920,18 +1145,7 @@ pub fn build_residual_reachable_graph_v3(
         let mut action_entries: Vec<ActionEntry> = Vec::new();
 
         for action in &actions {
-            let raw_outcomes = get_action_outcomes_v2(&nodes[queue_index].state.clone(), action, env);
-            let mut merged: HashMap<String, (f64, JsState)> = HashMap::new();
-
-            for outcome in raw_outcomes {
-                let child = normalize_outcome_state_v2(outcome.state);
-                let child_key = residual_state_key_v3(&child, &context, env);
-                if let Some((prob, _)) = merged.get_mut(&child_key) {
-                    *prob += outcome.probability;
-                } else {
-                    merged.insert(child_key, (outcome.probability, child));
-                }
-            }
+            let merged = get_residual_action_outcomes_v3(&nodes[queue_index].state.clone(), action, &context, env);
 
             let mut transitions: Vec<Transition> = Vec::new();
             for (child_key, (probability, child_state)) in merged {

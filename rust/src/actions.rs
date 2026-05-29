@@ -1,6 +1,7 @@
 use std::collections::HashSet;
+use std::rc::Rc;
 
-use crate::env::{TranslationEnv, DEFAULT_CLASS, DEFAULT_GEAR_SLOT};
+use crate::env::{PoolWeights, TranslationEnv, DEFAULT_CLASS, DEFAULT_GEAR_SLOT};
 use crate::types::{AffixData, AffixEntry, JsAction, JsState, JsTarget};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -105,16 +106,30 @@ pub fn get_state_class(state: &JsState) -> &str {
         .unwrap_or(DEFAULT_CLASS)
 }
 
-/// Get the affix pool for a category, filtered to the state's gear slot/class.
-/// Returns a Vec of &AffixData references from env.affix_map.
-pub fn get_category_affixes_for_state<'a>(
+/// Cache key for the per-(slot, class, category, op) affix pool and its weights.
+fn pool_cache_key(gear_slot: &str, class: &str, category: &str, op_type: &str) -> String {
+    format!("{}\u{1f}{}\u{1f}{}\u{1f}{}", gear_slot, class, category, op_type)
+}
+
+/// Resolved affix-id list for a (slot, class, category, op_type), memoized on the
+/// env. The pool depends only on these four keys (never on state affixes), so the
+/// cached result is exactly identical to recomputing it every call.
+pub fn get_category_affix_ids_for_state(
     state: &JsState,
-    env: &'a TranslationEnv,
+    env: &TranslationEnv,
     category: &str,
     op_type: &str,
-) -> Vec<&'a AffixData> {
+) -> Rc<Vec<String>> {
     let gear_slot = get_state_gear_slot(state);
     let class = get_state_class(state);
+    let key = pool_cache_key(gear_slot, class, category, op_type);
+
+    {
+        let cache = env.category_pool_cache.borrow();
+        if let Some(rc) = cache.get(&key) {
+            return Rc::clone(rc);
+        }
+    }
 
     // Select the ID list from the appropriate tier.
     let ids: &Vec<String> = {
@@ -129,7 +144,11 @@ pub fn get_category_affixes_for_state<'a>(
         } else if gear_slot == DEFAULT_GEAR_SLOT && class == DEFAULT_CLASS {
             match env.category_affix_ids.get(category) {
                 Some(ids) => ids,
-                None => return vec![],
+                None => {
+                    let empty = Rc::new(Vec::new());
+                    env.category_pool_cache.borrow_mut().insert(key, Rc::clone(&empty));
+                    return empty;
+                }
             }
         } else {
             let by_slot = env
@@ -140,22 +159,76 @@ pub fn get_category_affixes_for_state<'a>(
                 Some(ids) => ids,
                 None => match env.category_affix_ids.get(category) {
                     Some(ids) => ids,
-                    None => return vec![],
+                    None => {
+                        let empty = Rc::new(Vec::new());
+                        env.category_pool_cache.borrow_mut().insert(key, Rc::clone(&empty));
+                        return empty;
+                    }
                 },
             }
         }
     };
 
-    let mut result: Vec<&'a AffixData> = ids
-        .iter()
-        .filter_map(|id| env.affix_map.get(id))
-        .collect();
-
-    if !op_type.is_empty() {
-        result.retain(|affix| get_affix_categories_for_op(affix, op_type).contains(&category.to_string()));
+    let mut resolved: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(affix) = env.affix_map.get(id) else { continue };
+        if !op_type.is_empty()
+            && !get_affix_categories_for_op(affix, op_type).iter().any(|c| c == category)
+        {
+            continue;
+        }
+        resolved.push(id.clone());
     }
 
-    result
+    let computed = Rc::new(resolved);
+    env.category_pool_cache.borrow_mut().insert(key, Rc::clone(&computed));
+    computed
+}
+
+/// Get the affix pool for a category, filtered to the state's gear slot/class.
+/// Returns a Vec of &AffixData references from env.affix_map (resolved from the
+/// memoized id list).
+pub fn get_category_affixes_for_state<'a>(
+    state: &JsState,
+    env: &'a TranslationEnv,
+    category: &str,
+    op_type: &str,
+) -> Vec<&'a AffixData> {
+    let ids = get_category_affix_ids_for_state(state, env, category, op_type);
+    ids.iter()
+        .filter_map(|id| env.affix_map.get(id))
+        .collect()
+}
+
+/// Family-normalized `(family_counts, total_effective_weight)` for a category's
+/// pool, memoized on the env. Pure function of (slot, class, category, op_type).
+pub fn get_category_pool_weights_for_state(
+    state: &JsState,
+    env: &TranslationEnv,
+    category: &str,
+    op_type: &str,
+) -> Rc<PoolWeights> {
+    let gear_slot = get_state_gear_slot(state);
+    let class = get_state_class(state);
+    let key = pool_cache_key(gear_slot, class, category, op_type);
+
+    {
+        let cache = env.pool_weight_cache.borrow();
+        if let Some(rc) = cache.get(&key) {
+            return Rc::clone(rc);
+        }
+    }
+
+    let list = get_category_affixes_for_state(state, env, category, op_type);
+    let family_counts = crate::residual::build_family_counts_for_pool(&list);
+    let total_weight: f64 = list
+        .iter()
+        .map(|a| crate::residual::get_effective_affix_roll_weight(a, &family_counts))
+        .sum();
+
+    let computed = Rc::new((family_counts, total_weight));
+    env.pool_weight_cache.borrow_mut().insert(key, Rc::clone(&computed));
+    computed
 }
 
 /// Returns (index, &AffixEntry) pairs of affixes eligible for cube ops in a category.

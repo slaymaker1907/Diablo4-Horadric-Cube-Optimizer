@@ -316,6 +316,16 @@ pub fn run_mc_verification_v3(
 
     let mut action_cache: HashMap<String, Option<Value>> = HashMap::new();
 
+    // Memoized valid, normalized outcome list per (state_key, action_key).
+    // `get_action_outcomes` + `filter_valid_mc_outcomes` are pure deterministic
+    // functions of the *concrete* state (state_key uses real affix ids, no trash
+    // collapse) and the action, so caching is output-identical. MC revisits the
+    // same states heavily, so this amortizes the O(pool) outcome build away from
+    // every step — mirrors the JS env `actionOutcomeCache`. The random pick and
+    // family-other expansion still run per step on the cached list, so the
+    // sampled distribution is unchanged.
+    let mut outcome_cache: HashMap<String, Vec<(f64, JsState)>> = HashMap::new();
+
     let root_key = compute_state_key(&payload.state);
     action_cache.insert(root_key, Some(intermediate_result["action"].clone()));
 
@@ -394,7 +404,7 @@ pub fn run_mc_verification_v3(
                 } else {
                     Some(sub_result["action"].clone())
                 };
-                action_cache.insert(key, act.clone());
+                action_cache.insert(key.clone(), act.clone());
                 act
             };
 
@@ -415,18 +425,22 @@ pub fn run_mc_verification_v3(
                 }
             };
 
-            let raw_outcomes = get_action_outcomes(&state, &action_js, env);
-            if raw_outcomes.is_empty() {
-                truncated = true;
-                break;
-            }
-            let valid = filter_valid_mc_outcomes(&raw_outcomes);
+            // Memoized valid outcomes for (state, action). Cache key reuses the
+            // concrete state_key (computed above) plus the action key.
+            let outcome_key = format!("{}\u{1f}{}", key, crate::keys::action_key(&action_js));
+            let valid = outcome_cache.entry(outcome_key).or_insert_with(|| {
+                let raw_outcomes = get_action_outcomes(&state, &action_js, env);
+                filter_valid_mc_outcomes(&raw_outcomes)
+                    .into_iter()
+                    .map(|(p, s)| (p, s.clone()))
+                    .collect()
+            });
             if valid.is_empty() {
                 truncated = true;
                 break;
             }
 
-            let chosen = pick_weighted_outcome(&valid, |(p, _)| *p);
+            let chosen = pick_weighted_outcome(valid.as_slice(), |(p, _)| *p);
             let next_state = expand_family_other_in_state(chosen.1.clone(), env, &payload.target);
             state = next_state;
             steps += 1;

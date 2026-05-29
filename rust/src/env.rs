@@ -1,7 +1,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::types::{AffixData, JsEnvData, JsGaConfig, JsTarget};
+
+/// Cached `(family_counts, total_effective_weight)` for a resolved affix pool.
+pub type PoolWeights = (HashMap<String, usize>, f64);
 
 /// Translation tables built once per optimization run from the JS affix catalog.
 /// All subsequent Rust functions take an env handle rather than re-parsing JSON.
@@ -75,6 +79,19 @@ pub struct TranslationEnv {
 
     /// Number of non-null entries in gaConfig.currentGAAffixes.
     pub source_total_ga_count: u32,
+
+    // ── Memoization caches (interior-mutable; single-threaded WASM) ───────────
+    //
+    // The eligible affix pool for a category depends ONLY on
+    // (gear_slot, class, category, op_type) — never on the specific affixes in
+    // a state — and the family-normalized weights are a pure function of that
+    // pool. Both are therefore safe to memoize for the env's lifetime and are
+    // reused across every node × action enumeration and every MC rollout step.
+    // Mirrors the JS env caches (eligibleByCategoryCache / categoryWeightTotals).
+    /// `slot|class|category|op` → resolved affix-id list (after op_type filter).
+    pub category_pool_cache: RefCell<HashMap<String, Rc<Vec<String>>>>,
+    /// `slot|class|category|op` → `(family_counts, total_effective_weight)`.
+    pub pool_weight_cache: RefCell<HashMap<String, Rc<PoolWeights>>>,
 }
 
 thread_local! {
@@ -431,5 +448,8 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         unsatisfactory_counts,
         impossible_target_ga_reason,
         source_total_ga_count,
+        // Memoization caches (start empty)
+        category_pool_cache: RefCell::new(HashMap::new()),
+        pool_weight_cache: RefCell::new(HashMap::new()),
     }
 }

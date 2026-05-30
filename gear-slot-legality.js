@@ -235,6 +235,7 @@
       "Specific Resistance (Shadow)",
       "Resource Cost Reduction",
       "Cooldown Reduction",
+      "DoT Damage",
       ...SKILL_MULTIPLIER_NAMES,
       ...ALL_SKILL_RANK_NAMES,
     ]),

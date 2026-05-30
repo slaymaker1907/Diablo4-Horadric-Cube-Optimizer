@@ -68,6 +68,7 @@
 - Cooldown Reduction
 - Lucky Hit: Up to a 15% Chance to Restore Primary Resource
 - Critical Strike Damage Multiplier
+- Damage Over Time Multiplier
 - Maximum Life
 
 ## Pants

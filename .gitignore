@@ -12,3 +12,7 @@ weight-runs/
 rust/pkg-node/
 rust/pkg-web/
 rust/pkg-no-modules/
+
+# inputs
+badinput.json
+update.json

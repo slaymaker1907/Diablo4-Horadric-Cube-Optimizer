@@ -81,6 +81,20 @@ Families *without* `familyRollWeight` keep their per-subtype weighting — Eleme
 
 `state.class` narrows the Adept pool to a single character class. When set, only skill affixes whose `class` field is empty (class-agnostic — Mainstat, to All Skills, to Basic / Core / Defensive Skills) or matches the chosen class remain in the rolling pool. `Any` keeps every class's skills in the pool — useful for browsing, but the resulting per-skill probabilities are much smaller than what a real character would experience.
 
+### Learned Roll Weights (Outcome Tracking)
+
+The base weights above are all `1`. The actual in-game roll weights are learned from recorded reroll outcomes. Turn on **Settings → Developer → Track reroll outcomes** and the app logs each applied Add / Focused / Chaotic / Remove / Enchant result, together with the item state *before* the reroll, to `localStorage` (separate from Copy Config, persisted across reloads, discarded when `MODEL_VERSION` changes). **Export Tracking Data** produces a JSON for `scripts/learn-weights-from-tracking.js`, which patches `config.LEARNED_WEIGHTS` (overlaid onto the catalog in `buildAffixCatalog`) and bumps `MODEL_VERSION`.
+
+The estimator (in the shared `weight-tracking.js` module) is the **Plackett–Luce / conditional-logit** model — a single reroll is a categorical draw over the eligible pool `S_t`, and that pool changes per draw, so the textbook Dirichlet update would be biased. It is fit by the MM/Zermelo iteration
+
+```
+W_u ← (a_u − 1 + wins_u) / (b_u + exposure_u),   exposure_u = Σ_{t: u∈S_t} 1 / (Σ_{v∈S_t} W_v)
+```
+
+with a weak **Gamma prior** anchored at the present baseline: `b_u = κ`, `a_u − 1 = κ·W⁰_u` (so the prior mode is `W⁰_u`), default `κ = 0.5`. `wins_u` is how often unit `u` came out; `exposure_u` is its total "1 / pool-weight" over every draw where it was eligible — i.e. learned weight ≈ wins-per-eligible-exposure, which corrects the per-draw pool censoring. Computed under the fixed baseline these statistics are additive, so the browser keeps a live one-shot estimate and merges trivially; the Node script can also iterate to convergence over the raw rows. Only **Add / Focused / Chaotic** inform weights; Remove (uniform) and Enchant (deterministic) are logged but uninformative.
+
+A **learning unit** carries one tied weight: a singleton affix (its `rollWeight`); a `familyRollWeight` family — skills and skill-multipliers, **pooled across classes** (the family total); or a tied-subtype family — Elemental Damage / Specific Resistance — as one shared per-member weight (the family total split evenly, so "fire is as likely as physical" is preserved while the family's overall propensity is learned). Only skills differ between classes, matching the catalog (only skill entries carry a `class`). The learned scale is irrelevant — the solver normalizes per pool — so only the relative weights matter.
+
 ---
 
 ## Greater Affixes (GAs)

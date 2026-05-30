@@ -906,7 +906,8 @@
 							<select id="manual-mode">
 								<option value="added">Added</option>
 								<option value="removed">Removed</option>
-								<option value="changed">Changed (Cube)</option>
+								<option value="focused">Focused Reroll (Cube)</option>
+								<option value="chaotic">Chaotic Reroll (Cube)</option>
 								<option value="enchanted">Enchanted</option>
 							</select>
 						</div>
@@ -923,7 +924,7 @@
 
 						<div class="field">
 							<label for="manual-result">New Affix</label>
-							<input id="manual-result" type="text" list="manual-result-options" placeholder="Required for added/changed/enchanted">
+							<input id="manual-result" type="text" list="manual-result-options" placeholder="Required for added/reroll/enchanted">
 						</div>
 
 						<button id="apply-manual" class="btn action-submit">Apply Outcome and Optimize</button>
@@ -1063,20 +1064,41 @@
 
 				<div class="divider"></div>
 
-				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Experimental</label>
-				<div class="field">
-					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-						<input type="checkbox" id="use-rust-toggle">
-						<span>
-							Use Rust/WASM optimizer
-							<span style="background:var(--accent);color:#000;font-size:0.7em;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle;letter-spacing:0.04em;">EXPERIMENTAL</span>
-						</span>
-					</label>
-				</div>
-				<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
-					Runs the optimizer in WebAssembly instead of JavaScript. The WASM module loads on first use.
-					Falls back to JS automatically if the WASM module fails to load.
-				</div>
+				<details class="debug-accordion" id="developer-accordion">
+					<summary>Developer</summary>
+
+					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin:10px 0 6px;">Optimizer Engine</label>
+					<div class="field">
+						<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+							<input type="checkbox" id="use-rust-toggle">
+							<span>Use Rust/WASM optimizer</span>
+						</label>
+					</div>
+					<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
+						Runs the optimizer in WebAssembly instead of JavaScript. The WASM module loads on first use.
+						Falls back to JS automatically if the WASM module fails to load.
+					</div>
+
+					<div class="divider"></div>
+
+					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Outcome Tracking</label>
+					<div class="field">
+						<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+							<input type="checkbox" id="track-outcomes-toggle">
+							<span>Track reroll outcomes</span>
+						</label>
+					</div>
+					<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 8px;line-height:1.45;">
+						When on, every applied Add / Focused / Chaotic / Remove / Enchant result is logged
+						(with the item state before the reroll) to learn affix roll weights. Data is stored
+						locally, persists across reloads, and is discarded automatically if the model version
+						changes. <span id="tracking-count" style="color:var(--accent);font-weight:600;">0 outcomes tracked.</span>
+					</div>
+					<div class="config-actions">
+						<button id="export-tracking-btn" class="btn ghost">Export Tracking Data</button>
+						<button id="clear-tracking-btn" class="btn ghost">Clear Tracking Data</button>
+					</div>
+				</details>
 
 				<div class="divider"></div>
 
@@ -1170,10 +1192,36 @@
 	<datalist id="all-affix-options"></datalist>
 	<datalist id="manual-result-options"></datalist>
 
+	<dialog id="export-tracking-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>Export Tracking Data</h2>
+				<button id="export-tracking-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
+				<p class="legend" style="margin:0 0 8px;">
+					Logged reroll outcomes plus the live one-shot weight estimate. Feed this JSON to
+					<code>scripts/learn-weights-from-tracking.js</code> to update the baseline weights.
+					This is a separate system from <strong>Copy Config</strong> and is never included in it.
+				</p>
+				<textarea id="export-tracking-text" class="config-textarea" readonly spellcheck="false"></textarea>
+				<div class="config-actions">
+					<button id="export-tracking-copy-btn" class="btn">Copy to Clipboard</button>
+					<button id="export-tracking-download-btn" class="btn ghost">Download .json</button>
+					<span id="export-tracking-status" class="legend" style="margin:0;"></span>
+				</div>
+			</div>
+		</div>
+	</dialog>
+
 	<script src="./gear-slot-legality.js"></script>
 	<script src="./config.js"></script>
+	<script src="./weight-tracking.js"></script>
 	<script>
 		const _cfg = (typeof d4cubeoptimConfig === "object" && d4cubeoptimConfig) ? d4cubeoptimConfig : {};
+		const _wt = (typeof d4cubeoptimWeightTracking === "object" && d4cubeoptimWeightTracking) ? d4cubeoptimWeightTracking : null;
+		const MODEL_VERSION = typeof _cfg.MODEL_VERSION === "string" && _cfg.MODEL_VERSION ? _cfg.MODEL_VERSION : "unknown-model";
+		const LEARNED_WEIGHTS = (_cfg.LEARNED_WEIGHTS && typeof _cfg.LEARNED_WEIGHTS === "object") ? _cfg.LEARNED_WEIGHTS : {};
 
 		const DAMAGE_TYPES = Array.isArray(_cfg.DAMAGE_TYPES) ? _cfg.DAMAGE_TYPES : ["Physical", "Fire", "Cold", "Shadow", "Lightning", "Poison"];
 		const ELEMENTAL_TYPED_AFFIXES = DAMAGE_TYPES.map((type) => ({
@@ -1237,6 +1285,10 @@
 		const TIGHTEN_KEY = "d4cubeoptim_tighten_v3";
 		const TIGHTEN_LEVELS = ["none", "light", "heavy", "adaptive"];
 		const USE_RUST_KEY = "d4cubeoptim_use_rust_v3";
+		// Outcome-tracking store. Separate from the main state blob and from
+		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
+		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
+		const TRACKING_ROW_CAP = 5000;
 		const WORKER_VERSION = "2026-05-29-v3-rust-tier1-speedup";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
@@ -1311,6 +1363,7 @@
 		};
 
 		let appState = loadState();
+		let trackingState = loadTrackingState();
 		let worker = null;
 		let activeRunId = 0;
 		let treeCache = null;
@@ -1538,11 +1591,71 @@
 				box.style.display = box.style.display === "none" ? "block" : "none";
 			});
 
-			// Use Rust/WASM toggle (within the Settings modal).
+			// Use Rust/WASM toggle (within the Settings modal → Developer).
 			const useRustToggle = document.getElementById("use-rust-toggle");
 			useRustToggle.addEventListener("change", () => {
 				appState.useRust = useRustToggle.checked;
 				saveUseRust(appState.useRust);
+			});
+
+			// ── Outcome tracking controls (Settings modal → Developer) ─────────
+			const trackOutcomesToggle = document.getElementById("track-outcomes-toggle");
+			trackOutcomesToggle.addEventListener("change", () => {
+				trackingState.enabled = trackOutcomesToggle.checked;
+				saveTrackingState();
+				renderTrackingUI();
+			});
+
+			const exportTrackingModal = document.getElementById("export-tracking-modal");
+			const exportTrackingText = document.getElementById("export-tracking-text");
+			const exportTrackingStatus = document.getElementById("export-tracking-status");
+			document.getElementById("export-tracking-btn").addEventListener("click", () => {
+				exportTrackingText.value = JSON.stringify(buildTrackingExport(), null, 2);
+				exportTrackingStatus.textContent = "";
+				exportTrackingModal.showModal();
+				exportTrackingText.scrollTop = 0;
+			});
+			document.getElementById("export-tracking-modal-close").addEventListener("click", () => exportTrackingModal.close());
+			exportTrackingModal.addEventListener("click", (e) => { if (e.target === exportTrackingModal) { exportTrackingModal.close(); } });
+			document.getElementById("export-tracking-copy-btn").addEventListener("click", async () => {
+				const text = exportTrackingText.value;
+				try {
+					if (navigator.clipboard && navigator.clipboard.writeText) {
+						await navigator.clipboard.writeText(text);
+					} else {
+						exportTrackingText.removeAttribute("readonly");
+						exportTrackingText.select();
+						document.execCommand("copy");
+						exportTrackingText.setAttribute("readonly", "");
+					}
+					exportTrackingStatus.textContent = "Copied to clipboard.";
+					exportTrackingStatus.style.color = "var(--accent)";
+				} catch {
+					exportTrackingText.focus();
+					exportTrackingText.select();
+					exportTrackingStatus.textContent = "Copy failed — text selected, press Ctrl+C.";
+					exportTrackingStatus.style.color = "var(--danger,#e55)";
+				}
+			});
+			document.getElementById("export-tracking-download-btn").addEventListener("click", () => {
+				const blob = new Blob([exportTrackingText.value], { type: "application/json" });
+				const url = URL.createObjectURL(blob);
+				const a = document.createElement("a");
+				a.href = url;
+				a.download = `d4cube-tracking-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+				document.body.appendChild(a);
+				a.click();
+				a.remove();
+				URL.revokeObjectURL(url);
+			});
+
+			document.getElementById("clear-tracking-btn").addEventListener("click", () => {
+				const n = (trackingState.rows || []).length;
+				if (n > 0 && !window.confirm(`Clear all ${n} tracked outcome(s)? This cannot be undone.`)) {
+					return;
+				}
+				clearTrackingData();
+				renderTrackingUI();
 			});
 
 			document.getElementById("settings-btn").addEventListener("click", () => {
@@ -1562,6 +1675,7 @@
 						? appState.tightenStepsLevel
 						: "none";
 				useRustToggle.checked = appState.useRust === true;
+				renderTrackingUI();
 				renderOverridesTable();
 				settingsModal.showModal();
 			});
@@ -1902,7 +2016,7 @@
 			}
 
 			if (action.type === "focused" || action.type === "chaotic") {
-				next.mode = "changed";
+				next.mode = action.type;
 			}
 
 			if (action.type === "enchant") {
@@ -1915,12 +2029,12 @@
 			}
 
 			if (next.mode === "removed" && appState.current.isLegendary) {
-				next.mode = "changed";
+				next.mode = "focused";
 			}
 
 			// Auto-select source when the prism narrows it to exactly one eligible affix.
 			if (!next.sourceIndex && next.prism && next.prism !== "None"
-					&& (next.mode === "changed" || next.mode === "removed")) {
+					&& (next.mode === "focused" || next.mode === "chaotic" || next.mode === "removed")) {
 				const eligible = getManualSourceAffixes(next.mode, next.prism);
 				if (eligible.length === 1) {
 					next.sourceIndex = String(eligible[0].index);
@@ -3064,7 +3178,7 @@
 
 		function getAffixCategoriesForMode(affix, mode) {
 			if (!affix) { return []; }
-			const opType = mode === "added" ? "add" : mode === "changed" ? "focused" : mode === "removed" ? "remove" : null;
+			const opType = mode === "added" ? "add" : mode === "focused" ? "focused" : mode === "chaotic" ? "chaotic" : mode === "removed" ? "remove" : null;
 			if (opType && affix.operationCategories && Array.isArray(affix.operationCategories[opType])) {
 				return affix.operationCategories[opType];
 			}
@@ -3076,7 +3190,7 @@
 				.map((entry, index) => ({ index, entry }))
 				.filter(({ entry }) => {
 					if (mode === "added") { return false; }
-					if ((mode === "removed" || mode === "changed") && entry.isEnchanted) { return false; }
+					if ((mode === "removed" || mode === "focused" || mode === "chaotic") && entry.isEnchanted) { return false; }
 					if (prism && prism !== "None") {
 						const affix = entry.affixId ? AFFIX_BY_ID[entry.affixId] : null;
 						if (!affix || !getAffixCategoriesForMode(affix, mode).includes(prism)) { return false; }
@@ -3093,12 +3207,10 @@
 					.filter(Boolean)
 			);
 			let candidates = AFFIXES.filter((a) => isAffixLegalForCurrentSlot(a) && !currentIds.has(a.id));
-			// For "added" only: restrict destinations to the prism's category (Add
-			// Affix always produces an affix in that category). For "changed", allow
-			// the full legal pool — Focused Reroll destinations happen to land in the
-			// prism category, but Chaotic Reroll can land on any legal affix, so both
-			// must remain selectable here.
-			if (prism && prism !== "None" && mode === "added") {
+			// Restrict destinations to the prism's category for operations that
+			// always land in that category: Add Affix and Focused Reroll. Chaotic
+			// Reroll can land on any legal affix, so its pool stays unrestricted.
+			if (prism && prism !== "None" && (mode === "added" || mode === "focused")) {
 				candidates = candidates.filter((a) => getAffixCategoriesForMode(a, mode).includes(prism));
 			}
 			return candidates;
@@ -3110,7 +3222,7 @@
 			});
 
 			if (appState.current.isLegendary && appState.lastAction.mode === "removed") {
-				appState.lastAction.mode = "changed";
+				appState.lastAction.mode = "focused";
 			}
 
 			const mode = appState.lastAction.mode;
@@ -3173,6 +3285,17 @@
 
 			const cur = appState.current;
 
+			// Snapshot the item BEFORE mutation so an outcome row can reconstruct
+			// the eligible pool exactly. Captured regardless of tracking state; only
+			// persisted when tracking is enabled (see recordTrackingOutcome).
+			const beforeItem = {
+				gearSlot: cur.gearSlot,
+				class: cur.class,
+				isLegendary: !!cur.isLegendary,
+				affixes: cur.affixes.map((e) => ({ affixId: e.affixId, isGA: !!e.isGA, isEnchanted: !!e.isEnchanted })),
+			};
+			const prismUsed = els.manualPrism.value;
+
 			if (mode === "added") {
 				if (!resultId || cur.affixes.length >= 4) {
 					return;
@@ -3194,7 +3317,7 @@
 				cur.affixes.splice(sourceIndex, 1);
 			}
 
-			if (mode === "changed") {
+			if (mode === "focused" || mode === "chaotic") {
 				if (sourceIndex === null || !cur.affixes[sourceIndex] || !resultId) {
 					return;
 				}
@@ -3229,6 +3352,9 @@
 					}
 				});
 			}
+
+			// Log this reroll for weight learning (no-op unless tracking is on).
+			recordTrackingOutcome({ mode, prism: prismUsed, sourceIndex, resultAffixId: resultId, beforeItem });
 
 			appState.lastAction = {
 				mode,
@@ -3389,7 +3515,11 @@
 
 			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 
-			appState.lastAction.mode = ["added", "removed", "changed", "enchanted"].includes(appState.lastAction.mode)
+			// Migrate the legacy combined "changed" mode to the Focused split.
+			if (appState.lastAction.mode === "changed") {
+				appState.lastAction.mode = "focused";
+			}
+			appState.lastAction.mode = ["added", "removed", "focused", "chaotic", "enchanted"].includes(appState.lastAction.mode)
 				? appState.lastAction.mode
 				: "added";
 			appState.lastAction.prism = ["None", ...PRISMS].includes(appState.lastAction.prism)
@@ -3589,6 +3719,182 @@
 			try {
 				localStorage.setItem(USE_RUST_KEY, JSON.stringify(value === true));
 			} catch { /* storage full — silently ignore */ }
+		}
+
+		// ── Outcome tracking ───────────────────────────────────────────────────
+		function emptyTrackingState() {
+			return {
+				modelVersion: MODEL_VERSION,
+				enabled: false,
+				rows: [],
+				stats: Object.create(null),
+				settingsMap: Object.create(null),
+			};
+		}
+
+		// Load and validate the tracking store. Discards everything if the stored
+		// modelVersion no longer matches (the baseline the data was collected under
+		// has changed, so wins/exposure are no longer comparable).
+		function loadTrackingState() {
+			try {
+				const raw = localStorage.getItem(TRACKING_KEY);
+				if (!raw) {
+					return emptyTrackingState();
+				}
+				const parsed = JSON.parse(raw);
+				if (!parsed || typeof parsed !== "object" || parsed.modelVersion !== MODEL_VERSION) {
+					// Baseline changed (or corrupt blob): discard the data but keep the
+					// user's tracking preference, and overwrite the stale blob now so it
+					// does not linger in storage.
+					const fresh = emptyTrackingState();
+					fresh.enabled = !!(parsed && parsed.enabled);
+					try { localStorage.setItem(TRACKING_KEY, JSON.stringify(fresh)); } catch { /* ignore */ }
+					return fresh;
+				}
+				return {
+					modelVersion: MODEL_VERSION,
+					enabled: parsed.enabled === true,
+					rows: Array.isArray(parsed.rows) ? parsed.rows : [],
+					stats: (parsed.stats && typeof parsed.stats === "object") ? parsed.stats : Object.create(null),
+					settingsMap: (parsed.settingsMap && typeof parsed.settingsMap === "object") ? parsed.settingsMap : Object.create(null),
+				};
+			} catch {
+				return emptyTrackingState();
+			}
+		}
+
+		function saveTrackingState() {
+			try {
+				localStorage.setItem(TRACKING_KEY, JSON.stringify(trackingState));
+			} catch { /* storage full — silently ignore */ }
+		}
+
+		function clearTrackingData() {
+			const wasEnabled = trackingState.enabled === true;
+			trackingState = emptyTrackingState();
+			trackingState.enabled = wasEnabled; // keep the toggle as the user left it
+			saveTrackingState();
+		}
+
+		// Catalog passed to weight-tracking.js. AFFIXES already carries the
+		// override-aware gearSlots, family, rollWeight, familyRollWeight, class,
+		// and operationCategories that the eligible-pool reconstruction needs.
+		function buildTrackingCatalog() {
+			return _wt ? { affixes: AFFIXES, __wtIndex: _wt.indexCatalog(AFFIXES) } : { affixes: AFFIXES };
+		}
+
+		// Stable 32-bit hash of a string → short hex id.
+		function hashStringToId(str) {
+			let h = 2166136261 >>> 0;
+			for (let i = 0; i < str.length; i++) {
+				h ^= str.charCodeAt(i);
+				h = Math.imul(h, 16777619) >>> 0;
+			}
+			return ("0000000" + h.toString(16)).slice(-8);
+		}
+
+		// The per-row settings snapshot: the full config MINUS `current` (which
+		// varies every reroll and is embedded in the row instead). Dedup by content
+		// so many rows share one settingsId.
+		function trackingSettingsIdFor() {
+			const full = buildConfigPayload();
+			// `current` is embedded per-row; drop the per-action / transient fields
+			// (history, lastAction, skillFilter) so equivalent setups share one id.
+			delete full.current;
+			delete full.__d4cubeoptimConfig;
+			delete full.history;
+			delete full.lastAction;
+			delete full.skillFilter;
+			const json = JSON.stringify(full);
+			const id = hashStringToId(json);
+			if (!trackingState.settingsMap[id]) {
+				trackingState.settingsMap[id] = full;
+			}
+			return id;
+		}
+
+		// Map UI manual-mode → model operation type.
+		function trackingOpForMode(mode) {
+			if (mode === "added") return "add";
+			if (mode === "removed") return "remove";
+			if (mode === "focused") return "focused";
+			if (mode === "chaotic") return "chaotic";
+			if (mode === "enchanted") return "enchant";
+			return null;
+		}
+
+		// Log one applied reroll outcome. No-op unless tracking is enabled.
+		function recordTrackingOutcome({ mode, prism, sourceIndex, resultAffixId, beforeItem }) {
+			if (!trackingState.enabled || !_wt) {
+				return;
+			}
+			const op = trackingOpForMode(mode);
+			if (!op) {
+				return;
+			}
+			const settingsId = trackingSettingsIdFor();
+			const row = {
+				ts: new Date().toISOString(),
+				settingsId,
+				op,
+				prism: prism || "None",
+				sourceIndex: (sourceIndex == null ? null : Number(sourceIndex)),
+				resultAffixId: resultAffixId || "",
+				item: beforeItem,
+			};
+			trackingState.rows.push(row);
+			if (trackingState.rows.length > TRACKING_ROW_CAP) {
+				// Drop oldest rows; the additive `stats` retain their full history.
+				trackingState.rows.splice(0, trackingState.rows.length - TRACKING_ROW_CAP);
+			}
+
+			// Update additive baseline sufficient statistics for informative ops.
+			try {
+				const catalog = buildTrackingCatalog();
+				const contrib = _wt.computeDrawContribution(
+					{ ...beforeItem, sourceIndex: row.sourceIndex },
+					op,
+					row.prism,
+					row.resultAffixId,
+					catalog
+				);
+				_wt.accumulateStats(trackingState.stats, contrib, catalog);
+			} catch { /* never let tracking break the apply flow */ }
+
+			saveTrackingState();
+			renderTrackingUI();
+		}
+
+		function renderTrackingUI() {
+			const toggle = document.getElementById("track-outcomes-toggle");
+			if (toggle) {
+				toggle.checked = trackingState.enabled === true;
+			}
+			const countEl = document.getElementById("tracking-count");
+			if (countEl) {
+				const n = (trackingState.rows || []).length;
+				countEl.textContent = `${n} outcome${n === 1 ? "" : "s"} tracked.`;
+			}
+		}
+
+		// Build the JSON export: raw rows + additive stats + the live one-shot
+		// weight estimate + baseline snapshot + settings map.
+		function buildTrackingExport() {
+			const catalog = buildTrackingCatalog();
+			const initialWeights = _wt ? _wt.buildInitialWeights(catalog) : [];
+			const derived = _wt
+				? _wt.deriveWeights(trackingState.stats, catalog, { priorStrength: _wt.PRIOR_STRENGTH_DEFAULT })
+				: { unitWeights: {}, units: {}, priorStrength: null };
+			return {
+				modelVersion: MODEL_VERSION,
+				exportedAt: new Date().toISOString(),
+				prior: { strength: derived.priorStrength, kind: "gamma-mode-at-baseline" },
+				initialWeights,
+				rows: trackingState.rows,
+				stats: trackingState.stats,
+				derivedWeights: derived.units,
+				settingsMap: trackingState.settingsMap,
+			};
 		}
 
 		// Returns true when the static legality table already permits affixName on slot,
@@ -4135,7 +4441,12 @@
 				}
 			}
 
-			return Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
+			const list = Object.values(map).sort((a, b) => a.name.localeCompare(b.name));
+			// Overlay learned roll weights (no-op when LEARNED_WEIGHTS is {}).
+			if (_wt && typeof _wt.applyLearnedWeights === "function") {
+				_wt.applyLearnedWeights(list, LEARNED_WEIGHTS);
+			}
+			return list;
 		}
 
 		function clampInt(value, min, max, fallback) {

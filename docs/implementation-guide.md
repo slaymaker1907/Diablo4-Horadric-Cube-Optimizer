@@ -20,12 +20,14 @@
 - [d4cubeoptim-worker.js](../d4cubeoptim-worker.js): shared action generation, outcome distributions, strict-mode handling, one-step GA risk, and legality-aware category pools.
 - [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js): exact SSP helper semantics still reused by the v3 residual environment, especially GA accounting and state normalization.
 - [gear-slot-legality.js](../gear-slot-legality.js): machine-readable legality table.
+- [weight-tracking.js](../weight-tracking.js): shared UMD module for outcome tracking and Bayesian roll-weight learning (Plackett–Luce MM update). Used by the browser tracker and by [scripts/learn-weights-from-tracking.js](../scripts/learn-weights-from-tracking.js), which patches `config.LEARNED_WEIGHTS` and bumps `MODEL_VERSION`. See [docs/game-mechanics.md](game-mechanics.md#learned-roll-weights-outcome-tracking).
 - [docs/verified-affixes.md](verified-affixes.md): authoritative human-readable legality source. Unverified legacy entries are in [docs/maybe-affixes.md](maybe-affixes.md).
 - [CHANGES.md](../CHANGES.md) plus [v2-improvement-notes](../v2-improvement-notes/): implementation history, requirement mapping, decisions, open issues, and next steps.
 
 ## High-Value Gotchas
 
 - If you change behavior in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js), bump `WORKER_VERSION` in [d4cubeoptimv3.html](../d4cubeoptimv3.html) or the browser may keep a stale worker.
+- `config.MODEL_VERSION` is broader than `WORKER_VERSION`: bump it on any change to the roll model, solver, or affix weights (a superset of `WORKER_VERSION`). It gates outcome-tracking data validity in the browser and is bumped automatically by the weight-learning script.
 - `timeMs <= 0` currently means "use the largest configured residual cap," not "minimal search."
 - For GA-sensitive residual benchmarking, populate `gaConfig.currentGAAffixes`. The residual environment still uses GA-count semantics inherited from [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js).
 - Concrete gear slots are required for meaningful residual benchmarking. `Any` preserves a broader pool and can hide slot-specific behavior.

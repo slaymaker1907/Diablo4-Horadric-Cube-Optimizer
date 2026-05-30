@@ -12,6 +12,7 @@ const FILE_MAP = {
 	"gear-slot-legality.js": "gear-slot-legality.js",
 	"ilp.js": "ilp.js",
 	"config.js": "config.js",
+	"weight-tracking.js": "weight-tracking.js",
 	// Rust/WASM browser artifacts (committed; no deploy build step required).
 	// pkg-no-modules is the build the classic Web Worker actually loads via
 	// importScripts (global `wasm_bindgen`); pkg-web is the ES-module build kept

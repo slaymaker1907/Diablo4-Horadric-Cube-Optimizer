@@ -697,7 +697,9 @@
 			background: rgba(0, 0, 0, 0.75);
 		}
 
-		#settings-modal {
+		#settings-modal,
+		#copy-config-modal,
+		#load-config-modal {
 			border: 1px solid var(--edge);
 			background: linear-gradient(180deg, #1e0808, #130505);
 			color: var(--fg);
@@ -708,8 +710,33 @@
 			overflow: hidden;
 		}
 
-		#settings-modal::backdrop {
+		#settings-modal::backdrop,
+		#copy-config-modal::backdrop,
+		#load-config-modal::backdrop {
 			background: rgba(0, 0, 0, 0.75);
+		}
+
+		.config-textarea {
+			width: 100%;
+			height: 320px;
+			font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+			font-size: 0.82rem;
+			background: #0f0404;
+			color: var(--fg);
+			border: 1px solid var(--edge);
+			border-radius: 4px;
+			padding: 8px;
+			resize: vertical;
+			box-sizing: border-box;
+			white-space: pre;
+			overflow: auto;
+		}
+
+		.config-actions {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			margin-top: 10px;
 		}
 
 		.overrides-table {
@@ -796,6 +823,8 @@
 				<button id="reset-btn" class="btn ghost">Reset</button>
 				<button id="settings-btn" class="btn ghost">Settings</button>
 				<button id="help-btn" class="btn ghost">How To Use</button>
+				<button id="copy-config-btn" class="btn ghost">Copy Config</button>
+				<button id="load-config-btn" class="btn ghost">Load Config</button>
 				<div class="status" id="run-status"></div>
 				<div id="thinking-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
 					Higher values allow larger residual searches. 0 = largest residual budget.
@@ -1094,6 +1123,49 @@
 		</div>
 	</dialog>
 
+	<dialog id="copy-config-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>Copy Config</h2>
+				<button id="copy-config-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
+				<p class="legend" style="margin:0 0 8px;">
+					This JSON captures the full optimizer state — gear slot, class, legendary flag,
+					current and target affixes (with GA / Enchanted / Needs-Improvement flags),
+					thinking time, skill filter, slot-legality overrides, verification level, and the
+					JS/Rust engine choice. Copy it to save or share a setup.
+				</p>
+				<textarea id="copy-config-text" class="config-textarea" readonly spellcheck="false"></textarea>
+				<div class="config-actions">
+					<button id="copy-config-copy-btn" class="btn">Copy to Clipboard</button>
+					<span id="copy-config-status" class="legend" style="margin:0;"></span>
+				</div>
+			</div>
+		</div>
+	</dialog>
+
+	<dialog id="load-config-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>Load Config</h2>
+				<button id="load-config-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
+				<p class="legend" style="margin:0 0 8px;">
+					Paste a config JSON (produced by <strong>Copy Config</strong>) below and click
+					<strong>Load</strong>. This replaces <em>all</em> current optimizer state,
+					including the JS/Rust engine choice and slot-legality overrides.
+				</p>
+				<textarea id="load-config-text" class="config-textarea" spellcheck="false" placeholder="Paste config JSON here…"></textarea>
+				<div class="config-actions">
+					<button id="load-config-load-btn" class="btn">Load</button>
+					<span id="load-config-status" class="legend" style="margin:0;"></span>
+				</div>
+			</div>
+		</div>
+	</dialog>
+
 	<datalist id="affix-options"></datalist>
 	<datalist id="all-affix-options"></datalist>
 	<datalist id="manual-result-options"></datalist>
@@ -1367,6 +1439,69 @@
 			document.getElementById("help-btn").addEventListener("click", () => helpModal.showModal());
 			document.getElementById("help-modal-close").addEventListener("click", () => helpModal.close());
 			helpModal.addEventListener("click", (e) => { if (e.target === helpModal) { helpModal.close(); } });
+
+			// ── Copy Config modal ─────────────────────────────────────────────
+			const copyConfigModal = document.getElementById("copy-config-modal");
+			const copyConfigText = document.getElementById("copy-config-text");
+			const copyConfigStatus = document.getElementById("copy-config-status");
+			document.getElementById("copy-config-btn").addEventListener("click", () => {
+				copyConfigText.value = JSON.stringify(buildConfigPayload(), null, 2);
+				copyConfigStatus.textContent = "";
+				copyConfigModal.showModal();
+				copyConfigText.scrollTop = 0;
+			});
+			document.getElementById("copy-config-modal-close").addEventListener("click", () => copyConfigModal.close());
+			copyConfigModal.addEventListener("click", (e) => { if (e.target === copyConfigModal) { copyConfigModal.close(); } });
+			document.getElementById("copy-config-copy-btn").addEventListener("click", async () => {
+				const text = copyConfigText.value;
+				let copied = false;
+				try {
+					if (navigator.clipboard && navigator.clipboard.writeText) {
+						await navigator.clipboard.writeText(text);
+						copied = true;
+					}
+				} catch { /* fall through to execCommand fallback */ }
+				if (!copied) {
+					try {
+						copyConfigText.removeAttribute("readonly");
+						copyConfigText.select();
+						copied = document.execCommand("copy");
+						copyConfigText.setAttribute("readonly", "");
+					} catch { copied = false; }
+				}
+				if (copied) {
+					copyConfigStatus.textContent = "Copied to clipboard.";
+					copyConfigStatus.style.color = "var(--accent)";
+				} else {
+					copyConfigText.focus();
+					copyConfigText.select();
+					copyConfigStatus.textContent = "Copy failed — text selected, press Ctrl+C.";
+					copyConfigStatus.style.color = "var(--danger,#e55)";
+				}
+			});
+
+			// ── Load Config modal ─────────────────────────────────────────────
+			const loadConfigModal = document.getElementById("load-config-modal");
+			const loadConfigText = document.getElementById("load-config-text");
+			const loadConfigStatus = document.getElementById("load-config-status");
+			document.getElementById("load-config-btn").addEventListener("click", () => {
+				loadConfigText.value = "";
+				loadConfigStatus.textContent = "";
+				loadConfigModal.showModal();
+				loadConfigText.focus();
+			});
+			document.getElementById("load-config-modal-close").addEventListener("click", () => loadConfigModal.close());
+			loadConfigModal.addEventListener("click", (e) => { if (e.target === loadConfigModal) { loadConfigModal.close(); } });
+			document.getElementById("load-config-load-btn").addEventListener("click", () => {
+				const result = applyConfigFromText(loadConfigText.value);
+				if (result.ok) {
+					loadConfigModal.close();
+					renderStatus("Config loaded.", "done");
+				} else {
+					loadConfigStatus.textContent = result.error;
+					loadConfigStatus.style.color = "var(--danger,#e55)";
+				}
+			});
 
 			// ── Settings modal ────────────────────────────────────────────────
 			const settingsModal = els.settingsModal;
@@ -3563,6 +3698,79 @@
 			} catch (error) {
 				return JSON.parse(JSON.stringify(defaultState));
 			}
+		}
+
+		// ── Copy / Load full config ───────────────────────────────────────────
+		// Serializes EVERY persisted aspect of the problem so a setup can be
+		// shared or restored verbatim: slot/class/legendary, current & target
+		// affixes (with all per-affix flags), thinking time, last action, history,
+		// skill filter, slot-legality overrides, verification level, and the
+		// JS-vs-Rust engine choice.
+		const CONFIG_BLOB_VERSION = 3;
+
+		function buildConfigPayload() {
+			return {
+				__d4cubeoptimConfig: CONFIG_BLOB_VERSION,
+				current: appState.current,
+				target: appState.target,
+				settings: appState.settings,
+				lastAction: appState.lastAction,
+				history: appState.history,
+				skillFilter: appState.skillFilter,
+				userOverrides: appState.userOverrides || [],
+				tightenStepsLevel: appState.tightenStepsLevel,
+				useRust: appState.useRust === true,
+			};
+		}
+
+		// Replaces all app state from a config JSON string. Returns
+		// { ok: true } on success or { ok: false, error } on a parse/shape error.
+		function applyConfigFromText(raw) {
+			let parsed;
+			try {
+				parsed = JSON.parse(raw);
+			} catch (e) {
+				return { ok: false, error: "Invalid JSON: " + (e && e.message ? e.message : "could not parse") };
+			}
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				return { ok: false, error: "Config must be a JSON object." };
+			}
+
+			const deepClone = (value, fallback) =>
+				JSON.parse(JSON.stringify(value == null ? fallback : value));
+
+			appState.current = deepClone(parsed.current, defaultState.current);
+			appState.target = deepClone(parsed.target, defaultState.target);
+			appState.settings = deepClone(parsed.settings, defaultState.settings);
+			appState.lastAction = deepClone(parsed.lastAction, defaultState.lastAction);
+			appState.history = Array.isArray(parsed.history) ? parsed.history : [];
+			appState.skillFilter = parsed.skillFilter || null;
+			appState.userOverrides = Array.isArray(parsed.userOverrides) ? parsed.userOverrides : [];
+			appState.tightenStepsLevel = TIGHTEN_LEVELS.includes(parsed.tightenStepsLevel)
+				? parsed.tightenStepsLevel
+				: "none";
+			appState.useRust = parsed.useRust === true;
+
+			// Persist the separately-keyed aspects (overrides, tighten, engine).
+			saveUserOverrides(appState.userOverrides);
+			saveTightenStepsLevel(appState.tightenStepsLevel);
+			saveUseRust(appState.useRust);
+
+			// Clear transient solver outputs from the previous problem.
+			treeCache = null;
+			currentBestAction = null;
+			lastDiagnostics = null;
+			lastOneStepRisk = null;
+
+			// Overrides may have changed the legal-slot table, so rebuild the affix
+			// catalog + datalists + worker. This re-renders everything (and runs
+			// sanitizeState, which normalizes the freshly-loaded affixes).
+			rebuildAffixCatalogAndWorker();
+
+			// Persist the main state blob (rebuild/renderAll do not save).
+			saveState();
+			setRunButtons();
+			return { ok: true };
 		}
 
 		function describeAction(action) {

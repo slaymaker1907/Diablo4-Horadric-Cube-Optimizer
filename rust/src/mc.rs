@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::env::TranslationEnv;
+use crate::intern::{intern_state, istate_key_v1};
 use crate::optimizer::{optimize_payload_v3, SolveIlpFn};
 use crate::residual::{get_action_outcomes, has_duplicate_affix_ids_v2};
 use crate::terminal::is_terminal;
 use crate::types::{AffixEntry, JsState, OptimizePayload};
-use crate::keys::state_key as compute_state_key;
 
 const MC_LIGHT_ROLLOUTS: usize = 100;
 const MC_HEAVY_ROLLOUTS: usize = 500;
@@ -314,19 +314,19 @@ pub fn run_mc_verification_v3(
         return intermediate_result;
     }
 
-    let mut action_cache: HashMap<String, Option<Value>> = HashMap::new();
+    let mut action_cache: HashMap<u64, Option<Value>> = HashMap::new();
 
     // Memoized valid, normalized outcome list per (state_key, action_key).
     // `get_action_outcomes` + `filter_valid_mc_outcomes` are pure deterministic
-    // functions of the *concrete* state (state_key uses real affix ids, no trash
-    // collapse) and the action, so caching is output-identical. MC revisits the
-    // same states heavily, so this amortizes the O(pool) outcome build away from
-    // every step — mirrors the JS env `actionOutcomeCache`. The random pick and
-    // family-other expansion still run per step on the cached list, so the
+    // functions of the *concrete* state (istate_key_v1 uses real affix tokens, no
+    // trash collapse) and the action, so caching is output-identical. MC revisits
+    // the same states heavily, so this amortizes the O(pool) outcome build away
+    // from every step — mirrors the JS env `actionOutcomeCache`. The random pick
+    // and family-other expansion still run per step on the cached list, so the
     // sampled distribution is unchanged.
     let mut outcome_cache: HashMap<String, Vec<(f64, JsState)>> = HashMap::new();
 
-    let root_key = compute_state_key(&payload.state);
+    let root_key = istate_key_v1(&intern_state(&payload.state, env));
     action_cache.insert(root_key, Some(intermediate_result["action"].clone()));
 
     let mut step_counts: Vec<usize> = Vec::with_capacity(budget.max_rollouts);
@@ -370,7 +370,7 @@ pub fn run_mc_verification_v3(
                 break;
             }
 
-            let key = compute_state_key(&state);
+            let key = istate_key_v1(&intern_state(&state, env));
             let action = if let Some(cached) = action_cache.get(&key) {
                 cached.clone()
             } else {

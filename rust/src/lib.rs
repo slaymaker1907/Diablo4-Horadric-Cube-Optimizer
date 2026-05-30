@@ -3,6 +3,7 @@ mod closed_form;
 mod decomposition;
 mod env;
 mod feasibility;
+mod intern;
 mod keys;
 mod mc;
 mod optimizer;

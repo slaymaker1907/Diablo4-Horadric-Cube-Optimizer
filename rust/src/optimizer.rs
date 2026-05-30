@@ -8,7 +8,6 @@ use crate::closed_form::is_case_a_stuck_recovery_risk;
 use crate::decomposition::build_decomposition_plan_input;
 use crate::env::TranslationEnv;
 use crate::feasibility::analyze_feasibility;
-use crate::keys::state_key as compute_state_key;
 use crate::residual::{
     attach_unsatisfactory_to_state, build_residual_reachable_graph_v3,
     build_residual_result_from_solution, get_action_outcomes, normalize_outcome_state_v2,
@@ -797,10 +796,9 @@ fn refine_one_action(
     action: &Value,
     env: &TranslationEnv,
     sub_refine_depth: usize,
-    cache: &mut HashMap<String, Option<(f64, bool)>>,
+    cache: &mut HashMap<u64, Option<(f64, bool)>>,
     solve_ilp: SolveIlpFn,
 ) -> Option<(f64, bool)> {
-    // Convert action Value back to JsAction
     let action_js: crate::types::JsAction = serde_json::from_value(action.clone()).ok()?;
     let outcomes = get_action_outcomes(&payload.state, &action_js, env);
     if outcomes.is_empty() {
@@ -811,7 +809,7 @@ fn refine_one_action(
     let mut any_loose = false;
 
     for outcome in &outcomes {
-        let key = compute_state_key(&outcome.state);
+        let key = crate::intern::istate_key_v1(&crate::intern::intern_state(&outcome.state, env));
         if !cache.contains_key(&key) {
             let term = is_terminal(&outcome.state, &payload.target, env);
             let entry = if term.terminal && term.success {
@@ -866,7 +864,7 @@ fn refine_root_action_v3(
     let k = (refine_top_k.max(1)).min(all_candidates.len().max(1));
     let candidates = &all_candidates[..k.min(all_candidates.len())];
 
-    let mut cache: HashMap<String, Option<(f64, bool)>> = HashMap::new();
+    let mut cache: HashMap<u64, Option<(f64, bool)>> = HashMap::new();
     let t0 = now_ms();
     let mut best_refined: Option<(f64, bool, Value)> = None; // (steps, loose, action)
 

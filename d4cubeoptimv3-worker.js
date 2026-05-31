@@ -380,6 +380,28 @@ function violatesFamilyUniqueness(state, env) {
 }
 
 /**
+ * Check whether `state` carries the same affixId on two slots. D4 never allows
+ * duplicate affixes on an item, so any reroll/add outcome that would produce one
+ * is impossible (the game excludes on-item affixes from the reroll pool). This
+ * complements `violatesFamilyUniqueness`, which only screens family-level
+ * collisions (elemental/resistance/skill families) and not plain singletons such
+ * as Critical Strike Damage.
+ */
+function hasDuplicateAffixId(state) {
+  const seen = new Set();
+  for (const entry of state.affixes) {
+    if (!entry || !entry.affixId) {
+      continue;
+    }
+    if (seen.has(entry.affixId)) {
+      return true;
+    }
+    seen.add(entry.affixId);
+  }
+  return false;
+}
+
+/**
  * Check whether the target specification is structurally impossible due to
  * family-uniqueness constraints (e.g. two elemental-damage subtypes).
  *
@@ -1206,7 +1228,7 @@ function getActionOutcomes(state, action, env) {
         isGA: false,
         isEnchanted: false,
       });
-      if (violatesFamilyUniqueness(next, env)) {
+      if (violatesFamilyUniqueness(next, env) || hasDuplicateAffixId(next)) {
         continue;
       }
       outcomes.push({ probability: p, state: next });
@@ -1267,7 +1289,7 @@ function getActionOutcomes(state, action, env) {
           isGA: false,
           isEnchanted: false,
         };
-        if (violatesFamilyUniqueness(next, env)) {
+        if (violatesFamilyUniqueness(next, env) || hasDuplicateAffixId(next)) {
           continue;
         }
         outcomes.push({ probability: sourceP * affixP, state: next });
@@ -1313,7 +1335,7 @@ function getActionOutcomes(state, action, env) {
             isGA: false,
             isEnchanted: false,
           };
-          if (violatesFamilyUniqueness(next, env)) {
+          if (violatesFamilyUniqueness(next, env) || hasDuplicateAffixId(next)) {
             continue;
           }
           outcomes.push({ probability: sourceP * categoryP * affixP, state: next });

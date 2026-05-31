@@ -846,7 +846,7 @@
 							<select id="character-class"></select>
 						</div>
 						<button id="legendary-toggle" class="toggle">Legendary: No</button>
-						<button id="no-enchant-toggle" class="toggle" title="When on, the optimizer treats enchanting as unavailable. Current Enchanted flags on affixes are unchanged (those affixes remain cube-immune as usual).">No Enchant: Off</button>
+						<button id="no-enchant-toggle" class="toggle" title="When off, the optimizer will not consider Enchantress actions. Current Enchanted flags on affixes are unchanged (those affixes remain cube-immune as usual).">Allow Enchant: Off</button>
 						<p id="class-any-warning" class="legend" style="display:none; flex-basis: 100%; margin: 4px 0 0;">
 							Class is Any — the rolling pool includes every class's skills. Set Class to your character for accurate probabilities.
 						</p>
@@ -1355,7 +1355,7 @@
 			},
 			settings: {
 				thinkingSeconds: 0,
-				noEnchant: false,
+				allowEnchant: false,
 			},
 			lastAction: {
 				mode: "added",
@@ -1783,9 +1783,10 @@
 			});
 
 			els.noEnchantToggle.addEventListener("click", () => {
-				appState.settings.noEnchant = !appState.settings.noEnchant;
+				appState.settings.allowEnchant = !appState.settings.allowEnchant;
 				saveState();
 				renderNoEnchantToggle();
+				invalidatePolicyCache();
 			});
 
 			els.addCurrentAffix.addEventListener("click", () => {
@@ -1936,7 +1937,7 @@
 						.map((entry) => entry.affixId),
 					sacrificeAffixId: "",
 					strictMode: true,
-					disableEnchanting: !!appState.settings.noEnchant,
+					disableEnchanting: !appState.settings.allowEnchant,
 				},
 				timeMs,
 				stopBuffer,
@@ -3446,9 +3447,9 @@
 		}
 
 		function renderNoEnchantToggle() {
-			const on = !!appState.settings.noEnchant;
+			const on = !!appState.settings.allowEnchant;
 			els.noEnchantToggle.classList.toggle("active", on);
-			els.noEnchantToggle.textContent = on ? "No Enchant: On" : "No Enchant: Off";
+			els.noEnchantToggle.textContent = on ? "Allow Enchant: On" : "Allow Enchant: Off";
 		}
 
 		function addHistoryEntry(entry) {
@@ -3590,7 +3591,7 @@
 			pendingIllegalFlashTarget.clear();
 
 			appState.settings.thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
-			appState.settings.noEnchant = !!appState.settings.noEnchant;
+			appState.settings.allowEnchant = !!appState.settings.allowEnchant;
 
 			// Migrate the legacy combined "changed" mode to the Focused split.
 			if (appState.lastAction.mode === "changed") {

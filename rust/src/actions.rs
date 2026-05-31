@@ -392,6 +392,11 @@ pub fn get_valid_actions(state: &JsState, target: &JsTarget, env: &TranslationEn
     }
 
     // ── Enchant action generation ─────────────────────────────────────────────
+    // Skipped entirely when disableEnchanting is set (affix isEnchanted flags
+    // are left unchanged — those slots remain cube-immune as usual).
+    if env.disable_enchanting {
+        return actions;
+    }
     // (target_ids / current_affix_ids / unsatisfactory_ids computed above.)
     let enchanted_index = state.affixes.iter().position(|e| e.is_enchanted);
 

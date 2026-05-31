@@ -72,6 +72,8 @@ pub struct JsGaConfig {
     pub protected_affix_ids: Vec<String>,
     #[serde(rename = "unsatisfactoryAffixIds", default)]
     pub unsatisfactory_affix_ids: Vec<String>,
+    #[serde(rename = "disableEnchanting", default)]
+    pub disable_enchanting: bool,
 }
 
 impl Default for JsGaConfig {
@@ -83,6 +85,7 @@ impl Default for JsGaConfig {
             forbidden_affix_ids: vec![],
             protected_affix_ids: vec![],
             unsatisfactory_affix_ids: vec![],
+            disable_enchanting: false,
         }
     }
 }

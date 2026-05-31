@@ -57,6 +57,10 @@ pub struct TranslationEnv {
     /// strictMode from gaConfig.
     pub strict_mode: bool,
 
+    /// disableEnchanting from gaConfig — when true, enchant actions are
+    /// suppressed entirely (the affixes themselves keep their isEnchanted state).
+    pub disable_enchanting: bool,
+
     /// Source GA counts per affix (from gaConfig.currentGAAffixes).
     pub source_ga_counts: HashMap<String, u32>,
 
@@ -670,6 +674,7 @@ pub fn build_env(data: JsEnvData, ga_config: JsGaConfig, target: JsTarget) -> Tr
         classes,
         category_names,
         strict_mode: ga_config.strict_mode,
+        disable_enchanting: ga_config.disable_enchanting,
         source_ga_counts,
         wanted_by_family,
         max_affix_slots_from_data: data.max_affix_slots,

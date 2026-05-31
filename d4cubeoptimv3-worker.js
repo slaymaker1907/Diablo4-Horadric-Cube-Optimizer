@@ -635,6 +635,7 @@ function buildEnv(data, gaConfig, target) {
     familyOtherId,
     strictMode: !!(gaConfig && gaConfig.strictMode),
     rulesEnabled: !gaConfig || gaConfig.rulesEnabled !== false,
+    disableEnchanting: !!(gaConfig && gaConfig.disableEnchanting),
     targetCounts,
   };
 }
@@ -939,8 +940,11 @@ function getValidActions(state, target, env) {
     }
   }
 
-  // Enchant action generation.
-  //
+  // Enchant action generation — skipped entirely when disableEnchanting is set.
+  if (env.disableEnchanting) {
+    return actions;
+  }
+
   // Rules (see docs/game-mechanics.md):
   //   * Each item has at most one "enchanted" slot, sticky for its lifetime.
   //   * If a slot is already enchanted: the only legal enchant source is that

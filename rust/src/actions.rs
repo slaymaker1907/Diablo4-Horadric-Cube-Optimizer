@@ -290,6 +290,37 @@ pub fn action_cost(action: &JsAction, state: &JsState) -> f64 {
 pub fn get_valid_actions(state: &JsState, target: &JsTarget, env: &TranslationEnv) -> Vec<JsAction> {
     let mut actions: Vec<JsAction> = Vec::new();
 
+    // Sets used for focused-churn pruning (below) and enchant-candidate pruning.
+    let target_ids: HashSet<&str> = target
+        .affixes
+        .iter()
+        .map(|e| e.affix_id.as_str())
+        .collect();
+    let current_affix_ids: HashSet<&str> = state
+        .affixes
+        .iter()
+        .map(|e| e.affix_id.as_str())
+        .collect();
+    let unsatisfactory_ids: HashSet<&str> = state
+        .unsatisfactory_affix_ids
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    // Categories that can still produce a missing target via a focused reroll
+    // (a focused reroll lands in its own prism category).
+    let mut missing_target_focused_categories: HashSet<&str> = HashSet::new();
+    for e in &target.affixes {
+        let id = e.affix_id.as_str();
+        if id.is_empty() || current_affix_ids.contains(id) {
+            continue;
+        }
+        if let Some(affix) = env.affix_map.get(id) {
+            for cat in get_affix_categories_for_op(affix, "focused") {
+                missing_target_focused_categories.insert(cat.as_str());
+            }
+        }
+    }
+
     // Category-based actions.
     for category in &env.category_names {
         // add: only when < 4 affixes
@@ -337,7 +368,19 @@ pub fn get_valid_actions(state: &JsState, target: &JsTarget, env: &TranslationEn
         if !eligible_focused.is_empty() {
             let touches_ga = env.strict_mode
                 && eligible_focused.iter().any(|(_, e)| is_protected_ga(e, env));
-            if !touches_ga {
+            // Prune strictly-dominated "churn" focused rerolls: when this prism
+            // cannot produce any still-missing target AND every eligible source
+            // already holds a satisfied (non-unsatisfactory) target affix, the
+            // reroll can only swap a wanted affix for a non-improving one (or
+            // itself). It never advances the objective, so it is never part of an
+            // optimal policy. Mirrors getValidActions in the JS worker.
+            let churn_dominated = !missing_target_focused_categories.contains(category.as_str())
+                && eligible_focused.iter().all(|(_, e)| {
+                    !e.affix_id.is_empty()
+                        && target_ids.contains(e.affix_id.as_str())
+                        && !unsatisfactory_ids.contains(e.affix_id.as_str())
+                });
+            if !touches_ga && !churn_dominated {
                 actions.push(JsAction {
                     action_type: "focused".to_string(),
                     prism: Some(category.clone()),
@@ -349,22 +392,7 @@ pub fn get_valid_actions(state: &JsState, target: &JsTarget, env: &TranslationEn
     }
 
     // ── Enchant action generation ─────────────────────────────────────────────
-    let target_ids: HashSet<&str> = target
-        .affixes
-        .iter()
-        .map(|e| e.affix_id.as_str())
-        .collect();
-    let current_affix_ids: HashSet<&str> = state
-        .affixes
-        .iter()
-        .map(|e| e.affix_id.as_str())
-        .collect();
-    let unsatisfactory_ids: HashSet<&str> = state
-        .unsatisfactory_affix_ids
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-
+    // (target_ids / current_affix_ids / unsatisfactory_ids computed above.)
     let enchanted_index = state.affixes.iter().position(|e| e.is_enchanted);
 
     let build_enchant_candidates = |source_entry: &AffixEntry, include_same: bool| -> Vec<String> {

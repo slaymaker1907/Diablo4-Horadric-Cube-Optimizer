@@ -890,13 +890,12 @@ fn refine_root_action_v3(
             continue;
         }
         let (refined_steps, any_loose) = r.unwrap();
-        // Sanity: refinement must be a strict improvement over abstract cost
-        let candidate_abstract = candidate["expectedSteps"].as_f64();
-        if let Some(abs) = candidate_abstract {
-            if !(refined_steps <= abs + 1e-9) {
-                continue;
-            }
-        }
+        // Pick by the concrete refined value — the more accurate estimate. We do
+        // NOT filter by `refined <= abstract`: the residual abstract value is not
+        // always an upper bound (when a prism holds a matched target it
+        // under-estimates the random-source collision cost), and filtering those
+        // out discarded the genuinely-cheapest action, letting the solver
+        // recommend a regressive reroll. Mirrors refineRootActionV3 in the JS worker.
         if best_refined
             .as_ref()
             .map(|(bs, _, _)| refined_steps < *bs)

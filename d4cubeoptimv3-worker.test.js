@@ -2707,3 +2707,58 @@ test("Case A candidate flags looseEstimate when stuck-recovery conditions are me
     "At least one selectedOption must have looseEstimate=true for the stuck-recovery scenario " +
     `(got selectedOptions: ${JSON.stringify(result.diagnostics.decomposition.selectedOptions)})`);
 });
+
+// Regression: a non-target affix trapped in a prism alongside a matched target.
+// The only wrong affix (Weapon Damage) must become Mainstat, but Weapon Damage
+// shares the Aggressive prism with the matched Critical Strike Damage, and the
+// only missing target (Mainstat) lives nowhere else reachable. The optimizer
+// previously (a) fabricated illegal duplicate-affix states when a focused reroll
+// rolled into a same-prism matched affix, and (b) recommended a strictly-
+// regressive Focused/Resourceful reroll of the matched Lucky-Hit. See badinput.
+test("regression: trapped-prism non-target — no duplicate outcomes, no dominated churn", { timeout: TEST_TIMEOUT_MS }, () => {
+  const categoryToNames = {
+    Aggressive: ["Mainstat", "Critical Strike Damage", "Weapon Damage", "Attack Speed", "All Damage"],
+    Resourceful: ["Lucky Hit Chance restore Resource", "Maximum Resource", "Resource on Kill"],
+    Protector: ["All Resistance", "Maximum Life"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+
+  const state = buildState([
+    { affixId: byName["All Resistance"].id, isGA: false, isEnchanted: true },
+    { affixId: byName["Critical Strike Damage"].id, isGA: false },
+    { affixId: byName["Weapon Damage"].id, isGA: false },
+    { affixId: byName["Lucky Hit Chance restore Resource"].id, isGA: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Lucky Hit Chance restore Resource"].id },
+    { affixId: byName["Mainstat"].id },
+    { affixId: byName["Critical Strike Damage"].id },
+    { affixId: byName["All Resistance"].id },
+  ]);
+  const gaConfig = { strictMode: true };
+  const env = worker.buildEnv(data, gaConfig, target);
+
+  // (a) A Focused/Aggressive reroll must never produce a duplicate-affix state.
+  const outcomes = worker.getActionOutcomes(state, { type: "focused", prism: "Aggressive" }, env);
+  for (const o of outcomes) {
+    const ids = o.state.affixes.map((a) => a.affixId);
+    assert.equal(new Set(ids).size, ids.length, "Focused/Aggressive produced a duplicate-affix state");
+  }
+
+  // (b) The strictly-dominated Focused/Resourceful churn (only source is the
+  // matched Lucky-Hit; Resourceful holds no missing target) must be pruned.
+  const actions = worker.getValidActions(state, target, env);
+  assert.ok(
+    !actions.some((a) => a.type === "focused" && a.prism === "Resourceful"),
+    "Dominated Focused/Resourceful churn action should be pruned"
+  );
+
+  // (c) End-to-end: the optimizer must not recommend the dominated churn.
+  const result = worker.optimizePayloadV3({ state, target, data, gaConfig }, { refineDepth: 2, refineTopK: 6 });
+  assert.ok(result.action, "expected a recommended action");
+  assert.ok(
+    !(result.action.type === "focused" && result.action.prism === "Resourceful"),
+    `Optimizer should not recommend the dominated Focused/Resourceful reroll (got ${JSON.stringify(result.action)})`
+  );
+});

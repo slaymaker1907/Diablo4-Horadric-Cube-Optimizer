@@ -383,7 +383,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                     is_ga: false,
                     is_enchanted: false,
                 });
-                if violates_family_uniqueness(&next, env) {
+                if violates_family_uniqueness(&next, env) || has_duplicate_affix_ids_v2(&next) {
                     continue;
                 }
                 outcomes.push(Outcome { probability: p, state: next });
@@ -444,7 +444,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                         is_ga: false,
                         is_enchanted: false,
                     };
-                    if violates_family_uniqueness(&next, env) {
+                    if violates_family_uniqueness(&next, env) || has_duplicate_affix_ids_v2(&next) {
                         continue;
                     }
                     outcomes.push(Outcome { probability: source_p * affix_p, state: next });
@@ -490,7 +490,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                             is_ga: false,
                             is_enchanted: false,
                         };
-                        if violates_family_uniqueness(&next, env) {
+                        if violates_family_uniqueness(&next, env) || has_duplicate_affix_ids_v2(&next) {
                             continue;
                         }
                         outcomes.push(Outcome {
@@ -557,7 +557,7 @@ pub fn get_action_outcomes(state: &JsState, action: &JsAction, env: &Translation
                 is_enchanted: true,
             };
 
-            if violates_family_uniqueness(&next, env) {
+            if violates_family_uniqueness(&next, env) || has_duplicate_affix_ids_v2(&next) {
                 return vec![];
             }
 

@@ -866,6 +866,36 @@ function getValidActions(state, target, env) {
 
   const actions = [];
 
+  // Precomputed sets used both for focused-churn pruning (below) and the
+  // enchant-candidate pruning further down.
+  const targetIds = new Set(target.affixes.map((entry) => entry.affixId).filter(Boolean));
+  const currentAffixIds = new Set();
+  for (const entry of state.affixes) {
+    if (entry && entry.affixId) {
+      currentAffixIds.add(entry.affixId);
+    }
+  }
+  const unsatisfactoryIds = new Set(
+    Array.isArray(state.unsatisfactoryAffixIds) ? state.unsatisfactoryAffixIds : []
+  );
+  // Categories that can still produce a missing target via a focused reroll.
+  // A focused reroll lands in its own prism category, so a category outside this
+  // set can never advance toward an unmet target.
+  const missingTargetFocusedCategories = new Set();
+  for (const entry of target.affixes) {
+    const id = entry && entry.affixId;
+    if (!id || currentAffixIds.has(id)) {
+      continue;
+    }
+    const affix = env.affixMap[id];
+    if (!affix) {
+      continue;
+    }
+    for (const cat of getAffixCategoriesForOp(affix, "focused")) {
+      missingTargetFocusedCategories.add(cat);
+    }
+  }
+
   for (const categoryName of env.categoryNames) {
     if (state.affixes.length < 4) {
       actions.push({ type: "add", prism: categoryName });
@@ -890,7 +920,20 @@ function getValidActions(state, target, env) {
     const eligibleFocused = getEligibleByCategory(state, env, categoryName, "focused");
     if (eligibleFocused.length > 0) {
       const touchesGA = env.strictMode && eligibleFocused.some(({ entry }) => isProtectedGA(entry, env));
-      if (!touchesGA) {
+      // Prune strictly-dominated "churn" focused rerolls: when this prism cannot
+      // produce any still-missing target AND every eligible source already holds
+      // a satisfied (non-unsatisfactory) target affix, the reroll can only swap a
+      // wanted affix for a non-improving one (or itself). It never advances the
+      // lexicographic objective, so it is never part of an optimal policy —
+      // leaving it in let the solver churn a matched target at apparent zero
+      // cost (e.g. recommending a Resourceful reroll of a matched Lucky-Hit when
+      // the only missing target lives in Aggressive).
+      const churnDominated =
+        !missingTargetFocusedCategories.has(categoryName)
+        && eligibleFocused.every(({ entry }) => (
+          entry && entry.affixId && targetIds.has(entry.affixId) && !unsatisfactoryIds.has(entry.affixId)
+        ));
+      if (!touchesGA && !churnDominated) {
         actions.push({ type: "focused", prism: categoryName });
       }
     }
@@ -918,16 +961,6 @@ function getValidActions(state, target, env) {
   // useful in this lexicographic objective — pruning these candidates
   // prevents otherwise-explosive enchant cycles in the value iteration
   // without losing any optimal policy.
-  const targetIds = new Set(target.affixes.map((entry) => entry.affixId).filter(Boolean));
-  const currentAffixIds = new Set();
-  for (const entry of state.affixes) {
-    if (entry && entry.affixId) {
-      currentAffixIds.add(entry.affixId);
-    }
-  }
-  const unsatisfactoryIds = new Set(
-    Array.isArray(state.unsatisfactoryAffixIds) ? state.unsatisfactoryAffixIds : []
-  );
   const enchantedIndex = state.affixes.findIndex((entry) => entry.isEnchanted);
 
   function buildEnchantTargetCandidates(sourceEntry, includeSameAffix) {
@@ -5571,12 +5604,15 @@ function refineRootActionV3(payload, result, opts) {
     const r = refineOneAction(payload, candidate.action, env, refineDepth - 1, successorCache);
     if (r == null) continue;   // unevaluable successor — skip this candidate
 
-    // Sanity: refinement is a strict improvement over the per-candidate
-    // abstract cost (the residual abstract value is an upper bound).
-    // Skip if the abstract cost is known and refinement doesn't improve it.
-    const candidateAbstract = candidate.expectedSteps;
-    if (candidateAbstract != null && !(r.refinedSteps <= candidateAbstract + 1e-9)) continue;
-
+    // Pick by the concrete refined value, which is the more accurate estimate.
+    // We deliberately do NOT filter candidates by `refined <= abstract`: the
+    // residual abstract value is not always an upper bound — when a prism holds
+    // a matched target, the abstraction under-estimates the random-source
+    // collision cost (e.g. abstract 6.0 vs. true ~20). Filtering those out
+    // discarded the genuinely-cheapest action and left only over-estimated ones,
+    // so the solver could recommend a regressive reroll. Comparing refined
+    // values head-to-head is correct regardless of whether the abstract over- or
+    // under-estimated.
     if (bestRefined == null || r.refinedSteps < bestRefined.refinedSteps) {
       bestRefined = { ...r, action: candidate.action };
     }

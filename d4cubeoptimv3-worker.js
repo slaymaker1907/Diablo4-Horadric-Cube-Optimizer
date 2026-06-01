@@ -5851,6 +5851,9 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
   const stepCounts = [];
   let truncatedRolloutCount = 0;
+  const successSteps = [];  // actual steps for successful rollouts (when includeRolloutData)
+  const failureSteps = [];  // actual steps for failed/truncated rollouts (before cap)
+  const includeRolloutData = !!payload.includeRolloutData;
   const startTime = Date.now();
 
   if (typeof options.onProgress === "function") {
@@ -5878,11 +5881,16 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         if (!term.success) {
           // Dead state encountered mid-rollout (GA broken). Cap as truncated.
           truncated = true;
+          if (includeRolloutData) failureSteps.push(steps); // actual steps before cap
           steps = MC_ROLLOUT_STEP_CAP;
         }
         break;
       }
-      if (steps >= MC_ROLLOUT_STEP_CAP) { truncated = true; break; }
+      if (steps >= MC_ROLLOUT_STEP_CAP) {
+        truncated = true;
+        if (includeRolloutData) failureSteps.push(steps);
+        break;
+      }
 
       const key = stateKey(state);
       let action = actionCache.get(key);
@@ -5891,12 +5899,25 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         action = subResult && subResult.action ? subResult.action : null;
         actionCache.set(key, action);
       }
-      if (!action) { truncated = true; steps = MC_ROLLOUT_STEP_CAP; break; }
+      if (!action) {
+        truncated = true;
+        if (includeRolloutData) failureSteps.push(steps);
+        steps = MC_ROLLOUT_STEP_CAP;
+        break;
+      }
 
       const rawOutcomes = getActionOutcomes(state, action, env);
-      if (!rawOutcomes || rawOutcomes.length === 0) { truncated = true; break; }
+      if (!rawOutcomes || rawOutcomes.length === 0) {
+        truncated = true;
+        if (includeRolloutData) failureSteps.push(steps);
+        break;
+      }
       const outcomes = filterValidMCOutcomesV3(rawOutcomes);
-      if (outcomes.length === 0) { truncated = true; break; }
+      if (outcomes.length === 0) {
+        truncated = true;
+        if (includeRolloutData) failureSteps.push(steps);
+        break;
+      }
 
       const chosen = pickWeightedOutcomeV3(outcomes);
       state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
@@ -5904,7 +5925,11 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
     }
 
     stepCounts.push(steps);
-    if (truncated) truncatedRolloutCount++;
+    if (truncated) {
+      truncatedRolloutCount++;
+    } else if (includeRolloutData) {
+      successSteps.push(steps);
+    }
 
     const completed = stepCounts.length;
     if (typeof options.onProgress === "function" &&
@@ -5953,6 +5978,7 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         aborted,
         earlyConverged,
         adaptive: budget.adaptive,
+        ...(includeRolloutData ? { successStepCounts: successSteps, failureStepCounts: failureSteps } : {}),
       },
     },
   };
@@ -6139,6 +6165,50 @@ if (typeof self !== "undefined") {
           type: "error",
           runId,
           message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    if (payload.type === "compute-distribution") {
+      const runId = Number(payload.runId) || 0;
+      const intermediateResult = payload.intermediateResult;
+      if (!intermediateResult || !intermediateResult.action) {
+        self.postMessage({ type: "distribution-done", runId, goldStandard: null });
+        return;
+      }
+      try {
+        const distPayload = {
+          ...payload,
+          tightenStepsLevel: "light",
+          tightenStepsOverrides: { lightRollouts: Number(payload.distRollouts) || 200 },
+          includeRolloutData: true,
+        };
+        const stopBuffer = payload.stopBuffer || null;
+        const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
+        const result = runMCVerificationV3(distPayload, intermediateResult, {
+          stopView,
+          onProgress: (progress) => {
+            self.postMessage({
+              type: "distribution-progress",
+              runId,
+              completed: progress.completed,
+              total: progress.total,
+            });
+          },
+        });
+        self.postMessage({
+          type: "distribution-done",
+          runId,
+          goldStandard: result.diagnostics && result.diagnostics.goldStandard
+            ? result.diagnostics.goldStandard
+            : null,
+        });
+      } catch (error) {
+        self.postMessage({
+          type: "distribution-done",
+          runId,
+          goldStandard: null,
+          error: error instanceof Error ? error.message : String(error),
         });
       }
     }

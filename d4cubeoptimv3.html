@@ -700,7 +700,8 @@
 		#settings-modal,
 		#copy-config-modal,
 		#load-config-modal,
-		#export-tracking-modal {
+		#export-tracking-modal,
+		#dist-modal {
 			border: 1px solid var(--edge);
 			background: linear-gradient(180deg, #1e0808, #130505);
 			color: var(--fg);
@@ -714,7 +715,8 @@
 		#settings-modal::backdrop,
 		#copy-config-modal::backdrop,
 		#load-config-modal::backdrop,
-		#export-tracking-modal::backdrop {
+		#export-tracking-modal::backdrop,
+		#dist-modal::backdrop {
 			background: rgba(0, 0, 0, 0.75);
 		}
 
@@ -932,6 +934,7 @@
 
 						<button id="apply-manual" class="btn action-submit">Apply Outcome and Optimize</button>
 						<button id="apply-manual-only" class="btn ghost action-submit">Just Apply Outcome</button>
+						<button id="dist-graph-btn" class="btn ghost action-submit" style="display:none;">Compute Simulation Graph</button>
 					</div>
 					<p class="legend">
 						Use this after each in-game result so the optimizer can continue from the new state.
@@ -1066,9 +1069,33 @@
 					<ul style="margin:0 0 8px;padding-left:18px;">
 						<li><strong>None</strong> — no simulation; fastest. Shows only the initial estimate.</li>
 						<li><strong>Looser estimate</strong> — ~100 simulations; a quick sanity-check mean with a wider confidence interval.</li>
-						<li><strong>Tight estimate</strong> — keeps simulating until the mean is within ±10% of itself (adaptive, up to 2 min). The most accurate estimate available, but can be slow on complex states.</li>
+						<li><strong>Tight estimate</strong> — keeps simulating until the mean is within ±10% of itself (adaptive, up to the configured timeout). The most accurate estimate available, but can be slow on complex states.</li>
 					</ul>
 					<p style="margin:0;">The recommended action does <em>not</em> change — only the displayed step count. While verification runs, <strong>Optimize</strong> stays disabled and the status shows <em>"Verifying…"</em>; click <strong>Stop</strong> to abort early. The displayed number already includes a one-step refinement that runs automatically regardless of this setting.</p>
+				</div>
+				<div class="field" style="margin-top:8px;">
+					<label for="mc-timeout-input">Adaptive MC Timeout (seconds)</label>
+					<input id="mc-timeout-input" type="number" min="10" max="600" step="10" value="120" style="width:72px;">
+				</div>
+
+				<div class="divider"></div>
+
+				<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Simulation Graph</label>
+				<div class="field">
+					<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+						<input type="checkbox" id="dist-graph-toggle">
+						<span>Show Simulation Graph</span>
+					</label>
+				</div>
+				<div class="field" id="dist-rollouts-row" style="display:none;margin-top:6px;">
+					<label for="dist-rollouts-input">Rollout Count</label>
+					<input id="dist-rollouts-input" type="number" min="50" max="2000" step="50" value="200" style="width:80px;">
+				</div>
+				<div style="font-size:0.84rem;color:var(--muted);margin:6px 0 0;line-height:1.45;">
+					When on, each optimization run collects per-rollout outcome data and shows a
+					<strong>Simulation Graph</strong> button below "Just Apply Outcome". The graph displays
+					the distribution of cube steps across simulated playthroughs. Overrides the
+					Tighten Steps Estimate setting.
 				</div>
 
 				<div class="divider"></div>
@@ -1223,6 +1250,24 @@
 		</div>
 	</dialog>
 
+	<dialog id="dist-modal">
+		<div class="modal-inner">
+			<div class="modal-header">
+				<h2>Simulation Graph</h2>
+				<button id="dist-modal-close" class="btn ghost">✕</button>
+			</div>
+			<div class="modal-body">
+				<p id="dist-modal-summary" style="font-size:0.85rem;color:var(--muted);margin:0 0 10px;line-height:1.45;"></p>
+				<canvas id="dist-canvas" width="640" height="300"
+					style="width:100%;height:auto;display:block;border:1px solid var(--edge);border-radius:3px;"></canvas>
+				<p style="font-size:0.78rem;color:var(--muted);margin:8px 0 0;line-height:1.4;">
+					Green bars = successful runs. Red bars = GA-break endings.
+					Gold curve = Gamma distribution fit to successful runs (omitted when data is insufficient).
+				</p>
+			</div>
+		</div>
+	</dialog>
+
 	<script src="./gear-slot-legality.js"></script>
 	<script src="./config.js"></script>
 	<script src="./weight-tracking.js"></script>
@@ -1294,11 +1339,14 @@
 		const TIGHTEN_KEY = "d4cubeoptim_tighten_v3";
 		const TIGHTEN_LEVELS = ["none", "light", "heavy", "adaptive"];
 		const USE_RUST_KEY = "d4cubeoptim_use_rust_v3";
+		const MC_TIMEOUT_KEY = "d4opt-mc-timeout-s";
+		const DIST_GRAPH_KEY = "d4opt-dist-graph-enabled";
+		const DIST_ROLLOUTS_KEY = "d4opt-dist-rollouts";
 		// Outcome-tracking store. Separate from the main state blob and from
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-05-30-v3-dominated-action-fix";
+		const WORKER_VERSION = "2026-06-01-v3-sim-graph";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1370,6 +1418,9 @@
 			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
 			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
 			useRust: true, // persisted to USE_RUST_KEY, not main state blob
+			mcTimeoutS: 120, // persisted to MC_TIMEOUT_KEY
+			distGraphEnabled: false, // persisted to DIST_GRAPH_KEY
+			distRollouts: 200, // persisted to DIST_ROLLOUTS_KEY
 		};
 
 		let appState = loadState();
@@ -1381,6 +1432,11 @@
 		let currentBestAction = null;
 		let lastDiagnostics = null;
 		let lastOneStepRisk = null;
+		// Distribution graph runtime state (not persisted)
+		let distStatus = "idle"; // "idle" | "running" | "ready"
+		let distGoldStandard = null;
+		let distRunId = null;
+		let lastSolvePayload = null; // snapshot of last "run" payload for fallback distribution run
 		const supportsSharedStop = typeof SharedArrayBuffer !== "undefined" && typeof Atomics !== "undefined";
 		let stopBuffer = null;
 		let stopSignal = null;
@@ -1411,6 +1467,7 @@
 			manualPrism: document.getElementById("manual-prism"),
 			applyManual: document.getElementById("apply-manual"),
 			applyManualOnly: document.getElementById("apply-manual-only"),
+			distGraphBtn: document.getElementById("dist-graph-btn"),
 			applySecondaryAction: document.getElementById("apply-secondary-action"),
 			secondaryActionLabel: document.getElementById("secondary-action-label"),
 
@@ -1605,6 +1662,37 @@
 				box.style.display = box.style.display === "none" ? "block" : "none";
 			});
 
+			// MC timeout input (within Settings modal → Result Verification).
+			const mcTimeoutInput = document.getElementById("mc-timeout-input");
+			mcTimeoutInput.addEventListener("change", () => {
+				appState.mcTimeoutS = Math.max(10, Math.min(600, parseInt(mcTimeoutInput.value, 10) || 120));
+				mcTimeoutInput.value = appState.mcTimeoutS;
+				saveMcTimeoutS(appState.mcTimeoutS);
+			});
+
+			// Simulation Graph settings (within Settings modal).
+			const distGraphToggle = document.getElementById("dist-graph-toggle");
+			const distRolloutsInput = document.getElementById("dist-rollouts-input");
+			const distRolloutsRow = document.getElementById("dist-rollouts-row");
+			distGraphToggle.addEventListener("change", () => {
+				appState.distGraphEnabled = distGraphToggle.checked;
+				saveDistGraphEnabled(appState.distGraphEnabled);
+				distRolloutsRow.style.display = appState.distGraphEnabled ? "" : "none";
+				tightenStepsSelect.disabled = appState.distGraphEnabled;
+				tightenStepsSelect.style.opacity = appState.distGraphEnabled ? "0.45" : "";
+				renderDistGraphBtn();
+			});
+			distRolloutsInput.addEventListener("change", () => {
+				appState.distRollouts = Math.max(50, Math.min(2000, parseInt(distRolloutsInput.value, 10) || 200));
+				distRolloutsInput.value = appState.distRollouts;
+				saveDistRollouts(appState.distRollouts);
+			});
+
+			// Dist modal close
+			const distModal = document.getElementById("dist-modal");
+			document.getElementById("dist-modal-close").addEventListener("click", () => distModal.close());
+			distModal.addEventListener("click", (e) => { if (e.target === distModal) distModal.close(); });
+
 			// Use Rust/WASM toggle (within the Settings modal → Developer).
 			const useRustToggle = document.getElementById("use-rust-toggle");
 			useRustToggle.addEventListener("change", () => {
@@ -1688,7 +1776,13 @@
 					["none", "light", "adaptive"].includes(appState.tightenStepsLevel)
 						? appState.tightenStepsLevel
 						: "none";
+				tightenStepsSelect.disabled = appState.distGraphEnabled === true;
+				tightenStepsSelect.style.opacity = appState.distGraphEnabled ? "0.45" : "";
 				useRustToggle.checked = appState.useRust === true;
+				mcTimeoutInput.value = appState.mcTimeoutS || 120;
+				distGraphToggle.checked = appState.distGraphEnabled === true;
+				distRolloutsInput.value = appState.distRollouts || 200;
+				distRolloutsRow.style.display = appState.distGraphEnabled ? "" : "none";
 				renderTrackingUI();
 				renderOverridesTable();
 				settingsModal.showModal();
@@ -1837,6 +1931,15 @@
 
 			els.applyManual.addEventListener("click", () => { applyManualOutcome(); startRun(); });
 			els.applyManualOnly.addEventListener("click", () => { applyManualOutcomeOnly(); });
+			els.distGraphBtn.addEventListener("click", () => {
+				if (distStatus === "ready" && distGoldStandard) {
+					updateDistModal(distGoldStandard, appState.result);
+					document.getElementById("dist-modal").showModal();
+					return;
+				}
+				if (distStatus === "running" || runInProgress) return;
+				startDistributionRun();
+			});
 			els.applySecondaryAction.addEventListener("click", () => { applySecondaryAction(); });
 		}
 
@@ -1886,6 +1989,23 @@
 					}
 					renderStatus(`Error: ${message.message}`, "");
 					setRunButtons();
+				} else if (message.type === "distribution-progress") {
+					if (message.runId !== distRunId) return;
+					renderStatus(`Simulating… ${message.completed}/${message.total}`, "running");
+				} else if (message.type === "distribution-done") {
+					if (message.runId !== distRunId) return;
+					if (message.goldStandard && message.goldStandard.successStepCounts) {
+						distGoldStandard = message.goldStandard;
+						distStatus = "ready";
+					} else {
+						distStatus = "idle";
+					}
+					renderDistGraphBtn();
+					renderStatus("Done.", "done");
+					if (distGoldStandard) {
+						updateDistModal(distGoldStandard, appState.result);
+						document.getElementById("dist-modal").showModal();
+					}
 				}
 			};
 		}
@@ -1910,6 +2030,10 @@
 			ensureWorker();
 			activeRunId += 1;
 			runInProgress = true;
+			distStatus = "idle";
+			distGoldStandard = null;
+			distRunId = null;
+			renderDistGraphBtn();
 			setRunButtons();
 			renderStatus("Running...", "running");
 			if (stopSignal) {
@@ -1920,7 +2044,20 @@
 			const timeMs = thinkingSeconds === 0 ? 0 : thinkingSeconds * 1000;
 			const currentGA = runState.affixes.filter((entry) => entry.isGA).map((entry) => entry.affixId);
 
-			worker.postMessage({
+			// Build base tighten overrides (adaptive timeout always wired)
+			let tightenStepsLevel = TIGHTEN_LEVELS.includes(appState.tightenStepsLevel) ? appState.tightenStepsLevel : "none";
+			let tightenStepsOverrides = null;
+			if (appState.distGraphEnabled) {
+				tightenStepsLevel = "light";
+				tightenStepsOverrides = { lightRollouts: appState.distRollouts };
+			} else if (tightenStepsLevel === "adaptive") {
+				const timeoutMs = (appState.mcTimeoutS || 120) * 1000;
+				if (timeoutMs !== 120000) {
+					tightenStepsOverrides = { adaptiveWallBudgetMs: timeoutMs };
+				}
+			}
+
+			const solvePayload = {
 				type: "run",
 				runId: activeRunId,
 				state: runState,
@@ -1944,9 +2081,13 @@
 				timeMs,
 				stopBuffer,
 				tree: treeCache,
-				tightenStepsLevel: TIGHTEN_LEVELS.includes(appState.tightenStepsLevel) ? appState.tightenStepsLevel : "none",
+				tightenStepsLevel,
+				tightenStepsOverrides,
+				includeRolloutData: appState.distGraphEnabled === true,
 				useRust: appState.useRust === true,
-			});
+			};
+			lastSolvePayload = solvePayload;
+			worker.postMessage(solvePayload);
 		}
 
 		function stopRun() {
@@ -2016,6 +2157,14 @@
 					stoppedByUser: !!message.stoppedByUser,
 				});
 				saveState();
+			}
+
+			// Capture simulation graph data if the solve included rollout data
+			const gs = message.diagnostics && message.diagnostics.goldStandard;
+			if (gs && gs.applied && gs.successStepCounts) {
+				distGoldStandard = gs;
+				distStatus = "ready";
+				renderDistGraphBtn();
 			}
 		}
 
@@ -2335,6 +2484,26 @@
 			els.stopBtn.disabled = !runInProgress;
 			els.applyManual.disabled = runInProgress;
 			els.applyManualOnly.disabled = runInProgress;
+			renderDistGraphBtn();
+		}
+
+		function renderDistGraphBtn() {
+			const btn = els.distGraphBtn;
+			if (!appState.distGraphEnabled) {
+				btn.style.display = "none";
+				return;
+			}
+			btn.style.display = "";
+			if (distStatus === "running") {
+				btn.textContent = "Computing Simulation Graph…";
+				btn.disabled = true;
+			} else if (distStatus === "ready" && distGoldStandard) {
+				btn.textContent = "Show Simulation Graph";
+				btn.disabled = false;
+			} else {
+				btn.textContent = "Compute Simulation Graph";
+				btn.disabled = runInProgress || !(appState.result && appState.result.action);
+			}
 		}
 
 		function renderStatus(text, className) {
@@ -2351,6 +2520,273 @@
 			renderGARisk(null);
 			renderCandidates(null);
 		}
+
+		// ── Simulation Graph ────────────────────────────────────────────────────
+
+		function startDistributionRun() {
+			if (!appState.result || !appState.result.action) return;
+			if (!lastSolvePayload) return;
+			ensureWorker();
+			distRunId = ++activeRunId;
+			distStatus = "running";
+			renderDistGraphBtn();
+			const payload = Object.assign({}, lastSolvePayload, {
+				type: "compute-distribution",
+				runId: distRunId,
+				distRollouts: appState.distRollouts || 200,
+				intermediateResult: appState.result,
+				stopBuffer: null,
+			});
+			worker.postMessage(payload);
+		}
+
+		function updateDistModal(gs, result) {
+			if (!gs) return;
+			const pct = (v) => (typeof v === "number" && Number.isFinite(v))
+				? (v * 100).toFixed(1) + "%" : "—";
+			const num = (v, d) => (typeof v === "number" && Number.isFinite(v))
+				? v.toFixed(d != null ? d : 2) : "—";
+			const successProb = result && Number.isFinite(result.successProb) ? result.successProb : null;
+			const summary = document.getElementById("dist-modal-summary");
+			summary.textContent =
+				`${gs.rollouts} rollouts` +
+				(successProb != null ? ` — P(Success): ${pct(successProb)}` : "") +
+				` — Mean: ${num(gs.mean)} steps (σ = ${num(gs.stdev)}, 95% CI ±${num(gs.ci95halfWidth)})` +
+				(gs.aborted ? " [aborted]" : "");
+			drawDistCanvas(gs, successProb);
+		}
+
+		// Lanczos logGamma approximation (7 coefficients, accurate to ~15 decimal places).
+		function logGamma(z) {
+			if (z < 0.5) {
+				return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z);
+			}
+			z -= 1;
+			const g = 7;
+			const c = [
+				0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+				771.32342877765313, -176.61502916214059, 12.507343278686905,
+				-0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+			];
+			let x = c[0];
+			for (let i = 1; i < g + 2; i++) x += c[i] / (z + i);
+			const t = z + g + 0.5;
+			return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(x);
+		}
+
+		function gammaPDF(x, k, theta) {
+			if (x <= 0 || k <= 0 || theta <= 0) return 0;
+			return Math.exp((k - 1) * Math.log(x) - x / theta - k * Math.log(theta) - logGamma(k));
+		}
+
+		function drawDistCanvas(gs, successProb) {
+			const canvas = document.getElementById("dist-canvas");
+			const ctx = canvas.getContext("2d");
+			const W = canvas.width;
+			const H = canvas.height;
+
+			const BG = "#090505";
+			const EDGE = "#4c1a1a";
+			const MUTED = "#c6b69f";
+			const TEXT = "#f2e4cc";
+			const GOOD = "#b5e184";
+			const DANGER = "#b51d1d";
+			const ACCENT = "#d3ab4f";
+			const WARN = "#f0c766";
+
+			const PAD_L = 52, PAD_R = 16, PAD_T = 16, PAD_B = 42;
+			const plotW = W - PAD_L - PAD_R;
+			const plotH = H - PAD_T - PAD_B;
+
+			ctx.fillStyle = BG;
+			ctx.fillRect(0, 0, W, H);
+
+			const successes = Array.isArray(gs.successStepCounts) ? gs.successStepCounts : [];
+			const failures = Array.isArray(gs.failureStepCounts) ? gs.failureStepCounts : [];
+			const total = gs.rollouts || (successes.length + failures.length);
+
+			if (total === 0) {
+				ctx.fillStyle = MUTED;
+				ctx.font = "14px sans-serif";
+				ctx.textAlign = "center";
+				ctx.fillText("No rollout data available.", W / 2, H / 2);
+				return;
+			}
+
+			// Determine x range
+			const allSteps = successes.concat(failures);
+			const maxStep = allSteps.length > 0 ? Math.max(...allSteps) : 0;
+			const mean = gs.mean || 0;
+			const stdev = gs.stdev || 0;
+			const xMax = Math.max(maxStep + 1, Math.ceil(mean + 4 * stdev), 5);
+
+			// Build per-step bins
+			const binCount = Math.min(xMax + 1, 200);
+			const binWidth = xMax / binCount;
+			const sucBins = new Float64Array(binCount);
+			const failBins = new Float64Array(binCount);
+			for (const s of successes) {
+				const b = Math.min(Math.floor(s / binWidth), binCount - 1);
+				sucBins[b]++;
+			}
+			for (const f of failures) {
+				const b = Math.min(Math.floor(f / binWidth), binCount - 1);
+				failBins[b]++;
+			}
+
+			// Max density for y-axis
+			let maxDensity = 0;
+			for (let i = 0; i < binCount; i++) {
+				const density = (sucBins[i] + failBins[i]) / total / binWidth;
+				if (density > maxDensity) maxDensity = density;
+			}
+
+			// Gamma overlay on success subset
+			let gammaParams = null;
+			if (successes.length >= 10) {
+				let sm = 0, sv = 0;
+				for (const s of successes) sm += s;
+				sm /= successes.length;
+				for (const s of successes) sv += (s - sm) * (s - sm);
+				sv /= (successes.length - 1);
+				const sd = Math.sqrt(sv);
+				if (sd >= 0.5 && sm > 0) {
+					const k = sm * sm / sv;
+					const theta = sv / sm;
+					if (k > 0.1 && theta > 0) {
+						gammaParams = { k, theta, pSuccess: successes.length / total };
+						// factor gamma density up: it's scaled by P(success) for overlay
+						for (let x = 0; x <= xMax; x += xMax / 500) {
+							const d = gammaPDF(x, k, theta) * gammaParams.pSuccess;
+							if (d > maxDensity) maxDensity = d;
+						}
+					}
+				}
+			}
+			if (maxDensity === 0) maxDensity = 1;
+
+			// Grid lines
+			const yTicks = 4;
+			ctx.strokeStyle = EDGE;
+			ctx.lineWidth = 1;
+			ctx.setLineDash([3, 3]);
+			for (let i = 0; i <= yTicks; i++) {
+				const y = PAD_T + plotH - (i / yTicks) * plotH;
+				ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(PAD_L + plotW, y); ctx.stroke();
+			}
+			ctx.setLineDash([]);
+
+			// Y-axis labels
+			ctx.fillStyle = MUTED;
+			ctx.font = "10px sans-serif";
+			ctx.textAlign = "right";
+			for (let i = 0; i <= yTicks; i++) {
+				const y = PAD_T + plotH - (i / yTicks) * plotH;
+				const val = (i / yTicks) * maxDensity;
+				ctx.fillText(val.toFixed(val < 0.1 ? 3 : 2), PAD_L - 4, y + 3);
+			}
+
+			// X-axis ticks
+			const xTickStep = Math.ceil(xMax / 8);
+			ctx.textAlign = "center";
+			for (let x = 0; x <= xMax; x += xTickStep) {
+				const px = PAD_L + (x / xMax) * plotW;
+				ctx.fillStyle = MUTED;
+				ctx.fillText(String(x), px, PAD_T + plotH + 14);
+				ctx.strokeStyle = EDGE;
+				ctx.beginPath(); ctx.moveTo(px, PAD_T + plotH); ctx.lineTo(px, PAD_T + plotH + 4); ctx.stroke();
+			}
+
+			// Bars
+			const barW = Math.max(1, plotW / binCount - 1);
+			for (let i = 0; i < binCount; i++) {
+				const x = PAD_L + (i / binCount) * plotW;
+				const totalDensity = (sucBins[i] + failBins[i]) / total / binWidth;
+				const sucDensity = sucBins[i] / total / binWidth;
+				const totalBarH = (totalDensity / maxDensity) * plotH;
+				const sucBarH = (sucDensity / maxDensity) * plotH;
+				const failBarH = totalBarH - sucBarH;
+				const baseY = PAD_T + plotH;
+				if (sucBarH > 0) {
+					ctx.fillStyle = GOOD;
+					ctx.fillRect(x, baseY - totalBarH, barW, sucBarH);
+				}
+				if (failBarH > 0) {
+					ctx.fillStyle = DANGER;
+					ctx.fillRect(x, baseY - failBarH, barW, failBarH);
+				}
+			}
+
+			// Gamma curve overlay
+			if (gammaParams) {
+				ctx.strokeStyle = ACCENT;
+				ctx.lineWidth = 2;
+				ctx.beginPath();
+				let first = true;
+				for (let xi = 0; xi <= 500; xi++) {
+					const xVal = (xi / 500) * xMax;
+					const density = gammaPDF(xVal, gammaParams.k, gammaParams.theta) * gammaParams.pSuccess;
+					const px = PAD_L + (xVal / xMax) * plotW;
+					const py = PAD_T + plotH - (density / maxDensity) * plotH;
+					if (first) { ctx.moveTo(px, py); first = false; } else { ctx.lineTo(px, py); }
+				}
+				ctx.stroke();
+			}
+
+			// Mean dashed line
+			if (Number.isFinite(mean) && mean > 0 && mean <= xMax) {
+				const px = PAD_L + (mean / xMax) * plotW;
+				ctx.strokeStyle = WARN;
+				ctx.lineWidth = 1;
+				ctx.setLineDash([4, 4]);
+				ctx.beginPath(); ctx.moveTo(px, PAD_T); ctx.lineTo(px, PAD_T + plotH); ctx.stroke();
+				ctx.setLineDash([]);
+				ctx.fillStyle = WARN;
+				ctx.font = "10px sans-serif";
+				ctx.textAlign = "center";
+				ctx.fillText(`μ=${mean.toFixed(1)}`, px, PAD_T + 10);
+			}
+
+			// Axis labels
+			ctx.fillStyle = TEXT;
+			ctx.font = "11px sans-serif";
+			ctx.textAlign = "center";
+			ctx.fillText("Cube Steps", PAD_L + plotW / 2, H - 4);
+			ctx.save();
+			ctx.translate(12, PAD_T + plotH / 2);
+			ctx.rotate(-Math.PI / 2);
+			ctx.fillText("Probability Density", 0, 0);
+			ctx.restore();
+
+			// Legend
+			const legendItems = [];
+			if (successes.length > 0) legendItems.push({ color: GOOD, label: "Success" });
+			if (failures.length > 0) legendItems.push({ color: DANGER, label: "GA Break" });
+			if (gammaParams) legendItems.push({ color: ACCENT, label: "Gamma Fit", line: true });
+			let lx = PAD_L + plotW;
+			let ly = PAD_T + 6;
+			ctx.font = "10px sans-serif";
+			for (let i = legendItems.length - 1; i >= 0; i--) {
+				const item = legendItems[i];
+				const tw = ctx.measureText(item.label).width;
+				lx -= tw + 18;
+				if (item.line) {
+					ctx.strokeStyle = item.color;
+					ctx.lineWidth = 2;
+					ctx.setLineDash([]);
+					ctx.beginPath(); ctx.moveTo(lx, ly + 5); ctx.lineTo(lx + 12, ly + 5); ctx.stroke();
+				} else {
+					ctx.fillStyle = item.color;
+					ctx.fillRect(lx, ly, 12, 10);
+				}
+				ctx.fillStyle = TEXT;
+				ctx.textAlign = "left";
+				ctx.fillText(item.label, lx + 14, ly + 9);
+				lx -= 8;
+			}
+		}
+
+		// ── End Simulation Graph ─────────────────────────────────────────────────
 
 		function resetState() {
 			appState = JSON.parse(JSON.stringify(defaultState));
@@ -2448,6 +2884,7 @@
 			renderCandidates(lastDiagnostics);
 			renderHistory();
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
+			renderDistGraphBtn();
 		}
 
 		// ── Skill filter helpers ──────────────────────────────────────────────
@@ -3801,6 +4238,44 @@
 			} catch { /* storage full — silently ignore */ }
 		}
 
+		function loadMcTimeoutS() {
+			try {
+				const raw = localStorage.getItem(MC_TIMEOUT_KEY);
+				if (!raw) return 120;
+				const v = parseInt(JSON.parse(raw), 10);
+				return Number.isFinite(v) && v >= 10 && v <= 600 ? v : 120;
+			} catch { return 120; }
+		}
+
+		function saveMcTimeoutS(v) {
+			try { localStorage.setItem(MC_TIMEOUT_KEY, JSON.stringify(v)); } catch {}
+		}
+
+		function loadDistGraphEnabled() {
+			try {
+				const raw = localStorage.getItem(DIST_GRAPH_KEY);
+				if (!raw) return false;
+				return JSON.parse(raw) === true;
+			} catch { return false; }
+		}
+
+		function saveDistGraphEnabled(v) {
+			try { localStorage.setItem(DIST_GRAPH_KEY, JSON.stringify(v === true)); } catch {}
+		}
+
+		function loadDistRollouts() {
+			try {
+				const raw = localStorage.getItem(DIST_ROLLOUTS_KEY);
+				if (!raw) return 200;
+				const v = parseInt(JSON.parse(raw), 10);
+				return Number.isFinite(v) && v >= 50 && v <= 2000 ? v : 200;
+			} catch { return 200; }
+		}
+
+		function saveDistRollouts(v) {
+			try { localStorage.setItem(DIST_ROLLOUTS_KEY, JSON.stringify(v)); } catch {}
+		}
+
 		// ── Outcome tracking ───────────────────────────────────────────────────
 		function emptyTrackingState() {
 			return {
@@ -4062,11 +4537,17 @@
 				const overrides = loadUserOverrides();
 				const tightenStepsLevel = loadTightenStepsLevel();
 				const useRust = loadUseRust();
+				const mcTimeoutS = loadMcTimeoutS();
+				const distGraphEnabled = loadDistGraphEnabled();
+				const distRollouts = loadDistRollouts();
 				if (!raw) {
 					const s = JSON.parse(JSON.stringify(defaultState));
 					s.userOverrides = overrides;
 					s.tightenStepsLevel = tightenStepsLevel;
 					s.useRust = useRust;
+					s.mcTimeoutS = mcTimeoutS;
+					s.distGraphEnabled = distGraphEnabled;
+					s.distRollouts = distRollouts;
 					return s;
 				}
 				const parsed = JSON.parse(raw);
@@ -4080,6 +4561,9 @@
 					userOverrides: overrides,
 					tightenStepsLevel,
 					useRust,
+					mcTimeoutS,
+					distGraphEnabled,
+					distRollouts,
 				};
 			} catch (error) {
 				return JSON.parse(JSON.stringify(defaultState));

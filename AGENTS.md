@@ -4,7 +4,8 @@
 
 - Start with [docs/README.md](docs/README.md), [docs/business-requirements.md](docs/business-requirements.md), and [docs/implementation-guide.md](docs/implementation-guide.md) before diving into the code.
 - v3 is the only implementation. The standalone v1 (MCTS) and v2 (exact-SSP) workers have been removed; the shared transition helpers and residual-graph helpers that v3 needs are now inlined in `d4cubeoptimv3-worker.js`.
-- The only files you should edit for solver/UI work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, `config.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
+- The only files you should edit for solver/UI work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, `config.js`, `weight-tracking.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
+- `weight-tracking.js` — UMD module for outcome tracking and Bayesian roll-weight learning (Plackett–Luce MM update). Drives the browser tracker and `scripts/learn-weights-from-tracking.js`.
 
 ## Architecture
 
@@ -39,7 +40,9 @@ The "Expected Cube Steps" value shown in the UI (and `result.expectedSteps` in t
 - There is no build step, package manager, or bundler for the JavaScript path. Work directly in the checked-in HTML and JavaScript files.
 - v3 worker validation: `node --test d4cubeoptimv3-worker.test.js`
 - ILP validation: `node --test ilp.test.js`
-- Full JS regression: `node --test ilp.test.js d4cubeoptimv3-worker.test.js`
+- Weight-tracking validation: `node --test weight-tracking.test.js`
+- Full JS regression: `node --test ilp.test.js d4cubeoptimv3-worker.test.js weight-tracking.test.js`
+- Run a single test by name: `node --test --test-name-pattern="<substring>" <file>.test.js`
 - Rust unit tests: `cargo test --manifest-path rust/Cargo.toml`
 - JS vs Rust differential harness: `node scripts/diff-test-rust-vs-js.js` (phases 0–4; run after any Rust change)
 - MC performance benchmark: `node scripts/benchmark-mc-rollouts.js`

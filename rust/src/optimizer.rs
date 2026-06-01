@@ -825,6 +825,7 @@ fn refine_one_action(
                     time_ms: None,
                     tighten_steps_level: None,
                     tighten_steps_overrides: None,
+                    include_rollout_data: false,
                 };
                 let sub_result =
                     optimize_payload_v3(&successor_payload, env, solve_ilp, sub_refine_depth, 1);

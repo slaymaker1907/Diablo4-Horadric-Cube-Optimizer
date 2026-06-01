@@ -277,6 +277,8 @@ pub struct OptimizePayload {
     pub tighten_steps_level: Option<String>,
     #[serde(rename = "tightenStepsOverrides", default)]
     pub tighten_steps_overrides: Option<serde_json::Value>,
+    #[serde(rename = "includeRolloutData", default)]
+    pub include_rollout_data: bool,
 }
 
 /// Options passed to get_closed_form_plan_candidates.

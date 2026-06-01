@@ -331,6 +331,8 @@ pub fn run_mc_verification_v3(
 
     let mut step_counts: Vec<usize> = Vec::with_capacity(budget.max_rollouts);
     let mut truncated_rollout_count: usize = 0;
+    let mut success_step_counts: Vec<usize> = Vec::new();
+    let mut failure_step_counts: Vec<usize> = Vec::new();
     let start_ms = crate::optimizer::now_ms_pub();
 
     if let Some(f) = on_progress {
@@ -356,17 +358,21 @@ pub fn run_mc_verification_v3(
         let mut steps: usize = 0;
         let mut truncated = false;
 
+        let mut actual_steps = 0usize; // actual steps before any cap, for graph data
+
         loop {
             let term = is_terminal(&state, &payload.target, env);
             if term.terminal {
                 if !term.success {
                     truncated = true;
+                    actual_steps = steps;
                     steps = MC_ROLLOUT_STEP_CAP;
                 }
                 break;
             }
             if steps >= MC_ROLLOUT_STEP_CAP {
                 truncated = true;
+                actual_steps = steps;
                 break;
             }
 
@@ -397,6 +403,7 @@ pub fn run_mc_verification_v3(
                     time_ms: payload.time_ms,
                     tighten_steps_level: payload.tighten_steps_level.clone(),
                     tighten_steps_overrides: payload.tighten_steps_overrides.clone(),
+                    include_rollout_data: false,
                 };
                 let sub_result = optimize_payload_v3(&sub_payload, env, solve_ilp, 0, 1);
                 let act = if sub_result["action"].is_null() {
@@ -412,6 +419,7 @@ pub fn run_mc_verification_v3(
                 Some(a) => a,
                 None => {
                     truncated = true;
+                    actual_steps = steps;
                     steps = MC_ROLLOUT_STEP_CAP;
                     break;
                 }
@@ -421,6 +429,7 @@ pub fn run_mc_verification_v3(
                 Ok(a) => a,
                 Err(_) => {
                     truncated = true;
+                    actual_steps = steps;
                     break;
                 }
             };
@@ -437,6 +446,7 @@ pub fn run_mc_verification_v3(
             });
             if valid.is_empty() {
                 truncated = true;
+                actual_steps = steps;
                 break;
             }
 
@@ -449,6 +459,11 @@ pub fn run_mc_verification_v3(
         step_counts.push(steps);
         if truncated {
             truncated_rollout_count += 1;
+            if payload.include_rollout_data {
+                failure_step_counts.push(actual_steps);
+            }
+        } else if payload.include_rollout_data {
+            success_step_counts.push(steps);
         }
 
         let completed = step_counts.len();
@@ -497,23 +512,25 @@ pub fn run_mc_verification_v3(
     out["expectedSteps"] = expected_steps;
     out["approximate"] = json!(final_approximate);
     if let Some(diag) = out["diagnostics"].as_object_mut() {
-        diag.insert(
-            "goldStandard".to_string(),
-            json!({
-                "applied": true,
-                "level": budget.level,
-                "rollouts": completed_rollouts,
-                "mean": if stats.mean.is_finite() { json!(stats.mean) } else { json!(null) },
-                "ci95halfWidth": if stats.ci95_half_width.is_finite() { json!(stats.ci95_half_width) } else { json!(null) },
-                "stdev": if stats.stdev.is_finite() { json!(stats.stdev) } else { json!(null) },
-                "intermediateSteps": initial_steps,
-                "truncatedRolloutCount": truncated_rollout_count,
-                "wallTimeMs": wall_time_ms,
-                "aborted": aborted,
-                "earlyConverged": early_converged,
-                "adaptive": budget.adaptive,
-            }),
-        );
+        let mut gs = json!({
+            "applied": true,
+            "level": budget.level,
+            "rollouts": completed_rollouts,
+            "mean": if stats.mean.is_finite() { json!(stats.mean) } else { json!(null) },
+            "ci95halfWidth": if stats.ci95_half_width.is_finite() { json!(stats.ci95_half_width) } else { json!(null) },
+            "stdev": if stats.stdev.is_finite() { json!(stats.stdev) } else { json!(null) },
+            "intermediateSteps": initial_steps,
+            "truncatedRolloutCount": truncated_rollout_count,
+            "wallTimeMs": wall_time_ms,
+            "aborted": aborted,
+            "earlyConverged": early_converged,
+            "adaptive": budget.adaptive,
+        });
+        if payload.include_rollout_data {
+            gs["successStepCounts"] = json!(success_step_counts);
+            gs["failureStepCounts"] = json!(failure_step_counts);
+        }
+        diag.insert("goldStandard".to_string(), gs);
     }
     out
 }

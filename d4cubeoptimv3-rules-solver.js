@@ -230,15 +230,22 @@
    * is unusable (Legendary item, or a protected GA sits in the category's
    * remove pool) AND Chaotic is unusable for the same GA reason. Fishing a
    * polluted category accumulates junk that nothing can clear.
+   *
+   * `excludeIndex` evaluates pollution as if that slot were enchant-marked
+   * (enchanted slots are invisible to cube pools).
    */
-  function isCategoryPolluted(ctx, categoryName) {
+  function isCategoryPolluted(ctx, categoryName, excludeIndex) {
     const removeBlocked = ctx.state.isLegendary
-      || getEligible(ctx, categoryName, "remove").some(({ slot }) => slot && slot.protectedGA);
+      || getEligible(ctx, categoryName, "remove").some(({ slot, index }) => (
+        index !== excludeIndex && slot && slot.protectedGA
+      ));
     if (!removeBlocked) {
       return false;
     }
     const chaoticBlocked =
-      getEligible(ctx, categoryName, "chaotic").some(({ slot }) => slot && slot.protectedGA);
+      getEligible(ctx, categoryName, "chaotic").some(({ slot, index }) => (
+        index !== excludeIndex && slot && slot.protectedGA
+      ));
     return chaoticBlocked;
   }
 
@@ -365,52 +372,106 @@
       // it is enchant-only (no add category at all), or it is add-only and
       // every add category for it is polluted (junk landed while fishing
       // could never be cleared because a protected GA blocks the category's
-      // remove/chaotic pools). Spending the enchant on that target now is
-      // exactly what it is worth most for; with one missing target the
-      // finisher above already covers it.
+      // remove/chaotic pools).
+      //
+      // The single sticky enchant is allocated by what it is worth most for:
+      //   1. An enchant-only target — nothing else can ever produce it, so
+      //      the enchant is already spoken for.
+      //   2. When TWO OR MORE targets are pollution-blocked and a same-affix
+      //      enchant-mark of the polluting protected GA would unblock at
+      //      least two of them, mark the GA instead: enchanted slots are
+      //      invisible to cube pools, so one mark unpollutes the categories
+      //      for every blocked target, where a rescue saves only one.
+      //   3. Otherwise rescue the single most-blocked target directly.
+      // With one missing target the finisher above already covers it.
       name: "rescue-enchant",
       when(ctx) {
         return ctx.missingTargets.length >= 2;
       },
       pick(ctx) {
-        const rescueIds = ctx.missingIds.filter((id) => {
+        const enchantOnlyIds = [];
+        const pollutedIds = [];
+        for (const id of ctx.missingIds) {
           const route = ctx.routes[id];
           if (!route.addOnly) {
-            return false;
-          }
-          if (route.addCategories.length === 0) {
-            return true; // enchant-only target — the enchant is already spoken for.
-          }
-          return route.addCategories.every((name) => isCategoryPolluted(ctx, name));
-        });
-        if (rescueIds.length === 0) {
-          return null;
-        }
-        // Most-blocked first: enchant-only targets, then the lowest total
-        // add-pool share (hardest to fish), then id for determinism.
-        const ordered = rescueIds
-          .map((id) => ({
-            id,
-            enchantOnly: ctx.routes[id].addCategories.length === 0 ? 0 : 1,
-            share: ctx.routes[id].addCategories.reduce(
-              (sum, name) => sum + missingWeightShare(ctx, name, "add", [id]), 0
-            ),
-          }))
-          .sort((a, b) => (
-            a.enchantOnly - b.enchantOnly || a.share - b.share || (a.id < b.id ? -1 : 1)
-          ));
-        for (const { id } of ordered) {
-          const candidates = ctx.validActions.filter((action) => (
-            action.type === "enchant" && action.targetAffixId === id
-          ));
-          if (candidates.length === 0) {
             continue;
           }
-          candidates.sort((a, b) => a.sourceIndex - b.sourceIndex);
-          const fromEnchanted = candidates.find((a) => a.sourceIndex === ctx.enchantedIndex);
-          return fromEnchanted || candidates[0];
+          if (route.addCategories.length === 0) {
+            enchantOnlyIds.push(id);
+          } else if (route.addCategories.every((name) => isCategoryPolluted(ctx, name))) {
+            pollutedIds.push(id);
+          }
         }
-        return null;
+        if (enchantOnlyIds.length === 0 && pollutedIds.length === 0) {
+          return null;
+        }
+
+        const rescueAction = (ids) => {
+          // Hardest target first: lowest total add-pool share, then id.
+          const ordered = ids
+            .map((id) => ({
+              id,
+              share: ctx.routes[id].addCategories.reduce(
+                (sum, name) => sum + missingWeightShare(ctx, name, "add", [id]), 0
+              ),
+            }))
+            .sort((a, b) => a.share - b.share || (a.id < b.id ? -1 : 1));
+          for (const { id } of ordered) {
+            const candidates = ctx.validActions.filter((action) => (
+              action.type === "enchant" && action.targetAffixId === id
+            ));
+            if (candidates.length === 0) {
+              continue;
+            }
+            candidates.sort((a, b) => a.sourceIndex - b.sourceIndex);
+            const fromEnchanted = candidates.find((a) => a.sourceIndex === ctx.enchantedIndex);
+            return fromEnchanted || candidates[0];
+          }
+          return null;
+        };
+
+        // 1. Enchant-only targets own the enchant outright (a GA mark would
+        //    make them permanently unreachable).
+        if (enchantOnlyIds.length > 0) {
+          return rescueAction(enchantOnlyIds);
+        }
+
+        // 2. GA mark when it unblocks more targets than a rescue would save.
+        let bestMark = null;
+        if (ctx.enchantedIndex < 0) {
+          for (const slot of ctx.slots) {
+            if (!slot.protectedGA || slot.isEnchanted) {
+              continue;
+            }
+            const markAction = getValidActionByShape(ctx, {
+              type: "enchant",
+              sourceIndex: slot.index,
+              targetAffixId: slot.affixId,
+            });
+            if (!markAction) {
+              continue;
+            }
+            const unblocked = pollutedIds.filter((id) => (
+              ctx.routes[id].addCategories.some(
+                (name) => !isCategoryPolluted(ctx, name, slot.index)
+              )
+            )).length;
+            if (!bestMark || unblocked > bestMark.unblocked) {
+              bestMark = { action: markAction, unblocked };
+            }
+          }
+        }
+        if (bestMark && bestMark.unblocked >= 2) {
+          return bestMark.action;
+        }
+
+        // 3. Direct rescue; fall back to a partially-unblocking mark when no
+        //    rescue enchant is legal for any blocked target.
+        const rescue = rescueAction(pollutedIds);
+        if (rescue) {
+          return rescue;
+        }
+        return bestMark && bestMark.unblocked >= 1 ? bestMark.action : null;
       },
     },
 

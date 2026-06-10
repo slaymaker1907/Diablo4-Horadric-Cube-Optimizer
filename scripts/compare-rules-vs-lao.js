@@ -207,6 +207,19 @@ const SCENARIOS = [
     target: ["Movement Speed", "Attack Speed", "Cooldown Reduction", "Maximum Resource"],
   },
   {
+    name: "Legendary + GA lockout (Ring, user-reported)",
+    gearSlot: "Ring", class: "Sorceror",
+    isLegendary: true,
+    current: [
+      { name: "Mainstat" },
+      { name: "Life on Hit" },
+      { name: "Lucky Hit Chance" },
+      { name: "Critical Strike Damage", isGA: true },
+    ],
+    target: ["Mainstat", "All Damage", "Vulnerable Damage", "Critical Strike Damage"],
+    gaAffixes: ["Critical Strike Damage"],
+  },
+  {
     name: "Enchant finisher (3 matched + 1 junk, one missing)",
     gearSlot: "Amulet", class: "Spiritborn",
     current: [
@@ -281,17 +294,30 @@ function printRow(label, stats) {
 }
 
 function verdict(lao, rules) {
+  // Lexicographic objective: P(success) first, then steps. Step means are
+  // only comparable when both policies succeed at (nearly) the same rate —
+  // failed/stuck rollouts condition the means on different outcomes.
   const lines = [];
-  const laoLo = lao.mean - lao.ci95halfWidth;
-  const laoHi = lao.mean + lao.ci95halfWidth;
-  const rulesLo = rules.mean - rules.ci95halfWidth;
-  const rulesHi = rules.mean + rules.ci95halfWidth;
-  if (rulesLo > laoHi) {
-    lines.push(`steps: RULES WORSE (CI-separated; +${fmt(rules.mean - lao.mean)} mean cube steps)`);
-  } else if (rulesHi < laoLo) {
-    lines.push(`steps: rules better (CI-separated; ${fmt(rules.mean - lao.mean)} mean cube steps)`);
+  const successGap = rules.successRate - lao.successRate;
+  if (Math.abs(successGap) > 0.02) {
+    if (successGap < 0) {
+      lines.push(`success: RULES WORSE (${pct(rules.successRate)} vs ${pct(lao.successRate)})`);
+    } else {
+      lines.push(`success: rules better (${pct(rules.successRate)} vs ${pct(lao.successRate)})`);
+    }
+    lines.push("steps: not comparable (success rates differ; means condition on different outcomes)");
   } else {
-    lines.push("steps: tie (overlapping CIs)");
+    const laoLo = lao.mean - lao.ci95halfWidth;
+    const laoHi = lao.mean + lao.ci95halfWidth;
+    const rulesLo = rules.mean - rules.ci95halfWidth;
+    const rulesHi = rules.mean + rules.ci95halfWidth;
+    if (rulesLo > laoHi) {
+      lines.push(`steps: RULES WORSE (CI-separated; +${fmt(rules.mean - lao.mean)} mean cube steps)`);
+    } else if (rulesHi < laoLo) {
+      lines.push(`steps: rules better (CI-separated; ${fmt(rules.mean - lao.mean)} mean cube steps)`);
+    } else {
+      lines.push("steps: tie (overlapping CIs)");
+    }
   }
   if (rules.deadRolloutCount > lao.deadRolloutCount) {
     lines.push(`GA/dead: RULES WORSE (${rules.deadRolloutCount} vs ${lao.deadRolloutCount} dead rollouts)`);

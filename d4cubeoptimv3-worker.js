@@ -6161,24 +6161,53 @@ function runPolicyMCEvaluationV3(payload, policyFn, options = {}) {
 // MC stats through the same rollout engine — are attached to the result
 // under diagnostics.rulesPolicy. Always JS-side; cheap (no optimizer calls).
 
+// Worker helpers injected into the dependency-free rules solver module.
+function buildRulesSolverHelpersV3() {
+  return {
+    buildEnv,
+    getValidActions,
+    getActionOutcomes,
+    getEligibleByCategory,
+    getCategoryAffixesForState,
+    getCategoryWeightTotal,
+    getEffectiveAffixRollWeight,
+    buildFamilyCountsForPool,
+    isTerminal,
+    stateKey,
+    actionKey,
+  };
+}
+
+// Run the shared MC rollout engine under the rules-based policy and return the
+// stats object (mean/successRate + optional per-rollout step lists when
+// payload.includeRolloutData). Used both for the rules engine's headline scoring
+// and for the Simulation Graph (compute-distribution) in rules mode. Returns
+// null when the rules module is unavailable or no budget/action is configured.
+function runRulesPolicyMCV3(payload, options = {}) {
+  if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
+    return null;
+  }
+  const helpers = buildRulesSolverHelpersV3();
+  const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
+  const pick = rulesSolverModule.selectRulesActionV3(
+    payload.state, payload.target, policyFn.env, helpers
+  );
+  if (!pick) {
+    return null;
+  }
+  return runPolicyMCEvaluationV3(payload, policyFn, {
+    env: policyFn.env,
+    stopView: options.stopView,
+    onProgress: options.onProgress,
+  });
+}
+
 function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
   if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
     return { applied: false, error: "rules solver module unavailable" };
   }
   try {
-    const helpers = {
-      buildEnv,
-      getValidActions,
-      getActionOutcomes,
-      getEligibleByCategory,
-      getCategoryAffixesForState,
-      getCategoryWeightTotal,
-      getEffectiveAffixRollWeight,
-      buildFamilyCountsForPool,
-      isTerminal,
-      stateKey,
-      actionKey,
-    };
+    const helpers = buildRulesSolverHelpersV3();
     const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
     const pick = rulesSolverModule.selectRulesActionV3(
       payload.state, payload.target, policyFn.env, helpers
@@ -6192,8 +6221,9 @@ function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
         env: policyFn.env,
         stopView: options.stopView,
       });
-      if (mc) {
-        // The per-rollout step lists are bulky and unused by the dev panel.
+      if (mc && !payload.includeRolloutData) {
+        // The per-rollout step lists are bulky; keep them only when the
+        // Simulation Graph needs them (payload.includeRolloutData).
         delete mc.successStepCounts;
         delete mc.failureStepCounts;
       }
@@ -6299,6 +6329,12 @@ function runRulesOptimizationV3(payload, runId, stopView) {
       residual: { status: "NOT_RUN" },
       ruleName: diag && diag.applied ? diag.ruleName : null,
       rulesPolicy: diag,
+      // Expose the rules-policy MC under the standard goldStandard key so the
+      // Simulation Graph (which reads diagnostics.goldStandard.successStepCounts)
+      // works in rules mode exactly as it does for the exact engines. The mc
+      // object already carries `applied`, the per-rollout step lists (when
+      // includeRolloutData), and the mean/stdev/CI the graph renders.
+      ...(mc ? { goldStandard: mc } : {}),
     },
   };
 
@@ -6482,29 +6518,38 @@ if (typeof self !== "undefined") {
         const distPayload = {
           ...payload,
           tightenStepsLevel: "light",
-          tightenStepsOverrides: { lightRollouts: Number(payload.distRollouts) || 200 },
+          // Preserve any other overrides (notably maxSteps, the configurable
+          // step cap) while pinning the rollout count for the graph.
+          tightenStepsOverrides: {
+            ...(payload.tightenStepsOverrides || {}),
+            lightRollouts: Number(payload.distRollouts) || 200,
+          },
           includeRolloutData: true,
         };
         const stopBuffer = payload.stopBuffer || null;
         const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
-        const result = runMCVerificationV3(distPayload, intermediateResult, {
-          stopView,
-          onProgress: (progress) => {
-            self.postMessage({
-              type: "distribution-progress",
-              runId,
-              completed: progress.completed,
-              total: progress.total,
-            });
-          },
-        });
-        self.postMessage({
-          type: "distribution-done",
-          runId,
-          goldStandard: result.diagnostics && result.diagnostics.goldStandard
+        const onProgress = (progress) => {
+          self.postMessage({
+            type: "distribution-progress",
+            runId,
+            completed: progress.completed,
+            total: progress.total,
+          });
+        };
+        const solverMode = distPayload.solverMode
+          || (distPayload.useRust ? "rust" : (D4_USE_RUST ? "rust" : "js"));
+        let goldStandard = null;
+        if (solverMode === "rules") {
+          // Simulate the RULES policy (not the optimizer) so the graph matches
+          // the headline recommendation the user is actually following.
+          goldStandard = runRulesPolicyMCV3(distPayload, { stopView, onProgress });
+        } else {
+          const result = runMCVerificationV3(distPayload, intermediateResult, { stopView, onProgress });
+          goldStandard = result.diagnostics && result.diagnostics.goldStandard
             ? result.diagnostics.goldStandard
-            : null,
-        });
+            : null;
+        }
+        self.postMessage({ type: "distribution-done", runId, goldStandard });
       } catch (error) {
         self.postMessage({
           type: "distribution-done",

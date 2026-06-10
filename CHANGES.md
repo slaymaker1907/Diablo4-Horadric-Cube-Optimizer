@@ -140,6 +140,12 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - **Cap-exceeding rollouts count as failures.** A simulation that needs more than the cap (or dies on a broken GA / stuck policy) is excluded from the success numerator. `runMCVerificationV3` / Rust `run_mc_verification` now overwrite the headline `successProb` with this cap-aware MC success rate and expose `successRate`/`stepCap` (JS also `cappedRolloutCount`/`deadRolloutCount`) under `diagnostics.goldStandard`.
 - **Probability shown only with tightening.** The result panel displays the success probability only on the final result of a run with a tightening option selected; otherwise (no tightening, or mid-verification) it reads "–", since the cap-aware probability only exists once MC has run. `WORKER_VERSION` bumped to `2026-06-10-v3-configurable-mc-steps`.
 
+### Simulation Graph for the rules engine (2026-06)
+
+- The Simulation Graph now works in `rules` mode. `runRulesOptimizationV3` exposes the rules-policy MC stats under the standard `diagnostics.goldStandard` key (the shape the graph reads), and `computeRulesPolicyDiagnosticsV3` keeps the per-rollout `successStepCounts`/`failureStepCounts` when `includeRolloutData` is set (it still strips them otherwise). Extracted `buildRulesSolverHelpersV3` and a reusable `runRulesPolicyMCV3`.
+- The `compute-distribution` worker handler now simulates the **rules** policy (`runRulesPolicyMCV3`) when `solverMode === "rules"`, so the on-demand graph matches the headline recommendation rather than the exact optimizer's policy. It also preserves the configurable `maxSteps` cap (previously the override object was rebuilt and the cap dropped).
+- Fixed `appState.result` never being assigned: it is now set from each worker result in `applyWorkerResult`, which enables the "Compute Simulation Graph" button and the modal's P(Success) annotation for all engines. `WORKER_VERSION` bumped to `2026-06-10-v3-rules-sim-graph`.
+
 ## Deferred Work
 
 - Sparse residual expansion beyond the current bounded abstract-graph approach if larger browser cases make that necessary.

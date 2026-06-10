@@ -1372,7 +1372,7 @@
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-06-10-v3-configurable-mc-steps";
+		const WORKER_VERSION = "2026-06-10-v3-rules-sim-graph";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -2165,6 +2165,9 @@
 
 		function applyWorkerResult(message, isFinal) {
 			currentBestAction = message.action || null;
+			// Headline result for the Simulation Graph (compute-distribution
+			// intermediateResult + modal P(Success) annotation).
+			appState.result = message;
 			lastDiagnostics = message.diagnostics || null;
 			lastOneStepRisk = Array.isArray(message.oneStepRisk)
 				? message.oneStepRisk

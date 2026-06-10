@@ -8,11 +8,17 @@
  * rollout engine (runPolicyMCEvaluationV3) with identical fixed budgets and
  * cube-step costing (cube ops 1, fresh enchant 0, re-enchant 0.5).
  *
- *   node scripts/compare-rules-vs-lao.js [--rollouts=N] [--scenario=substring]
+ *   node scripts/compare-rules-vs-lao.js [--rollouts=N] [--max-steps=N] [--scenario=substring]
+ *
+ * Every run carries a hard step budget (--max-steps, default 200): rollouts
+ * that would exceed it fail, exactly like a GA break. The optimizer arm uses
+ * the production hybrid (decomposition gate / budget DP with policy-table
+ * replay); the rules arm evaluates the unmodified stationary rules policy
+ * under the same budget.
  *
  * Reports per scenario and policy:
- *   mean ± CI95 cube steps, success-only mean, success rate, dead rate
- *   (GA broken / stuck), capped rate, wall ms — and a CI-separation verdict.
+ *   mean ± CI95 cube steps, success-only mean, success rate, dead /
+ *   budget-exceeded / capped counts, wall ms — and a lexicographic verdict.
  *
  * Does NOT touch any project files — pure read-only measurement.
  */
@@ -102,7 +108,7 @@ const affixId = (name) => {
   return a.id;
 };
 
-function makePayload(scenario, rollouts) {
+function makePayload(scenario, rollouts, maxSteps) {
   const data = {
     affixes: catalog.affixes,
     categories: catalog.categories,
@@ -134,6 +140,7 @@ function makePayload(scenario, rollouts) {
       sacrificeAffixId: "",
     },
     timeMs: 30000,
+    maxSteps,
     includeRolloutData: true,
     tightenStepsLevel: "heavy",
     tightenStepsOverrides: { heavyRollouts: rollouts },
@@ -242,17 +249,27 @@ const SCENARIOS = [
   },
 ];
 
-function createLaoPolicy(payload, intermediate) {
-  const cache = new Map();
-  cache.set(worker.stateKey(payload.state), intermediate.action);
-  return (state) => {
-    const key = worker.stateKey(state);
-    if (cache.has(key)) return cache.get(key);
-    const sub = worker.optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
-    const action = sub && sub.action ? sub.action : null;
-    cache.set(key, action);
-    return action;
+// Optimizer arm: runMCVerificationV3 picks the right replay regime itself —
+// stationary cache for gated decomposition results, budget-DP policy-table
+// replay (per abstract state x remaining budget) for budget results.
+function evaluateOptimizer(payload, intermediate) {
+  const t0 = Date.now();
+  const verified = worker.runMCVerificationV3(payload, intermediate, { useCubeStepCosts: true });
+  const gs = verified.diagnostics && verified.diagnostics.goldStandard;
+  if (!gs) return null;
+  const stats = {
+    mean: gs.mean,
+    ci95halfWidth: gs.ci95halfWidth,
+    successMean: gs.successMean,
+    successRate: gs.successRate,
+    deadRolloutCount: gs.deadRolloutCount,
+    cappedRolloutCount: gs.cappedRolloutCount,
+    budgetExceededRolloutCount: gs.budgetExceededRolloutCount,
+    policyTableMisses: gs.policyTableMisses,
+    rollouts: gs.rollouts,
   };
+  stats.scriptWallMs = Date.now() - t0;
+  return stats;
 }
 
 function fmt(n, d = 2) {
@@ -263,12 +280,6 @@ function fmt(n, d = 2) {
 function pct(n) {
   if (n == null || !Number.isFinite(n)) return "n/a";
   return `${(n * 100).toFixed(1)}%`;
-}
-
-function successOnlyMean(stats) {
-  const xs = stats.successStepCounts || [];
-  if (xs.length === 0) return NaN;
-  return xs.reduce((s, x) => s + x, 0) / xs.length;
 }
 
 function evaluatePolicy(payload, policyFn, env) {
@@ -285,9 +296,10 @@ function printRow(label, stats) {
   console.log(
     `  ${label.padEnd(7)}` +
     ` mean=${fmt(stats.mean).padStart(8)} ±${fmt(stats.ci95halfWidth).padStart(6)}` +
-    `  successMean=${fmt(successOnlyMean(stats)).padStart(8)}` +
+    `  successMean=${fmt(stats.successMean).padStart(8)}` +
     `  success=${pct(stats.successRate).padStart(6)}` +
     `  dead=${String(stats.deadRolloutCount).padStart(3)}` +
+    `  overBudget=${String(stats.budgetExceededRolloutCount).padStart(3)}` +
     `  capped=${String(stats.cappedRolloutCount).padStart(3)}` +
     `  wallMs=${String(stats.scriptWallMs).padStart(7)}`
   );
@@ -324,6 +336,9 @@ function verdict(lao, rules) {
   } else if (rules.deadRolloutCount < lao.deadRolloutCount) {
     lines.push(`GA/dead: rules better (${rules.deadRolloutCount} vs ${lao.deadRolloutCount} dead rollouts)`);
   }
+  if (rules.budgetExceededRolloutCount !== lao.budgetExceededRolloutCount) {
+    lines.push(`over budget: rules=${rules.budgetExceededRolloutCount} vs optimizer=${lao.budgetExceededRolloutCount}`);
+  }
   if (rules.cappedRolloutCount !== lao.cappedRolloutCount) {
     lines.push(`capped: rules=${rules.cappedRolloutCount} vs lao=${lao.cappedRolloutCount}`);
   }
@@ -333,8 +348,12 @@ function verdict(lao, rules) {
 function main() {
   const args = process.argv.slice(2);
   const rolloutsArg = args.find((a) => a.startsWith("--rollouts="));
+  const maxStepsArg = args.find((a) => a.startsWith("--max-steps="));
   const filterArg = args.find((a) => a.startsWith("--scenario="));
   const rollouts = rolloutsArg ? Math.max(10, Number(rolloutsArg.split("=")[1]) || 0) : 400;
+  const maxSteps = maxStepsArg
+    ? worker.normalizeMaxStepsV3(Number(maxStepsArg.split("=")[1]))
+    : worker.DEFAULT_MAX_STEPS;
   const filter = filterArg ? filterArg.split("=").slice(1).join("=").toLowerCase() : "";
 
   const regressions = [];
@@ -342,10 +361,10 @@ function main() {
   for (const scenario of SCENARIOS) {
     if (filter && !scenario.name.toLowerCase().includes(filter)) continue;
     console.log("=".repeat(88));
-    console.log(`${scenario.name}  (rollouts=${rollouts}, cube-step costing)`);
+    console.log(`${scenario.name}  (rollouts=${rollouts}, maxSteps=${maxSteps}, cube-step costing)`);
     console.log("=".repeat(88));
 
-    const payload = makePayload(scenario, rollouts);
+    const payload = makePayload(scenario, rollouts, maxSteps);
     const intermediate = worker.optimizePayloadV3(payload);
     let laoStats = null;
     if (!intermediate || !intermediate.action) {
@@ -359,8 +378,7 @@ function main() {
         `  LAO* headline: strategy=${intermediate.diagnostics.strategy},` +
         ` action=${JSON.stringify(intermediate.action)}, expectedSteps=${fmt(intermediate.expectedSteps)}`
       );
-      const env = worker.buildEnv(payload.data, payload.gaConfig, payload.target);
-      laoStats = evaluatePolicy(payload, createLaoPolicy(payload, intermediate), env);
+      laoStats = evaluateOptimizer(payload, intermediate);
     }
 
     const rulesPolicy = rulesSolver.createRulesPolicyV3(payload, helpers);

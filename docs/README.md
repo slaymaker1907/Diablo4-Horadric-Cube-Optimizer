@@ -30,6 +30,7 @@ This folder is the curated entry point for humans and AIs working on the v3 opti
 
 - UI and browser workflow: [d4cubeoptimv3.html](../d4cubeoptimv3.html)
 - v3 orchestrator and solver stack: [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js)
+- Secondary rules-based solver (dev-only comparison policy): [d4cubeoptimv3-rules-solver.js](../d4cubeoptimv3-rules-solver.js)
 - Shared cube action model and legality-aware pools: [d4cubeoptim-worker.js](../d4cubeoptim-worker.js)
 - Residual helper semantics still reused by v3: [d4cubeoptimv2-worker.js](../d4cubeoptimv2-worker.js)
 - Exact small ILP engine: [ilp.js](../ilp.js)

@@ -178,9 +178,11 @@ const RESIDUAL_ACTION_EPSILON = 1e-8;
  */
 
 let gearSlotLegality = null;
+let rulesSolverModule = null;
 
 if (typeof module !== "undefined" && module.exports) {
   gearSlotLegality = require("./gear-slot-legality.js");
+  try { rulesSolverModule = require("./d4cubeoptimv3-rules-solver.js"); } catch (_) { /* dev-only module */ }
 }
 
 // Load worker-side helper modules when running as a browser Web Worker.
@@ -188,8 +190,12 @@ if (typeof module !== "undefined" && module.exports) {
 if (typeof importScripts !== "undefined") {
   try { importScripts("./random-forest.js"); } catch (_) { /* scorer unavailable */ }
   try { importScripts("./gear-slot-legality.js"); } catch (_) { /* slot legality unavailable */ }
+  try { importScripts("./d4cubeoptimv3-rules-solver.js"); } catch (_) { /* rules solver unavailable */ }
   if (typeof d4cubeoptimGearSlotLegality !== "undefined") {
     gearSlotLegality = d4cubeoptimGearSlotLegality;
+  }
+  if (typeof d4cubeoptimRulesSolver !== "undefined") {
+    rulesSolverModule = d4cubeoptimRulesSolver;
   }
 }
 
@@ -6127,6 +6133,74 @@ function runPolicyMCEvaluationV3(payload, policyFn, options = {}) {
   };
 }
 
+// ── Rules-policy dev diagnostics ─────────────────────────────────────────────
+// When the run payload carries `rulesPolicy: true` (Settings → Developer →
+// "Compare rules-based policy", off by default), the secondary rules-based
+// solver's headline pick — and, when MC verification is requested, its own
+// MC stats through the same rollout engine — are attached to the result
+// under diagnostics.rulesPolicy. Always JS-side; cheap (no optimizer calls).
+
+function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
+  if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
+    return { applied: false, error: "rules solver module unavailable" };
+  }
+  try {
+    const helpers = {
+      buildEnv,
+      getValidActions,
+      getActionOutcomes,
+      getEligibleByCategory,
+      getCategoryAffixesForState,
+      getCategoryWeightTotal,
+      getEffectiveAffixRollWeight,
+      buildFamilyCountsForPool,
+      isTerminal,
+      stateKey,
+      actionKey,
+    };
+    const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
+    const pick = rulesSolverModule.selectRulesActionV3(
+      payload.state, payload.target, policyFn.env, helpers
+    );
+    const wantsVerification = payload.tightenStepsLevel === "light"
+      || payload.tightenStepsLevel === "heavy"
+      || payload.tightenStepsLevel === "adaptive";
+    let mc = null;
+    if (wantsVerification && pick) {
+      mc = runPolicyMCEvaluationV3(payload, policyFn, {
+        env: policyFn.env,
+        stopView: options.stopView,
+      });
+      if (mc) {
+        // The per-rollout step lists are bulky and unused by the dev panel.
+        delete mc.successStepCounts;
+        delete mc.failureStepCounts;
+      }
+    }
+    return {
+      applied: true,
+      action: pick ? pick.action : null,
+      ruleName: pick ? pick.ruleName : null,
+      mc,
+    };
+  } catch (e) {
+    return { applied: false, error: String((e && e.message) || e) };
+  }
+}
+
+function attachRulesPolicyDiagnosticsV3(payload, result, options = {}) {
+  if (!payload || payload.rulesPolicy !== true || !result) {
+    return result;
+  }
+  return {
+    ...result,
+    diagnostics: {
+      ...(result.diagnostics || {}),
+      rulesPolicy: computeRulesPolicyDiagnosticsV3(payload, options),
+    },
+  };
+}
+
 // ── ILP callback for Rust WASM path ──────────────────────────────────────────
 // The Rust optimizer calls this with a serialized DecompositionPlanInput and
 // expects a serialized solveDecompositionPlanV3 result back.
@@ -6183,7 +6257,7 @@ function runOptimizationV3(payload, runId) {
         || payload.tightenStepsLevel === "adaptive";
 
       if (!wantsVerification) {
-        self.postMessage({ type: "done", runId, ...result });
+        self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, result, { stopView }) });
         return;
       }
 
@@ -6238,7 +6312,7 @@ function runOptimizationV3(payload, runId) {
           },
         });
       }
-      self.postMessage({ type: "done", runId, ...finalResult });
+      self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, finalResult, { stopView }) });
       return;
     }
   }
@@ -6256,7 +6330,7 @@ function runOptimizationV3(payload, runId) {
     || payload.tightenStepsLevel === "adaptive";
 
   if (!wantsVerification) {
-    self.postMessage({ type: "done", runId, ...result });
+    self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, result, { stopView }) });
     return;
   }
 
@@ -6281,7 +6355,7 @@ function runOptimizationV3(payload, runId) {
     },
   });
 
-  self.postMessage({ type: "done", runId, ...finalResult });
+  self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, finalResult, { stopView }) });
 }
 
 if (typeof self !== "undefined") {
@@ -6424,6 +6498,8 @@ if (typeof module !== "undefined" && module.exports) {
     runMCVerificationV3,
     runMCRolloutLoopV3,
     runPolicyMCEvaluationV3,
+    computeRulesPolicyDiagnosticsV3,
+    attachRulesPolicyDiagnosticsV3,
     resolveMCBudgetV3,
     computeMCStatsV3,
     // MC verification budget constants — exposed for tests + benchmarks.

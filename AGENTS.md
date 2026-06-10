@@ -4,7 +4,8 @@
 
 - Start with [docs/README.md](docs/README.md), [docs/business-requirements.md](docs/business-requirements.md), and [docs/implementation-guide.md](docs/implementation-guide.md) before diving into the code.
 - v3 is the only implementation. The standalone v1 (MCTS) and v2 (exact-SSP) workers have been removed; the shared transition helpers and residual-graph helpers that v3 needs are now inlined in `d4cubeoptimv3-worker.js`.
-- The only files you should edit for solver/UI work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, `config.js`, `weight-tracking.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
+- The only files you should edit for solver/UI work are `d4cubeoptimv3-worker.js`, `d4cubeoptimv3-worker.test.js`, `d4cubeoptimv3.html`, `d4cubeoptimv3-rules-solver.js`, `d4cubeoptimv3-rules-solver.test.js`, `ilp.js`, `ilp.test.js`, `gear-slot-legality.js`, `config.js`, `weight-tracking.js`, the docs under `docs/`, `CHANGES.md`, and the notes under `v2-improvement-notes/`.
+- `d4cubeoptimv3-rules-solver.js` — secondary rules-based solver (dev-only comparison policy, off by default in the UI). Extensible via the `RULES_V3` array; compare against LAO* with `node scripts/compare-rules-vs-lao.js`.
 - `weight-tracking.js` — UMD module for outcome tracking and Bayesian roll-weight learning (Plackett–Luce MM update). Drives the browser tracker and `scripts/learn-weights-from-tracking.js`.
 
 ## Architecture

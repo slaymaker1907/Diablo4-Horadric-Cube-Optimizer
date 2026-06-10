@@ -902,6 +902,11 @@
 						</div>
 					</div>
 
+					<div id="rules-policy-panel" style="display:none;margin-top:10px;padding:8px 10px;border:1px dashed var(--accent);border-radius:6px;">
+						<span style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:4px;">Rules Policy (dev)</span>
+						<div id="rules-policy-body" style="font-size:0.86rem;line-height:1.5;"></div>
+					</div>
+
 					<div class="divider"></div>
 
 					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Apply Last Outcome</label>
@@ -1134,6 +1139,21 @@
 						<button id="export-tracking-btn" class="btn ghost">Export Tracking Data</button>
 						<button id="clear-tracking-btn" class="btn ghost">Clear Tracking Data</button>
 					</div>
+
+					<div class="divider"></div>
+
+					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Rules-Based Policy</label>
+					<div class="field">
+						<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+							<input type="checkbox" id="rules-policy-toggle">
+							<span>Compare rules-based policy</span>
+						</label>
+					</div>
+					<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
+						When on, each run also evaluates the experimental rules-based solver (a fixed
+						heuristic rule list, no search) and shows its recommendation — with Monte Carlo
+						step statistics when Tighten Steps Estimate is enabled — below the main result.
+					</div>
 				</details>
 
 				<div class="divider"></div>
@@ -1339,6 +1359,9 @@
 		const TIGHTEN_KEY = "d4cubeoptim_tighten_v3";
 		const TIGHTEN_LEVELS = ["none", "light", "heavy", "adaptive"];
 		const USE_RUST_KEY = "d4cubeoptim_use_rust_v3";
+		// Developer toggle: also evaluate the experimental rules-based policy
+		// on each run (off by default). Kept apart from the main state blob.
+		const RULES_POLICY_KEY = "d4cubeoptim_rules_policy_v3";
 		const MC_TIMEOUT_KEY = "d4opt-mc-timeout-s";
 		const DIST_GRAPH_KEY = "d4opt-dist-graph-enabled";
 		const DIST_ROLLOUTS_KEY = "d4opt-dist-rollouts";
@@ -1346,7 +1369,7 @@
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-06-01-v3-sim-graph";
+		const WORKER_VERSION = "2026-06-10-v3-rules-policy";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1418,6 +1441,7 @@
 			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
 			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
 			useRust: true, // persisted to USE_RUST_KEY, not main state blob
+			rulesPolicy: false, // persisted to RULES_POLICY_KEY, not main state blob
 			mcTimeoutS: 120, // persisted to MC_TIMEOUT_KEY
 			distGraphEnabled: false, // persisted to DIST_GRAPH_KEY
 			distRollouts: 200, // persisted to DIST_ROLLOUTS_KEY
@@ -1700,6 +1724,14 @@
 				saveUseRust(appState.useRust);
 			});
 
+			// Rules-based policy comparison toggle (Settings modal → Developer).
+			const rulesPolicyToggle = document.getElementById("rules-policy-toggle");
+			rulesPolicyToggle.addEventListener("change", () => {
+				appState.rulesPolicy = rulesPolicyToggle.checked;
+				saveRulesPolicy(appState.rulesPolicy);
+				renderRulesPolicyPanel(lastDiagnostics && lastDiagnostics.rulesPolicy);
+			});
+
 			// ── Outcome tracking controls (Settings modal → Developer) ─────────
 			const trackOutcomesToggle = document.getElementById("track-outcomes-toggle");
 			trackOutcomesToggle.addEventListener("change", () => {
@@ -1779,6 +1811,7 @@
 				tightenStepsSelect.disabled = appState.distGraphEnabled === true;
 				tightenStepsSelect.style.opacity = appState.distGraphEnabled ? "0.45" : "";
 				useRustToggle.checked = appState.useRust === true;
+				rulesPolicyToggle.checked = appState.rulesPolicy === true;
 				mcTimeoutInput.value = appState.mcTimeoutS || 120;
 				distGraphToggle.checked = appState.distGraphEnabled === true;
 				distRolloutsInput.value = appState.distRollouts || 200;
@@ -2085,6 +2118,7 @@
 				tightenStepsOverrides,
 				includeRolloutData: appState.distGraphEnabled === true,
 				useRust: appState.useRust === true,
+				rulesPolicy: appState.rulesPolicy === true,
 			};
 			lastSolvePayload = solvePayload;
 			worker.postMessage(solvePayload);
@@ -2117,6 +2151,44 @@
 			ensureWorker();
 		}
 
+		// Dev-only panel: secondary rules-based policy comparison (Settings →
+		// Developer → "Compare rules-based policy"). Hidden unless the toggle is
+		// on and the worker attached diagnostics.rulesPolicy to the result.
+		function renderRulesPolicyPanel(diag) {
+			const panel = document.getElementById("rules-policy-panel");
+			const body = document.getElementById("rules-policy-body");
+			if (!panel || !body) return;
+			if (appState.rulesPolicy !== true || !diag) {
+				panel.style.display = "none";
+				body.textContent = "";
+				return;
+			}
+			panel.style.display = "";
+			if (!diag.applied) {
+				body.textContent = `Rules solver unavailable: ${diag.error || "unknown error"}`;
+				return;
+			}
+			const parts = [];
+			parts.push(diag.action
+				? `Action: ${describeAction(diag.action)} (rule: ${diag.ruleName || "?"})`
+				: "No rule produced an action for this state.");
+			if (diag.mc && Number.isFinite(diag.mc.mean)) {
+				const ci = Number.isFinite(diag.mc.ci95halfWidth) ? ` ± ${diag.mc.ci95halfWidth.toFixed(2)}` : "";
+				const success = Number.isFinite(diag.mc.successRate)
+					? `${(diag.mc.successRate * 100).toFixed(1)}%`
+					: "n/a";
+				parts.push(`MC steps: ${diag.mc.mean.toFixed(2)}${ci} over ${diag.mc.rollouts} rollouts — success ${success}, dead ${diag.mc.deadRolloutCount}, capped ${diag.mc.cappedRolloutCount}.`);
+			} else if (diag.action) {
+				parts.push("Enable Tighten Steps Estimate for Monte Carlo step statistics.");
+			}
+			body.innerHTML = "";
+			for (const text of parts) {
+				const div = document.createElement("div");
+				div.textContent = text;
+				body.appendChild(div);
+			}
+		}
+
 		function applyWorkerResult(message, isFinal) {
 			currentBestAction = message.action || null;
 			lastDiagnostics = message.diagnostics || null;
@@ -2143,6 +2215,7 @@
 			}
 
 			renderSolverDiagnostics(lastDiagnostics);
+			renderRulesPolicyPanel(lastDiagnostics && lastDiagnostics.rulesPolicy);
 			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderManualControls();
@@ -4238,6 +4311,20 @@
 			} catch { /* storage full — silently ignore */ }
 		}
 
+		function loadRulesPolicy() {
+			try {
+				return JSON.parse(localStorage.getItem(RULES_POLICY_KEY)) === true;
+			} catch {
+				return false;
+			}
+		}
+
+		function saveRulesPolicy(value) {
+			try {
+				localStorage.setItem(RULES_POLICY_KEY, JSON.stringify(value === true));
+			} catch { /* storage full — silently ignore */ }
+		}
+
 		function loadMcTimeoutS() {
 			try {
 				const raw = localStorage.getItem(MC_TIMEOUT_KEY);
@@ -4537,6 +4624,7 @@
 				const overrides = loadUserOverrides();
 				const tightenStepsLevel = loadTightenStepsLevel();
 				const useRust = loadUseRust();
+				const rulesPolicy = loadRulesPolicy();
 				const mcTimeoutS = loadMcTimeoutS();
 				const distGraphEnabled = loadDistGraphEnabled();
 				const distRollouts = loadDistRollouts();
@@ -4545,6 +4633,7 @@
 					s.userOverrides = overrides;
 					s.tightenStepsLevel = tightenStepsLevel;
 					s.useRust = useRust;
+					s.rulesPolicy = rulesPolicy;
 					s.mcTimeoutS = mcTimeoutS;
 					s.distGraphEnabled = distGraphEnabled;
 					s.distRollouts = distRollouts;
@@ -4561,6 +4650,7 @@
 					userOverrides: overrides,
 					tightenStepsLevel,
 					useRust,
+					rulesPolicy,
 					mcTimeoutS,
 					distGraphEnabled,
 					distRollouts,

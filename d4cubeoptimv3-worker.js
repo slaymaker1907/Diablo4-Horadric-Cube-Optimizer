@@ -178,9 +178,11 @@ const RESIDUAL_ACTION_EPSILON = 1e-8;
  */
 
 let gearSlotLegality = null;
+let rulesSolverModule = null;
 
 if (typeof module !== "undefined" && module.exports) {
   gearSlotLegality = require("./gear-slot-legality.js");
+  try { rulesSolverModule = require("./d4cubeoptimv3-rules-solver.js"); } catch (_) { /* dev-only module */ }
 }
 
 // Load worker-side helper modules when running as a browser Web Worker.
@@ -188,8 +190,12 @@ if (typeof module !== "undefined" && module.exports) {
 if (typeof importScripts !== "undefined") {
   try { importScripts("./random-forest.js"); } catch (_) { /* scorer unavailable */ }
   try { importScripts("./gear-slot-legality.js"); } catch (_) { /* slot legality unavailable */ }
+  try { importScripts("./d4cubeoptimv3-rules-solver.js"); } catch (_) { /* rules solver unavailable */ }
   if (typeof d4cubeoptimGearSlotLegality !== "undefined") {
     gearSlotLegality = d4cubeoptimGearSlotLegality;
+  }
+  if (typeof d4cubeoptimRulesSolver !== "undefined") {
+    rulesSolverModule = d4cubeoptimRulesSolver;
   }
 }
 
@@ -934,7 +940,7 @@ function getValidActions(state, target, env) {
         && eligibleFocused.every(({ entry }) => (
           entry && entry.affixId && targetIds.has(entry.affixId) && !unsatisfactoryIds.has(entry.affixId)
         ));
-      if (!touchesGA && !churnDominated) {
+      if (!touchesGA && !churnDominated && !isAdeptFocusedBlocked(state, env, categoryName)) {
         actions.push({ type: "focused", prism: categoryName });
       }
     }
@@ -1126,6 +1132,39 @@ function getEligibleByCategory(state, env, categoryName, operationType) {
   return eligible;
 }
 
+/** Prism category subject to the Mainstat focused-reroll block. */
+const ADEPT_PRISM_NAME = "Adept";
+/** Canonical affix id for Mainstat (slugified catalog name). */
+const MAINSTAT_AFFIX_ID = "mainstat";
+
+/**
+ * The game refuses Focused Reroll with the Adept prism when the item already
+ * holds Mainstat plus any skill-rank affix — i.e. the focused-eligible Adept
+ * pool contains Mainstat and at least one other entry. Enchant-locked slots
+ * are invisible to the cube, so an enchanted Mainstat does not trigger the
+ * block. See docs/game-mechanics.md → Known Mechanical Edge Cases.
+ *
+ * JS-only: the Rust v4 path (D4_USE_RUST) does not model this lockout yet.
+ *
+ * @param {Object} state
+ * @param {Object} env
+ * @param {string} categoryName - prism being considered for a focused reroll.
+ * @param {number} [excludeIndex] - slot assumed removed before the reroll
+ *   (closed-form Case C plans the focused after removing the host).
+ * @returns {boolean}
+ */
+function isAdeptFocusedBlocked(state, env, categoryName, excludeIndex) {
+  if (categoryName !== ADEPT_PRISM_NAME) {
+    return false;
+  }
+  let eligible = getEligibleByCategory(state, env, categoryName, "focused");
+  if (Number.isInteger(excludeIndex)) {
+    eligible = eligible.filter(({ index }) => index !== excludeIndex);
+  }
+  return eligible.length >= 2
+    && eligible.some(({ entry }) => entry && entry.affixId === MAINSTAT_AFFIX_ID);
+}
+
 /**
  * Return the roll weight for an affix catalogue entry.
  * Defaults to 1 if the weight is missing, non-finite, or ≤0.
@@ -1300,6 +1339,9 @@ function getActionOutcomes(state, action, env) {
   }
 
   if (action.type === "focused") {
+    if (isAdeptFocusedBlocked(state, env, action.prism)) {
+      return [];
+    }
     const eligible = getEligibleByCategory(state, env, action.prism, "focused");
     if (eligible.length === 0) {
       return [];
@@ -3321,6 +3363,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
+      if (isAdeptFocusedBlocked(state, env, prism)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = options.touchOnlyImprovement
         ? 1
@@ -3341,6 +3384,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
+      if (isAdeptFocusedBlocked(state, env, prism)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -3359,6 +3403,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
     for (const prism of sharedCategories) {
       if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
       if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
+      if (isAdeptFocusedBlocked(state, env, prism)) { continue; }
       const n = getCategorySuccessDenominatorV3(state, prism, env, { operationType: "focused" });
       const expectedSteps = computeCaseBExpectedStepsV3(n);
       if (Number.isFinite(expectedSteps)) {
@@ -3381,6 +3426,7 @@ function getClosedFormPlanCandidatesV3(state, targetEntry, slotIndex, env, optio
       for (const prism of targetCategoriesFocused) {
         if (isCategoryFocusedBlockedByGAV3(state, prism, env)) { continue; }
         if (isCategoryFocusedBlockedByMatchedTargetV3(state, prism, env, slotIndex)) { continue; }
+        if (isAdeptFocusedBlocked(state, env, prism, slotIndex)) { continue; }
         const n = getCategorySuccessDenominatorV3(state, prism, env, { ignoreIndex: slotIndex, operationType: "focused" });
         const expectedSteps = computeCaseCExpectedStepsV3(n);
         if (Number.isFinite(expectedSteps)) {
@@ -5841,28 +5887,39 @@ function isStopSignalledV3(stopView) {
   }
 }
 
-function runMCVerificationV3(payload, intermediateResult, options = {}) {
-  const budget = resolveMCBudgetV3(payload);
-  if (!budget) return intermediateResult;
-  if (!intermediateResult || !intermediateResult.action) return intermediateResult;
-  if (!Number.isFinite(intermediateResult.expectedSteps)) return intermediateResult;
-
-  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
-  const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
+/**
+ * Shared MC rollout engine. Repeatedly simulates `policyFn` from
+ * `payload.state` until the budget is exhausted (or the stop signal /
+ * adaptive CI target fires) and returns raw rollout statistics.
+ *
+ * `policyFn(state) -> action | null` supplies the next action for a concrete
+ * state; `null` means the policy is stuck (recorded as a dead rollout).
+ *
+ * Truncated rollouts are split into:
+ *   - dead:   terminal failure (GA broken), stuck policy, or no valid outcomes;
+ *   - capped: hit MC_ROLLOUT_STEP_CAP without terminating.
+ *
+ * By default every transition counts as one step (the historical gold-
+ * standard metric). With `options.useCubeStepCosts` each transition counts
+ * `actionCost(action, state)` instead (cube ops 1, fresh enchant 0,
+ * re-enchant 0.5) — the optimizer's actual objective. The rollout-length cap
+ * always applies to transition count, not accumulated cost.
+ *
+ * @returns {{ stepCounts: number[], truncatedRolloutCount: number,
+ *             deadRolloutCount: number, cappedRolloutCount: number,
+ *             successSteps: number[], failureSteps: number[],
+ *             aborted: boolean, earlyConverged: boolean, wallTimeMs: number }}
+ */
+function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
   const stepCounts = [];
   let truncatedRolloutCount = 0;
+  let deadRolloutCount = 0;
+  let cappedRolloutCount = 0;
   const successSteps = [];  // actual steps for successful rollouts (when includeRolloutData)
   const failureSteps = [];  // actual steps for failed/truncated rollouts (before cap)
   const includeRolloutData = !!payload.includeRolloutData;
+  const useCubeStepCosts = !!options.useCubeStepCosts;
   const startTime = Date.now();
-
-  if (typeof options.onProgress === "function") {
-    options.onProgress({ completed: 0, total: budget.targetRollouts, intermediateResult });
-  }
-
-  // Seed cache with the headline state's action — the optimizer already
-  // computed it for the displayed recommendation.
-  actionCache.set(stateKey(payload.state), intermediateResult.action);
 
   let aborted = false;
   let earlyConverged = false;
@@ -5873,7 +5930,10 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
 
     let state = payload.state;
     let steps = 0;
+    let transitions = 0;
     let truncated = false;
+    let dead = false;
+    let capped = false;
 
     while (true) {
       const term = isTerminal(state, payload.target, env);
@@ -5881,26 +5941,23 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         if (!term.success) {
           // Dead state encountered mid-rollout (GA broken). Cap as truncated.
           truncated = true;
+          dead = true;
           if (includeRolloutData) failureSteps.push(steps); // actual steps before cap
           steps = MC_ROLLOUT_STEP_CAP;
         }
         break;
       }
-      if (steps >= MC_ROLLOUT_STEP_CAP) {
+      if (transitions >= MC_ROLLOUT_STEP_CAP) {
         truncated = true;
+        capped = true;
         if (includeRolloutData) failureSteps.push(steps);
         break;
       }
 
-      const key = stateKey(state);
-      let action = actionCache.get(key);
-      if (action === undefined) {
-        const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
-        action = subResult && subResult.action ? subResult.action : null;
-        actionCache.set(key, action);
-      }
+      const action = policyFn(state);
       if (!action) {
         truncated = true;
+        dead = true;
         if (includeRolloutData) failureSteps.push(steps);
         steps = MC_ROLLOUT_STEP_CAP;
         break;
@@ -5909,24 +5966,29 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
       const rawOutcomes = getActionOutcomes(state, action, env);
       if (!rawOutcomes || rawOutcomes.length === 0) {
         truncated = true;
+        dead = true;
         if (includeRolloutData) failureSteps.push(steps);
         break;
       }
       const outcomes = filterValidMCOutcomesV3(rawOutcomes);
       if (outcomes.length === 0) {
         truncated = true;
+        dead = true;
         if (includeRolloutData) failureSteps.push(steps);
         break;
       }
 
       const chosen = pickWeightedOutcomeV3(outcomes);
+      steps += useCubeStepCosts ? actionCost(action, state) : 1;
+      transitions++;
       state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
-      steps++;
     }
 
     stepCounts.push(steps);
     if (truncated) {
       truncatedRolloutCount++;
+      if (dead) deadRolloutCount++;
+      if (capped) cappedRolloutCount++;
     } else if (includeRolloutData) {
       successSteps.push(steps);
     }
@@ -5953,11 +6015,53 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
     }
   }
 
-  const stats = computeMCStatsV3(stepCounts);
-  const wallTimeMs = Date.now() - startTime;
-  const completedRollouts = stepCounts.length;
-  const finalApproximate = !!intermediateResult.approximate || aborted ||
-    (budget.adaptive && !earlyConverged && completedRollouts >= budget.maxRollouts);
+  return {
+    stepCounts,
+    truncatedRolloutCount,
+    deadRolloutCount,
+    cappedRolloutCount,
+    successSteps,
+    failureSteps,
+    aborted,
+    earlyConverged,
+    wallTimeMs: Date.now() - startTime,
+  };
+}
+
+function runMCVerificationV3(payload, intermediateResult, options = {}) {
+  const budget = resolveMCBudgetV3(payload);
+  if (!budget) return intermediateResult;
+  if (!intermediateResult || !intermediateResult.action) return intermediateResult;
+  if (!Number.isFinite(intermediateResult.expectedSteps)) return intermediateResult;
+
+  const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
+  const includeRolloutData = !!payload.includeRolloutData;
+
+  if (typeof options.onProgress === "function") {
+    options.onProgress({ completed: 0, total: budget.targetRollouts, intermediateResult });
+  }
+
+  // Seed cache with the headline state's action — the optimizer already
+  // computed it for the displayed recommendation.
+  actionCache.set(stateKey(payload.state), intermediateResult.action);
+
+  const policyFn = (state) => {
+    const key = stateKey(state);
+    let action = actionCache.get(key);
+    if (action === undefined) {
+      const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
+      action = subResult && subResult.action ? subResult.action : null;
+      actionCache.set(key, action);
+    }
+    return action;
+  };
+
+  const run = runMCRolloutLoopV3(payload, env, policyFn, budget, options);
+  const stats = computeMCStatsV3(run.stepCounts);
+  const completedRollouts = run.stepCounts.length;
+  const finalApproximate = !!intermediateResult.approximate || run.aborted ||
+    (budget.adaptive && !run.earlyConverged && completedRollouts >= budget.maxRollouts);
 
   return {
     ...intermediateResult,
@@ -5973,13 +6077,126 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         ci95halfWidth: stats.ci95halfWidth,
         stdev: stats.stdev,
         intermediateSteps: intermediateResult.expectedSteps,
-        truncatedRolloutCount,
-        wallTimeMs,
-        aborted,
-        earlyConverged,
+        truncatedRolloutCount: run.truncatedRolloutCount,
+        wallTimeMs: run.wallTimeMs,
+        aborted: run.aborted,
+        earlyConverged: run.earlyConverged,
         adaptive: budget.adaptive,
-        ...(includeRolloutData ? { successStepCounts: successSteps, failureStepCounts: failureSteps } : {}),
+        ...(includeRolloutData ? { successStepCounts: run.successSteps, failureStepCounts: run.failureSteps } : {}),
       },
+    },
+  };
+}
+
+/**
+ * Run the MC rollout engine for an arbitrary policy function and return
+ * standalone statistics (no optimizer involvement). Used by the rules-based
+ * solver evaluation; the comparison harness pins the budget via
+ * `payload.tightenStepsLevel` + `payload.tightenStepsOverrides` so both
+ * policies see identical rollout counts.
+ *
+ * @param {Object} payload - { state, target, data, gaConfig, tightenStepsLevel,
+ *   tightenStepsOverrides?, includeRolloutData? }
+ * @param {function(Object): (Object|null)} policyFn - state -> action | null.
+ * @param {Object} [options] - { stopView?, onProgress?, env?, budget? }
+ * @returns {Object|null} stats object, or null when no budget is configured.
+ */
+function runPolicyMCEvaluationV3(payload, policyFn, options = {}) {
+  const budget = options.budget || resolveMCBudgetV3(payload);
+  if (!budget) return null;
+
+  const env = options.env
+    || buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const run = runMCRolloutLoopV3(payload, env, policyFn, budget, options);
+  const stats = computeMCStatsV3(run.stepCounts);
+  const completedRollouts = run.stepCounts.length;
+  const includeRolloutData = !!payload.includeRolloutData;
+
+  return {
+    applied: true,
+    level: budget.level,
+    rollouts: completedRollouts,
+    mean: stats.mean,
+    ci95halfWidth: stats.ci95halfWidth,
+    stdev: stats.stdev,
+    truncatedRolloutCount: run.truncatedRolloutCount,
+    deadRolloutCount: run.deadRolloutCount,
+    cappedRolloutCount: run.cappedRolloutCount,
+    successRate: completedRollouts > 0
+      ? (completedRollouts - run.truncatedRolloutCount) / completedRollouts
+      : NaN,
+    wallTimeMs: run.wallTimeMs,
+    aborted: run.aborted,
+    earlyConverged: run.earlyConverged,
+    adaptive: budget.adaptive,
+    ...(includeRolloutData ? { successStepCounts: run.successSteps, failureStepCounts: run.failureSteps } : {}),
+  };
+}
+
+// ── Rules-policy dev diagnostics ─────────────────────────────────────────────
+// When the run payload carries `rulesPolicy: true` (Settings → Developer →
+// "Compare rules-based policy", off by default), the secondary rules-based
+// solver's headline pick — and, when MC verification is requested, its own
+// MC stats through the same rollout engine — are attached to the result
+// under diagnostics.rulesPolicy. Always JS-side; cheap (no optimizer calls).
+
+function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
+  if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
+    return { applied: false, error: "rules solver module unavailable" };
+  }
+  try {
+    const helpers = {
+      buildEnv,
+      getValidActions,
+      getActionOutcomes,
+      getEligibleByCategory,
+      getCategoryAffixesForState,
+      getCategoryWeightTotal,
+      getEffectiveAffixRollWeight,
+      buildFamilyCountsForPool,
+      isTerminal,
+      stateKey,
+      actionKey,
+    };
+    const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
+    const pick = rulesSolverModule.selectRulesActionV3(
+      payload.state, payload.target, policyFn.env, helpers
+    );
+    const wantsVerification = payload.tightenStepsLevel === "light"
+      || payload.tightenStepsLevel === "heavy"
+      || payload.tightenStepsLevel === "adaptive";
+    let mc = null;
+    if (wantsVerification && pick) {
+      mc = runPolicyMCEvaluationV3(payload, policyFn, {
+        env: policyFn.env,
+        stopView: options.stopView,
+      });
+      if (mc) {
+        // The per-rollout step lists are bulky and unused by the dev panel.
+        delete mc.successStepCounts;
+        delete mc.failureStepCounts;
+      }
+    }
+    return {
+      applied: true,
+      action: pick ? pick.action : null,
+      ruleName: pick ? pick.ruleName : null,
+      mc,
+    };
+  } catch (e) {
+    return { applied: false, error: String((e && e.message) || e) };
+  }
+}
+
+function attachRulesPolicyDiagnosticsV3(payload, result, options = {}) {
+  if (!payload || payload.rulesPolicy !== true || !result) {
+    return result;
+  }
+  return {
+    ...result,
+    diagnostics: {
+      ...(result.diagnostics || {}),
+      rulesPolicy: computeRulesPolicyDiagnosticsV3(payload, options),
     },
   };
 }
@@ -6040,7 +6257,7 @@ function runOptimizationV3(payload, runId) {
         || payload.tightenStepsLevel === "adaptive";
 
       if (!wantsVerification) {
-        self.postMessage({ type: "done", runId, ...result });
+        self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, result, { stopView }) });
         return;
       }
 
@@ -6095,7 +6312,7 @@ function runOptimizationV3(payload, runId) {
           },
         });
       }
-      self.postMessage({ type: "done", runId, ...finalResult });
+      self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, finalResult, { stopView }) });
       return;
     }
   }
@@ -6113,7 +6330,7 @@ function runOptimizationV3(payload, runId) {
     || payload.tightenStepsLevel === "adaptive";
 
   if (!wantsVerification) {
-    self.postMessage({ type: "done", runId, ...result });
+    self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, result, { stopView }) });
     return;
   }
 
@@ -6138,7 +6355,7 @@ function runOptimizationV3(payload, runId) {
     },
   });
 
-  self.postMessage({ type: "done", runId, ...finalResult });
+  self.postMessage({ type: "done", runId, ...attachRulesPolicyDiagnosticsV3(payload, finalResult, { stopView }) });
 }
 
 if (typeof self !== "undefined") {
@@ -6279,6 +6496,11 @@ if (typeof module !== "undefined" && module.exports) {
     optimizeScenarioV3,
     runOptimizationV3,
     runMCVerificationV3,
+    runMCRolloutLoopV3,
+    runPolicyMCEvaluationV3,
+    computeRulesPolicyDiagnosticsV3,
+    attachRulesPolicyDiagnosticsV3,
+    resolveMCBudgetV3,
     computeMCStatsV3,
     // MC verification budget constants — exposed for tests + benchmarks.
     MC_LIGHT_ROLLOUTS,
@@ -6299,6 +6521,7 @@ if (typeof module !== "undefined" && module.exports) {
     getActionOutcomes: getActionOutcomes,
     getValidActions: getValidActions,
     getEligibleByCategory: getEligibleByCategory,
+    isAdeptFocusedBlocked: isAdeptFocusedBlocked,
     getCategoryAffixesForState: getCategoryAffixesForState,
     getCategoryWeightTotal: getCategoryWeightTotal,
     affixSupportsClass: affixSupportsClass,

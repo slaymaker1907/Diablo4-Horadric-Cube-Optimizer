@@ -59,7 +59,7 @@ Prisms steer random outcomes toward a specific affix category. An affix belongs 
 | **Pragmatic** | Barrier Generation, Cooldown Reduction, Fortify Generation, Healing Received, Impairment Reduction, Life Regeneration, Lucky Hit Chance, Movement Speed, Potion Capacity, Maximum Evade Charges, Attacks reduce Evade Cooldown, Evade grants Movement Speed, Thorns *(Remove only — see edge cases)* |
 | **Protector** | Armor, Damage Reduction, Dodge Chance, Fortify Generation, Life on Hit, Life on Kill, Life Regeneration, Maximum Life, All Resistance, Specific Resistance (typed), Thorns *(Focused/Chaotic Reroll only — see edge cases)* |
 | **Resourceful** | Lucky Hit Chance restore Resource, Maximum Resource, Resource Cost Reduction, Resource on Kill, Resource Regeneration |
-| **Adept** | Mainstat; class-agnostic general skills *(family — to Basic / Core / Defensive Skills)*; class-specific general skills *(family, filtered by class — e.g. to Brawling / Wrath / Conjuration Skills)*; specific class skills *(family, filtered by class — e.g. to Bash, to Claw, to Fireball)*; to All Skills *(enchant-only, see edge case 7)*. |
+| **Adept** | Mainstat; class-agnostic general skills *(family — to Basic / Core / Defensive Skills)*; class-specific general skills *(family, filtered by class — e.g. to Brawling / Wrath / Conjuration Skills)*; specific class skills *(family, filtered by class — e.g. to Bash, to Claw, to Fireball)*; to All Skills *(enchant-only, see edge case 8)*. Focused Reroll with Adept is refused when Mainstat and a skill affix coexist on the item — see edge case 7. |
 | **Chromatic** | Specific Resistance (typed) |
 
 For Focused Reroll, a prism is always required.
@@ -163,7 +163,11 @@ The Cube skips enchanted slots entirely. To protect a high-value roll (such as a
 
 After using a Focused Reroll or Remove Affix recipe that results in a UI error ("This material combo could not change the item's affix"), or after stripping an affix you plan to replace, **close the Horadric Cube UI completely** before rolling again. The Cube preserves the item's internal RNG seed within a single UI session. Rapid Remove → Add sequences will repeatedly roll the exact same stat at the exact same numerical value, consuming Refined Primordial Dust for no net change.
 
-### 7. to All Skills — Enchant Only
+### 7. Adept Focused Reroll — The Mainstat + Skill Lockout
+
+The game refuses a **Focused Reroll with the Adept prism** when the item already holds **Mainstat plus any skill-rank affix** — i.e. whenever the Adept focused-eligible pool contains Mainstat and at least one other entry. Neither slot can be focused-rerolled through Adept until one of them is gone (or enchant-locked: enchanted slots are invisible to the cube, so an enchanted Mainstat does not trigger the lockout). Mainstat alone, or skills without Mainstat, focused-reroll normally. The optimizer models this in action legality (`isAdeptFocusedBlocked`) and in the closed-form plan formulas.
+
+### 8. to All Skills — Enchant Only
 
 `to All Skills` is the lone enchant-only skill affix. It exists in the gear pool and can appear as an Enchantress target, but it **cannot** be rolled, rerolled, or removed via any Horadric Cube recipe. It is conceptually in the Adept prism pool but has empty operation categories for Add, Focused Reroll, Chaotic Reroll, and Remove — so no cube prism can touch it. The only way to acquire or change this affix is via the Enchantress.
 

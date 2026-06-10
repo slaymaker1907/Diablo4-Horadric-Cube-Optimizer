@@ -387,6 +387,31 @@ test("rescue-enchant: add-only target with a GA-polluted category is enchanted i
   assert.equal(result.action.sourceIndex, 1);
 });
 
+test("rescue-enchant marks the GA instead when two targets are blocked by it (Legendary lockout)", () => {
+  const fixture = buildRoutingFixture();
+  // Legendary + full item: Remove and Add are gone. The protected GA (CSC)
+  // sits in every Aggressive cube pool, so BOTH missing targets (CSD, VD —
+  // Aggressive-only) are pollution-blocked. Rescuing one of them would leave
+  // the other unreachable (junk landing in Aggressive could never be
+  // cleared); the same-affix enchant-mark on the GA slot unpollutes
+  // Aggressive for both. Mirrors the user-reported Ring scenario.
+  const state = buildState([
+    { affixId: ID.mainstat },        // matched
+    { affixId: ID.mec },             // Pragmatic junk
+    { affixId: ID.dr },              // Protector junk
+    { affixId: ID.csc, isGA: true }, // protected GA, matched
+  ], { isLegendary: true });
+  const target = buildTarget([ID.mainstat, ID.csd, ID.vd, ID.csc]);
+  const gaConfig = { currentGAAffixes: [ID.csc], strictMode: true };
+
+  const result = select(fixture, state, target, gaConfig);
+  assert.ok(result);
+  assert.equal(result.ruleName, "rescue-enchant");
+  assert.equal(result.action.type, "enchant");
+  assert.equal(result.action.sourceIndex, 3);
+  assert.equal(result.action.targetAffixId, ID.csc); // same-affix Phase-1 mark
+});
+
 test("rescue-enchant does not fire when the add-only category is cleanable", () => {
   const fixture = buildRoutingFixture();
   // Same shape but the Max Life is NOT a GA: Protector junk stays removable,

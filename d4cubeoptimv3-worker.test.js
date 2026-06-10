@@ -2762,3 +2762,68 @@ test("regression: trapped-prism non-target — no duplicate outcomes, no dominat
     `Optimizer should not recommend the dominated Focused/Resourceful reroll (got ${JSON.stringify(result.action)})`
   );
 });
+
+test("Adept focused-reroll lockout: blocked with Mainstat + skill, allowed otherwise", { timeout: TEST_TIMEOUT_MS }, () => {
+  const categoryToNames = {
+    Aggressive: ["Critical Strike Chance", "Critical Strike Damage", "Mainstat"],
+    Adept: [
+      "Mainstat",
+      { name: "to Basic Skills", family: "class-agnostic-general", familyRollWeight: 1 },
+      { name: "to Core Skills", family: "class-agnostic-general", familyRollWeight: 1 },
+    ],
+    Protector: ["Armor", "Maximum Life"],
+  };
+  const { affixes, byName, categories } = buildCatalogFixture(categoryToNames);
+  const data = { affixes, categories, targetAffixIds: [], maxAffixSlots: 4 };
+  // Target keeps a missing Adept affix so Focused/Adept is never churn-pruned.
+  const target = buildTarget([
+    { affixId: byName["to Core Skills"].id },
+  ]);
+  const env = worker.buildEnv(data, { strictMode: true }, target);
+
+  const blockedState = buildState([
+    { affixId: byName["Mainstat"].id },
+    { affixId: byName["to Basic Skills"].id },
+  ]);
+  assert.equal(worker.isAdeptFocusedBlocked(blockedState, env, "Adept"), true);
+  assert.equal(worker.isAdeptFocusedBlocked(blockedState, env, "Aggressive"), false);
+  const blockedActions = worker.getValidActions(blockedState, target, env);
+  assert.ok(
+    !blockedActions.some((a) => a.type === "focused" && a.prism === "Adept"),
+    "Focused/Adept must be blocked when Mainstat + a skill affix are both present"
+  );
+  assert.equal(
+    worker.getActionOutcomes(blockedState, { type: "focused", prism: "Adept" }, env).length,
+    0,
+    "Focused/Adept outcomes must be empty when the lockout applies"
+  );
+
+  // Mainstat alone: allowed.
+  const mainstatOnly = buildState([
+    { affixId: byName["Mainstat"].id },
+  ]);
+  assert.equal(worker.isAdeptFocusedBlocked(mainstatOnly, env, "Adept"), false);
+  assert.ok(
+    worker.getValidActions(mainstatOnly, target, env)
+      .some((a) => a.type === "focused" && a.prism === "Adept"),
+    "Focused/Adept must remain available with Mainstat alone"
+  );
+
+  // Skills without Mainstat: allowed.
+  const skillOnly = buildState([
+    { affixId: byName["to Basic Skills"].id },
+  ]);
+  assert.equal(worker.isAdeptFocusedBlocked(skillOnly, env, "Adept"), false);
+  assert.ok(
+    worker.getValidActions(skillOnly, target, env)
+      .some((a) => a.type === "focused" && a.prism === "Adept"),
+    "Focused/Adept must remain available with skills but no Mainstat"
+  );
+
+  // Enchant-locked Mainstat is invisible to the cube: lockout lifts.
+  const enchantLocked = buildState([
+    { affixId: byName["Mainstat"].id, isEnchanted: true },
+    { affixId: byName["to Basic Skills"].id },
+  ]);
+  assert.equal(worker.isAdeptFocusedBlocked(enchantLocked, env, "Adept"), false);
+});

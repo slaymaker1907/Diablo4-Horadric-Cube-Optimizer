@@ -164,7 +164,7 @@
     // WORKER_VERSION). The browser invalidates persisted outcome-tracking data
     // when this changes; scripts/learn-weights-from-tracking.js bumps it after
     // patching LEARNED_WEIGHTS. See docs/game-mechanics.md.
-    MODEL_VERSION: "2026-06-01-m5",
+    MODEL_VERSION: "2026-06-10-m6",
 
     // Learned roll weights, keyed by learning-unit key (see weight-tracking.js:
     //   "affix:<id>"   -> rollWeight for that singleton affix

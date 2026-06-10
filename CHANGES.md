@@ -128,6 +128,18 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - Dev UI option (off by default): Settings → Developer → "Compare rules-based policy" sends `rulesPolicy: true` with each run; the worker attaches `diagnostics.rulesPolicy` (headline rule/action + MC stats when verification is on) and the result panel shows a "Rules Policy (dev)" box. `WORKER_VERSION` bumped to `2026-06-10-v3-rules-policy`.
 - Validation: `node --test d4cubeoptimv3-rules-solver.test.js` (20 tests — per-rule units, dual-category routing scenario, GA-safety invariant, totality fuzz, MC smoke incl. cube-step costing) plus the existing suites (104 passing total).
 
+### Rules-based solver promoted to a selectable engine (2026-06)
+
+- Replaced the dev "Compare rules-based policy" checkbox (and the separate "Use Rust/WASM optimizer" checkbox) with a single Settings → Developer → **Optimizer Engine** selector with three mutually-exclusive values: `rust`, `js`, `rules`. The choice is sent as `payload.solverMode` (persisted to `d4cubeoptim_solver_mode_v3`; migrates from the legacy `d4cubeoptim_use_rust_v3` boolean).
+- `rules` is now a **primary engine**, not a side-by-side comparison: `runOptimizationV3` dispatches on `solverMode`, and the new `runRulesOptimizationV3` makes the rules solver's first-firing rule action the headline recommendation. It applies the same feasibility gate as the exact path and, when "Tighten Steps Estimate" is on, attaches Monte Carlo `mean`/`successRate` as the headline `expectedSteps`/`successProb`. New strategy id `v3-rules-policy` (`RULES_STRATEGY`), surfaced in the diagnostics contract (feasibility real; decomposition/ilp/residual `NOT_RUN`) and labeled "Rules-based (heuristic)" in the UI.
+- The old comparison-only plumbing (`rulesPolicy` payload flag, `diagnostics.rulesPolicy` attach, the "Rules Policy (dev)" result panel) is retired from the UI; `attachRulesPolicyDiagnosticsV3` remains a no-op for back-compat. `WORKER_VERSION` bumped to `2026-06-10-v3-rules-engine-select`.
+
+### Configurable Max MC Steps + cap-aware success probability (2026-06)
+
+- Added a Settings → Developer → Result Verification **Max MC Steps (per simulation)** input (persisted to `d4opt-mc-max-steps`, default `1000`). It is forwarded on every run as `tightenStepsOverrides.maxSteps` and threaded into the MC budget (`stepCap`) in both the JS (`resolveMCBudgetV3` → `runMCRolloutLoopV3`) and Rust (`resolve_mc_budget` → `run_mc_verification`) engines, replacing the hardcoded `MC_ROLLOUT_STEP_CAP` per-rollout cap (which remains the default).
+- **Cap-exceeding rollouts count as failures.** A simulation that needs more than the cap (or dies on a broken GA / stuck policy) is excluded from the success numerator. `runMCVerificationV3` / Rust `run_mc_verification` now overwrite the headline `successProb` with this cap-aware MC success rate and expose `successRate`/`stepCap` (JS also `cappedRolloutCount`/`deadRolloutCount`) under `diagnostics.goldStandard`.
+- **Probability shown only with tightening.** The result panel displays the success probability only on the final result of a run with a tightening option selected; otherwise (no tightening, or mid-verification) it reads "–", since the cap-aware probability only exists once MC has run. `WORKER_VERSION` bumped to `2026-06-10-v3-configurable-mc-steps`.
+
 ## Deferred Work
 
 - Sparse residual expansion beyond the current bounded abstract-graph approach if larger browser cases make that necessary.

@@ -27,6 +27,8 @@ pub struct MCBudget {
     pub max_rollouts: usize,
     pub wall_budget_ms: Option<u64>,
     pub adaptive: bool,
+    // Per-rollout transition cap; a rollout exceeding it is counted as a failure.
+    pub step_cap: usize,
 }
 
 pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
@@ -37,6 +39,11 @@ pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
         overrides?.get(key)?.as_u64().map(|v| v as usize)
     }
 
+    // Configurable MC step cap (defaults to the constant when unset / invalid).
+    let step_cap = get_override(overrides, "maxSteps")
+        .filter(|&v| v > 0)
+        .unwrap_or(MC_ROLLOUT_STEP_CAP);
+
     match level {
         "light" => {
             let target = get_override(overrides, "lightRollouts").unwrap_or(MC_LIGHT_ROLLOUTS);
@@ -46,6 +53,7 @@ pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
                 max_rollouts: target,
                 wall_budget_ms: None,
                 adaptive: false,
+                step_cap,
             })
         }
         "heavy" => {
@@ -56,6 +64,7 @@ pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
                 max_rollouts: target,
                 wall_budget_ms: None,
                 adaptive: false,
+                step_cap,
             })
         }
         "adaptive" => {
@@ -71,6 +80,7 @@ pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
                 max_rollouts: max_r,
                 wall_budget_ms: Some(wall),
                 adaptive: true,
+                step_cap,
             })
         }
         _ => None,
@@ -314,6 +324,9 @@ pub fn run_mc_verification_v3(
         return intermediate_result;
     }
 
+    // Per-rollout transition cap (configurable); a rollout exceeding it fails.
+    let step_cap = budget.step_cap;
+
     let mut action_cache: HashMap<u64, Option<Value>> = HashMap::new();
 
     // Memoized valid, normalized outcome list per (state_key, action_key).
@@ -366,11 +379,11 @@ pub fn run_mc_verification_v3(
                 if !term.success {
                     truncated = true;
                     actual_steps = steps;
-                    steps = MC_ROLLOUT_STEP_CAP;
+                    steps = step_cap;
                 }
                 break;
             }
-            if steps >= MC_ROLLOUT_STEP_CAP {
+            if steps >= step_cap {
                 truncated = true;
                 actual_steps = steps;
                 break;
@@ -420,7 +433,7 @@ pub fn run_mc_verification_v3(
                 None => {
                     truncated = true;
                     actual_steps = steps;
-                    steps = MC_ROLLOUT_STEP_CAP;
+                    steps = step_cap;
                     break;
                 }
             };
@@ -508,8 +521,19 @@ pub fn run_mc_verification_v3(
         intermediate_result["expectedSteps"].clone()
     };
 
+    // Cap-aware success probability: rollouts that hit the step cap (or die on a
+    // broken GA / stuck policy) are failures, excluded from the numerator.
+    let success_rate = if completed_rollouts > 0 {
+        Some((completed_rollouts - truncated_rollout_count) as f64 / completed_rollouts as f64)
+    } else {
+        None
+    };
+
     let mut out = intermediate_result.clone();
     out["expectedSteps"] = expected_steps;
+    if let Some(rate) = success_rate {
+        out["successProb"] = json!(rate);
+    }
     out["approximate"] = json!(final_approximate);
     if let Some(diag) = out["diagnostics"].as_object_mut() {
         let mut gs = json!({
@@ -521,6 +545,8 @@ pub fn run_mc_verification_v3(
             "stdev": if stats.stdev.is_finite() { json!(stats.stdev) } else { json!(null) },
             "intermediateSteps": initial_steps,
             "truncatedRolloutCount": truncated_rollout_count,
+            "successRate": match success_rate { Some(r) => json!(r), None => json!(null) },
+            "stepCap": budget.step_cap,
             "wallTimeMs": wall_time_ms,
             "aborted": aborted,
             "earlyConverged": early_converged,

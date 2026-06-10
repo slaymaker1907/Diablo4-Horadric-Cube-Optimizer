@@ -902,11 +902,6 @@
 						</div>
 					</div>
 
-					<div id="rules-policy-panel" style="display:none;margin-top:10px;padding:8px 10px;border:1px dashed var(--accent);border-radius:6px;">
-						<span style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:4px;">Rules Policy (dev)</span>
-						<div id="rules-policy-body" style="font-size:0.86rem;line-height:1.5;"></div>
-					</div>
-
 					<div class="divider"></div>
 
 					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Apply Last Outcome</label>
@@ -1082,6 +1077,16 @@
 					<label for="mc-timeout-input">Adaptive MC Timeout (seconds)</label>
 					<input id="mc-timeout-input" type="number" min="10" max="600" step="10" value="120" style="width:72px;">
 				</div>
+				<div class="field" style="margin-top:8px;">
+					<label for="mc-max-steps-input">Max MC Steps (per simulation)</label>
+					<input id="mc-max-steps-input" type="number" min="1" max="1000000" step="50" value="1000" style="width:90px;">
+				</div>
+				<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
+					A simulated playthrough that needs more than this many cube/enchant steps is counted as a
+					<em>failure</em>, not a success — so the displayed success probability reflects reaching the
+					target within this budget. The success probability is shown only when a tightening option above
+					is selected (otherwise it reads "–").
+				</div>
 
 				<div class="divider"></div>
 
@@ -1110,14 +1115,18 @@
 
 					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin:10px 0 6px;">Optimizer Engine</label>
 					<div class="field">
-						<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-							<input type="checkbox" id="use-rust-toggle">
-							<span>Use Rust/WASM optimizer</span>
-						</label>
+						<select id="solver-mode-select" style="width:100%;">
+							<option value="rust">Rust / WASM (default)</option>
+							<option value="js">JavaScript</option>
+							<option value="rules">Rules-based (heuristic)</option>
+						</select>
 					</div>
 					<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
-						Runs the optimizer in WebAssembly instead of JavaScript. The WASM module loads on first use.
-						Falls back to JS automatically if the WASM module fails to load.
+						Chooses which engine produces the recommendation. <b>Rust / WASM</b> and <b>JavaScript</b>
+						run the exact optimizer (decomposition + LAO*); Rust loads on first use and falls back to
+						JS if the WASM module fails. <b>Rules-based</b> runs the experimental heuristic rule list
+						(no search) and uses its first-firing rule's action as the headline recommendation — enable
+						"Tighten Steps Estimate" for Monte Carlo step and success statistics.
 					</div>
 
 					<div class="divider"></div>
@@ -1140,20 +1149,6 @@
 						<button id="clear-tracking-btn" class="btn ghost">Clear Tracking Data</button>
 					</div>
 
-					<div class="divider"></div>
-
-					<label style="font-size:0.78rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);display:block;margin-bottom:6px;">Rules-Based Policy</label>
-					<div class="field">
-						<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-							<input type="checkbox" id="rules-policy-toggle">
-							<span>Compare rules-based policy</span>
-						</label>
-					</div>
-					<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
-						When on, each run also evaluates the experimental rules-based solver (a fixed
-						heuristic rule list, no search) and shows its recommendation — with Monte Carlo
-						step statistics when Tighten Steps Estimate is enabled — below the main result.
-					</div>
 				</details>
 
 				<div class="divider"></div>
@@ -1358,18 +1353,26 @@
 		const OVERRIDES_KEY = "d4cubeoptim_overrides_v3";
 		const TIGHTEN_KEY = "d4cubeoptim_tighten_v3";
 		const TIGHTEN_LEVELS = ["none", "light", "heavy", "adaptive"];
+		// Legacy boolean engine key (Rust on/off). Still read once for migration
+		// into SOLVER_MODE_KEY, then superseded by it.
 		const USE_RUST_KEY = "d4cubeoptim_use_rust_v3";
-		// Developer toggle: also evaluate the experimental rules-based policy
-		// on each run (off by default). Kept apart from the main state blob.
-		const RULES_POLICY_KEY = "d4cubeoptim_rules_policy_v3";
+		// Developer engine selector: "rust" | "js" | "rules". Kept apart from the
+		// main state blob. The "rules" mode runs the heuristic rules solver as the
+		// primary engine (not a side-by-side comparison).
+		const SOLVER_MODE_KEY = "d4cubeoptim_solver_mode_v3";
+		const SOLVER_MODES = ["rust", "js", "rules"];
 		const MC_TIMEOUT_KEY = "d4opt-mc-timeout-s";
+		// Per-rollout MC step cap. A simulation exceeding it is a failure, so the
+		// displayed success probability reflects reaching the target within budget.
+		const MC_MAX_STEPS_KEY = "d4opt-mc-max-steps";
+		const MC_MAX_STEPS_DEFAULT = 1000;
 		const DIST_GRAPH_KEY = "d4opt-dist-graph-enabled";
 		const DIST_ROLLOUTS_KEY = "d4opt-dist-rollouts";
 		// Outcome-tracking store. Separate from the main state blob and from
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-06-10-v3-rules-policy";
+		const WORKER_VERSION = "2026-06-10-v3-configurable-mc-steps";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1440,9 +1443,9 @@
 			skillFilter: null, // computed on first sanitize
 			userOverrides: [], // persisted to OVERRIDES_KEY, not main state blob
 			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
-			useRust: true, // persisted to USE_RUST_KEY, not main state blob
-			rulesPolicy: false, // persisted to RULES_POLICY_KEY, not main state blob
+			solverMode: "rust", // "rust" | "js" | "rules"; persisted to SOLVER_MODE_KEY, not main state blob
 			mcTimeoutS: 120, // persisted to MC_TIMEOUT_KEY
+			maxMCSteps: MC_MAX_STEPS_DEFAULT, // persisted to MC_MAX_STEPS_KEY
 			distGraphEnabled: false, // persisted to DIST_GRAPH_KEY
 			distRollouts: 200, // persisted to DIST_ROLLOUTS_KEY
 		};
@@ -1694,6 +1697,14 @@
 				saveMcTimeoutS(appState.mcTimeoutS);
 			});
 
+			// Max MC steps input (within Settings modal → Result Verification).
+			const mcMaxStepsInput = document.getElementById("mc-max-steps-input");
+			mcMaxStepsInput.addEventListener("change", () => {
+				appState.maxMCSteps = Math.max(1, Math.min(1000000, parseInt(mcMaxStepsInput.value, 10) || MC_MAX_STEPS_DEFAULT));
+				mcMaxStepsInput.value = appState.maxMCSteps;
+				saveMaxMCSteps(appState.maxMCSteps);
+			});
+
 			// Simulation Graph settings (within Settings modal).
 			const distGraphToggle = document.getElementById("dist-graph-toggle");
 			const distRolloutsInput = document.getElementById("dist-rollouts-input");
@@ -1717,19 +1728,14 @@
 			document.getElementById("dist-modal-close").addEventListener("click", () => distModal.close());
 			distModal.addEventListener("click", (e) => { if (e.target === distModal) distModal.close(); });
 
-			// Use Rust/WASM toggle (within the Settings modal → Developer).
-			const useRustToggle = document.getElementById("use-rust-toggle");
-			useRustToggle.addEventListener("change", () => {
-				appState.useRust = useRustToggle.checked;
-				saveUseRust(appState.useRust);
-			});
-
-			// Rules-based policy comparison toggle (Settings modal → Developer).
-			const rulesPolicyToggle = document.getElementById("rules-policy-toggle");
-			rulesPolicyToggle.addEventListener("change", () => {
-				appState.rulesPolicy = rulesPolicyToggle.checked;
-				saveRulesPolicy(appState.rulesPolicy);
-				renderRulesPolicyPanel(lastDiagnostics && lastDiagnostics.rulesPolicy);
+			// Optimizer-engine selector (within the Settings modal → Developer):
+			// "rust" | "js" | "rules". The "rules" mode runs the heuristic rules
+			// solver as the primary engine.
+			const solverModeSelect = document.getElementById("solver-mode-select");
+			solverModeSelect.addEventListener("change", () => {
+				const mode = SOLVER_MODES.includes(solverModeSelect.value) ? solverModeSelect.value : "rust";
+				appState.solverMode = mode;
+				saveSolverMode(mode);
 			});
 
 			// ── Outcome tracking controls (Settings modal → Developer) ─────────
@@ -1810,9 +1816,9 @@
 						: "none";
 				tightenStepsSelect.disabled = appState.distGraphEnabled === true;
 				tightenStepsSelect.style.opacity = appState.distGraphEnabled ? "0.45" : "";
-				useRustToggle.checked = appState.useRust === true;
-				rulesPolicyToggle.checked = appState.rulesPolicy === true;
+				solverModeSelect.value = SOLVER_MODES.includes(appState.solverMode) ? appState.solverMode : "rust";
 				mcTimeoutInput.value = appState.mcTimeoutS || 120;
+				mcMaxStepsInput.value = appState.maxMCSteps || MC_MAX_STEPS_DEFAULT;
 				distGraphToggle.checked = appState.distGraphEnabled === true;
 				distRolloutsInput.value = appState.distRollouts || 200;
 				distRolloutsRow.style.display = appState.distGraphEnabled ? "" : "none";
@@ -2090,6 +2096,11 @@
 				}
 			}
 
+			// Configurable per-rollout MC step cap. Always forwarded so both the JS
+			// and Rust MC engines treat a simulation exceeding it as a failure.
+			const maxMCSteps = Math.max(1, Math.min(1000000, parseInt(appState.maxMCSteps, 10) || MC_MAX_STEPS_DEFAULT));
+			tightenStepsOverrides = { ...(tightenStepsOverrides || {}), maxSteps: maxMCSteps };
+
 			const solvePayload = {
 				type: "run",
 				runId: activeRunId,
@@ -2117,8 +2128,9 @@
 				tightenStepsLevel,
 				tightenStepsOverrides,
 				includeRolloutData: appState.distGraphEnabled === true,
-				useRust: appState.useRust === true,
-				rulesPolicy: appState.rulesPolicy === true,
+				solverMode: SOLVER_MODES.includes(appState.solverMode) ? appState.solverMode : "rust",
+				// Derived for backward-compat with the worker's legacy useRust gate.
+				useRust: appState.solverMode === "rust",
 			};
 			lastSolvePayload = solvePayload;
 			worker.postMessage(solvePayload);
@@ -2151,44 +2163,6 @@
 			ensureWorker();
 		}
 
-		// Dev-only panel: secondary rules-based policy comparison (Settings →
-		// Developer → "Compare rules-based policy"). Hidden unless the toggle is
-		// on and the worker attached diagnostics.rulesPolicy to the result.
-		function renderRulesPolicyPanel(diag) {
-			const panel = document.getElementById("rules-policy-panel");
-			const body = document.getElementById("rules-policy-body");
-			if (!panel || !body) return;
-			if (appState.rulesPolicy !== true || !diag) {
-				panel.style.display = "none";
-				body.textContent = "";
-				return;
-			}
-			panel.style.display = "";
-			if (!diag.applied) {
-				body.textContent = `Rules solver unavailable: ${diag.error || "unknown error"}`;
-				return;
-			}
-			const parts = [];
-			parts.push(diag.action
-				? `Action: ${describeAction(diag.action)} (rule: ${diag.ruleName || "?"})`
-				: "No rule produced an action for this state.");
-			if (diag.mc && Number.isFinite(diag.mc.mean)) {
-				const ci = Number.isFinite(diag.mc.ci95halfWidth) ? ` ± ${diag.mc.ci95halfWidth.toFixed(2)}` : "";
-				const success = Number.isFinite(diag.mc.successRate)
-					? `${(diag.mc.successRate * 100).toFixed(1)}%`
-					: "n/a";
-				parts.push(`MC steps: ${diag.mc.mean.toFixed(2)}${ci} over ${diag.mc.rollouts} rollouts — success ${success}, dead ${diag.mc.deadRolloutCount}, capped ${diag.mc.cappedRolloutCount}.`);
-			} else if (diag.action) {
-				parts.push("Enable Tighten Steps Estimate for Monte Carlo step statistics.");
-			}
-			body.innerHTML = "";
-			for (const text of parts) {
-				const div = document.createElement("div");
-				div.textContent = text;
-				body.appendChild(div);
-			}
-		}
-
 		function applyWorkerResult(message, isFinal) {
 			currentBestAction = message.action || null;
 			lastDiagnostics = message.diagnostics || null;
@@ -2200,7 +2174,16 @@
 			els.resultAction.textContent = message.action
 				? describeAction(message.action)
 				: ((message.diagnostics && message.diagnostics.reason) || "No recommendation yet");
-			els.resultSuccess.textContent = percentOrDash(message.successProb);
+			// Success probability is only meaningful as a Monte Carlo estimate that
+			// counts simulations exceeding the Max MC Steps cap as failures. It is
+			// therefore shown only on the final result of a run with a tightening
+			// option selected; otherwise (no tightening, or mid-verification) "-".
+			const tighteningOn = !!(lastSolvePayload
+				&& lastSolvePayload.tightenStepsLevel
+				&& lastSolvePayload.tightenStepsLevel !== "none");
+			els.resultSuccess.textContent = (tighteningOn && isFinal)
+				? percentOrDash(message.successProb)
+				: "-";
 			// Re-enchant plans report expectedSteps = RE_ENCHANT_TIE_BREAK_COST (0.5),
 			// a model artifact for cycle-breaking. Round up to 1 for enchant-only plans
 			// so the display reads "1.00" (one Enchantress visit) instead of "0.50".
@@ -2215,7 +2198,6 @@
 			}
 
 			renderSolverDiagnostics(lastDiagnostics);
-			renderRulesPolicyPanel(lastDiagnostics && lastDiagnostics.rulesPolicy);
 			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderManualControls();
@@ -4295,33 +4277,31 @@
 			} catch { /* storage full — silently ignore */ }
 		}
 
-		function loadUseRust() {
+		// Normalize an arbitrary value to a valid solver mode.
+		function coerceSolverMode(value) {
+			return SOLVER_MODES.includes(value) ? value : "rust";
+		}
+
+		function loadSolverMode() {
 			try {
-				const raw = localStorage.getItem(USE_RUST_KEY);
-				if (!raw) return true;
-				return JSON.parse(raw) === true;
+				const raw = localStorage.getItem(SOLVER_MODE_KEY);
+				if (raw) {
+					return coerceSolverMode(JSON.parse(raw));
+				}
+				// Migration: derive from the legacy useRust boolean if present.
+				const legacy = localStorage.getItem(USE_RUST_KEY);
+				if (legacy != null) {
+					return JSON.parse(legacy) === true ? "rust" : "js";
+				}
+				return "rust";
 			} catch {
-				return true;
+				return "rust";
 			}
 		}
 
-		function saveUseRust(value) {
+		function saveSolverMode(value) {
 			try {
-				localStorage.setItem(USE_RUST_KEY, JSON.stringify(value === true));
-			} catch { /* storage full — silently ignore */ }
-		}
-
-		function loadRulesPolicy() {
-			try {
-				return JSON.parse(localStorage.getItem(RULES_POLICY_KEY)) === true;
-			} catch {
-				return false;
-			}
-		}
-
-		function saveRulesPolicy(value) {
-			try {
-				localStorage.setItem(RULES_POLICY_KEY, JSON.stringify(value === true));
+				localStorage.setItem(SOLVER_MODE_KEY, JSON.stringify(coerceSolverMode(value)));
 			} catch { /* storage full — silently ignore */ }
 		}
 
@@ -4336,6 +4316,19 @@
 
 		function saveMcTimeoutS(v) {
 			try { localStorage.setItem(MC_TIMEOUT_KEY, JSON.stringify(v)); } catch {}
+		}
+
+		function loadMaxMCSteps() {
+			try {
+				const raw = localStorage.getItem(MC_MAX_STEPS_KEY);
+				if (!raw) return MC_MAX_STEPS_DEFAULT;
+				const v = parseInt(JSON.parse(raw), 10);
+				return Number.isFinite(v) && v >= 1 && v <= 1000000 ? v : MC_MAX_STEPS_DEFAULT;
+			} catch { return MC_MAX_STEPS_DEFAULT; }
+		}
+
+		function saveMaxMCSteps(v) {
+			try { localStorage.setItem(MC_MAX_STEPS_KEY, JSON.stringify(v)); } catch {}
 		}
 
 		function loadDistGraphEnabled() {
@@ -4623,18 +4616,18 @@
 				const raw = localStorage.getItem(STORAGE_KEY);
 				const overrides = loadUserOverrides();
 				const tightenStepsLevel = loadTightenStepsLevel();
-				const useRust = loadUseRust();
-				const rulesPolicy = loadRulesPolicy();
+				const solverMode = loadSolverMode();
 				const mcTimeoutS = loadMcTimeoutS();
+				const maxMCSteps = loadMaxMCSteps();
 				const distGraphEnabled = loadDistGraphEnabled();
 				const distRollouts = loadDistRollouts();
 				if (!raw) {
 					const s = JSON.parse(JSON.stringify(defaultState));
 					s.userOverrides = overrides;
 					s.tightenStepsLevel = tightenStepsLevel;
-					s.useRust = useRust;
-					s.rulesPolicy = rulesPolicy;
+					s.solverMode = solverMode;
 					s.mcTimeoutS = mcTimeoutS;
+					s.maxMCSteps = maxMCSteps;
 					s.distGraphEnabled = distGraphEnabled;
 					s.distRollouts = distRollouts;
 					return s;
@@ -4649,9 +4642,9 @@
 					skillFilter: parsed.skillFilter || null,
 					userOverrides: overrides,
 					tightenStepsLevel,
-					useRust,
-					rulesPolicy,
+					solverMode,
 					mcTimeoutS,
+					maxMCSteps,
 					distGraphEnabled,
 					distRollouts,
 				};
@@ -4679,7 +4672,9 @@
 				skillFilter: appState.skillFilter,
 				userOverrides: appState.userOverrides || [],
 				tightenStepsLevel: appState.tightenStepsLevel,
-				useRust: appState.useRust === true,
+				solverMode: coerceSolverMode(appState.solverMode),
+				// Legacy field kept so configs opened in older builds still pick an engine.
+				useRust: appState.solverMode === "rust",
 			};
 		}
 
@@ -4709,12 +4704,16 @@
 			appState.tightenStepsLevel = TIGHTEN_LEVELS.includes(parsed.tightenStepsLevel)
 				? parsed.tightenStepsLevel
 				: "none";
-			appState.useRust = parsed.useRust === true;
+			// Prefer the new solverMode field; fall back to the legacy useRust
+			// boolean for configs produced before the engine selector existed.
+			appState.solverMode = SOLVER_MODES.includes(parsed.solverMode)
+				? parsed.solverMode
+				: (parsed.useRust === false ? "js" : "rust");
 
 			// Persist the separately-keyed aspects (overrides, tighten, engine).
 			saveUserOverrides(appState.userOverrides);
 			saveTightenStepsLevel(appState.tightenStepsLevel);
-			saveUseRust(appState.useRust);
+			saveSolverMode(appState.solverMode);
 
 			// Clear transient solver outputs from the previous problem.
 			treeCache = null;
@@ -4767,6 +4766,9 @@
 			}
 			if (strategy === "v3-residual-lao-star") {
 				return "Residual LAO*";
+			}
+			if (strategy === "v3-rules-policy") {
+				return "Rules-based (heuristic)";
 			}
 			if (strategy === "v3-v2-fallback") {
 				return "Legacy v2 Fallback";

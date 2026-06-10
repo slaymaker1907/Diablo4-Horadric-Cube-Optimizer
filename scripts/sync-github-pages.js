@@ -9,6 +9,7 @@ const DST_ROOT = path.join(os.homedir(), "Documents", "Git", "slaymaker1907.gith
 const FILE_MAP = {
 	"d4cubeoptimv3.html": "index.html",
 	"d4cubeoptimv3-worker.js": "d4cubeoptimv3-worker.js",
+	"d4cubeoptimv3-rules-solver.js": "d4cubeoptimv3-rules-solver.js",
 	"gear-slot-legality.js": "gear-slot-legality.js",
 	"ilp.js": "ilp.js",
 	"config.js": "config.js",

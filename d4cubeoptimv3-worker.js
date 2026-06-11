@@ -108,6 +108,7 @@ const FALLBACK_STRATEGY = "v3-v2-fallback";
 const DECOMPOSITION_STRATEGY = "v3-decomposition-ilp";
 const RESIDUAL_STRATEGY = "v3-residual-lao-star";
 const BUDGET_RESIDUAL_STRATEGY = "v3-residual-budget-dp";
+const RULES_STRATEGY = "v3-rules-policy";
 
 /**
  * Every optimization runs under a hard step budget: exceeding it is failure,
@@ -6404,18 +6405,22 @@ const MC_PROGRESS_EVERY = 20;
 function resolveMCBudgetV3(payload) {
   const level = payload.tightenStepsLevel;
   const overrides = payload.tightenStepsOverrides || {};
+  // Configurable per-rollout step cap (a rollout exceeding it is a failure).
+  const stepCap = (Number.isFinite(overrides.maxSteps) && overrides.maxSteps > 0)
+    ? Math.floor(overrides.maxSteps)
+    : MC_ROLLOUT_STEP_CAP;
   if (level === "light") {
     const target = overrides.lightRollouts != null ? overrides.lightRollouts : MC_LIGHT_ROLLOUTS;
-    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false };
+    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false, stepCap };
   }
   if (level === "heavy") {
     const target = overrides.heavyRollouts != null ? overrides.heavyRollouts : MC_HEAVY_ROLLOUTS;
-    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false };
+    return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false, stepCap };
   }
   if (level === "adaptive") {
     const maxR = overrides.adaptiveMaxRollouts != null ? overrides.adaptiveMaxRollouts : MC_ADAPTIVE_MAX_ROLLOUTS;
     const wall = overrides.adaptiveWallBudgetMs != null ? overrides.adaptiveWallBudgetMs : MC_ADAPTIVE_WALL_BUDGET_MS;
-    return { level, targetRollouts: maxR, maxRollouts: maxR, wallBudgetMs: wall, adaptive: true };
+    return { level, targetRollouts: maxR, maxRollouts: maxR, wallBudgetMs: wall, adaptive: true, stepCap };
   }
   return null;
 }
@@ -6567,6 +6572,11 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
   const maxSteps = normalizeMaxStepsV3(
     options.maxSteps != null ? options.maxSteps : (payload && payload.maxSteps)
   );
+  // Per-rollout transition cap (outer safety net on rollout LENGTH, distinct
+  // from the cube-cost budget above); configurable via the MC budget.
+  const stepCap = (budget && Number.isFinite(budget.stepCap) && budget.stepCap > 0)
+    ? budget.stepCap
+    : MC_ROLLOUT_STEP_CAP;
   const startTime = Date.now();
 
   let aborted = false;
@@ -6593,11 +6603,11 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
           truncated = true;
           dead = true;
           if (includeRolloutData) failureSteps.push(steps); // actual steps before cap
-          steps = MC_ROLLOUT_STEP_CAP;
+          steps = stepCap;
         }
         break;
       }
-      if (transitions >= MC_ROLLOUT_STEP_CAP) {
+      if (transitions >= stepCap) {
         truncated = true;
         capped = true;
         if (includeRolloutData) failureSteps.push(steps);
@@ -6609,7 +6619,7 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
         truncated = true;
         dead = true;
         if (includeRolloutData) failureSteps.push(steps);
-        steps = MC_ROLLOUT_STEP_CAP;
+        steps = stepCap;
         break;
       }
 
@@ -6765,10 +6775,17 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   const completedRollouts = run.stepCounts.length;
   const finalApproximate = !!intermediateResult.approximate || run.aborted ||
     (budget.adaptive && !run.earlyConverged && completedRollouts >= budget.maxRollouts);
+  // Cap-aware success probability: a rollout that hits the step cap (or dies on
+  // a broken GA / stuck policy) is a failure, so it is excluded from the
+  // numerator. This is the probability the UI displays when verification runs.
+  const successRate = completedRollouts > 0
+    ? (completedRollouts - run.truncatedRolloutCount) / completedRollouts
+    : null;
 
   return {
     ...intermediateResult,
     expectedSteps: Number.isFinite(stats.mean) ? stats.mean : intermediateResult.expectedSteps,
+    successProb: completedRollouts > 0 ? successRate : intermediateResult.successProb,
     approximate: finalApproximate,
     diagnostics: {
       ...intermediateResult.diagnostics,
@@ -6789,6 +6806,7 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
           : NaN,
         successMean: run.successMean,
         maxSteps: run.maxSteps,
+        stepCap: budget.stepCap,
         policyTableMisses,
         wallTimeMs: run.wallTimeMs,
         aborted: run.aborted,
@@ -6855,24 +6873,53 @@ function runPolicyMCEvaluationV3(payload, policyFn, options = {}) {
 // MC stats through the same rollout engine — are attached to the result
 // under diagnostics.rulesPolicy. Always JS-side; cheap (no optimizer calls).
 
+// Worker helpers injected into the dependency-free rules solver module.
+function buildRulesSolverHelpersV3() {
+  return {
+    buildEnv,
+    getValidActions,
+    getActionOutcomes,
+    getEligibleByCategory,
+    getCategoryAffixesForState,
+    getCategoryWeightTotal,
+    getEffectiveAffixRollWeight,
+    buildFamilyCountsForPool,
+    isTerminal,
+    stateKey,
+    actionKey,
+  };
+}
+
+// Run the shared MC rollout engine under the rules-based policy and return the
+// stats object (mean/successRate + optional per-rollout step lists when
+// payload.includeRolloutData). Used both for the rules engine's headline scoring
+// and for the Simulation Graph (compute-distribution) in rules mode. Returns
+// null when the rules module is unavailable or no budget/action is configured.
+function runRulesPolicyMCV3(payload, options = {}) {
+  if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
+    return null;
+  }
+  const helpers = buildRulesSolverHelpersV3();
+  const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
+  const pick = rulesSolverModule.selectRulesActionV3(
+    payload.state, payload.target, policyFn.env, helpers
+  );
+  if (!pick) {
+    return null;
+  }
+  return runPolicyMCEvaluationV3(payload, policyFn, {
+    env: policyFn.env,
+    stopView: options.stopView,
+    onProgress: options.onProgress,
+  });
+}
+
 function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
   if (!rulesSolverModule || typeof rulesSolverModule.createRulesPolicyV3 !== "function") {
     return { applied: false, error: "rules solver module unavailable" };
   }
   try {
-    const helpers = {
-      buildEnv,
-      getValidActions,
-      getActionOutcomes,
-      getEligibleByCategory,
-      getCategoryAffixesForState,
-      getCategoryWeightTotal,
-      getEffectiveAffixRollWeight,
-      buildFamilyCountsForPool,
-      isTerminal,
-      stateKey,
-      actionKey,
-    };
+    const helpers = buildRulesSolverHelpersV3();
     const policyFn = rulesSolverModule.createRulesPolicyV3(payload, helpers);
     const pick = rulesSolverModule.selectRulesActionV3(
       payload.state, payload.target, policyFn.env, helpers
@@ -6886,8 +6933,9 @@ function computeRulesPolicyDiagnosticsV3(payload, options = {}) {
         env: policyFn.env,
         stopView: options.stopView,
       });
-      if (mc) {
-        // The per-rollout step lists are bulky and unused by the dev panel.
+      if (mc && !payload.includeRolloutData) {
+        // The per-rollout step lists are bulky; keep them only when the
+        // Simulation Graph needs them (payload.includeRolloutData).
         delete mc.successStepCounts;
         delete mc.failureStepCounts;
       }
@@ -6949,12 +6997,79 @@ function makeRustIlpCallback() {
   };
 }
 
+// ── Rules-based engine (primary) ─────────────────────────────────────────────
+// When the run payload selects solverMode === "rules", the heuristic rules
+// solver IS the optimizer: its first-firing rule's action becomes the headline
+// recommendation. This is distinct from the older dev "comparison" mode — there
+// is no LAO*/decomposition result to compare against; the rules pick stands on
+// its own. Monte Carlo step/success statistics are attached as the headline
+// expectedSteps/successProb when "Tighten Steps Estimate" is enabled (the rules
+// policy has no closed-form value, so MC is the only way to score it).
+function runRulesOptimizationV3(payload, runId, stopView) {
+  // Honor the same feasibility gate as the exact optimizer so an impossible
+  // target reports the standard feasibility-stop result instead of a bare
+  // "no action".
+  const feasibility = analyzeFeasibilityV3(
+    payload.state, payload.target, payload.data, payload.gaConfig
+  );
+  if (!feasibility.ok) {
+    self.postMessage({ type: "done", runId, ...buildFeasibilityFailureResult(feasibility) });
+    return;
+  }
+
+  const diag = computeRulesPolicyDiagnosticsV3(payload, { stopView });
+  const mc = (diag && diag.mc) || null;
+  const reason = diag && diag.applied
+    ? (diag.action
+        ? `Rules-based policy selected action via rule "${diag.ruleName}".`
+        : "Rules-based policy produced no action for this state.")
+    : `Rules solver unavailable: ${(diag && diag.error) || "unknown error"}`;
+
+  const result = {
+    action: (diag && diag.applied && diag.action) ? diag.action : null,
+    successProb: mc && Number.isFinite(mc.successRate) ? mc.successRate : null,
+    expectedSteps: mc && Number.isFinite(mc.mean) ? mc.mean : null,
+    stdDev: mc && Number.isFinite(mc.stdev) ? mc.stdev : null,
+    iterations: mc && Number.isFinite(mc.rollouts) ? mc.rollouts : 0,
+    stoppedByUser: false,
+    diagnostics: {
+      strategy: RULES_STRATEGY,
+      reason,
+      feasibility,
+      decomposition: { status: "NOT_RUN" },
+      ilp: { status: "NOT_RUN" },
+      residual: { status: "NOT_RUN" },
+      ruleName: diag && diag.applied ? diag.ruleName : null,
+      rulesPolicy: diag,
+      // Expose the rules-policy MC under the standard goldStandard key so the
+      // Simulation Graph (which reads diagnostics.goldStandard.successStepCounts)
+      // works in rules mode exactly as it does for the exact engines. The mc
+      // object already carries `applied`, the per-rollout step lists (when
+      // includeRolloutData), and the mean/stdev/CI the graph renders.
+      ...(mc ? { goldStandard: mc } : {}),
+    },
+  };
+
+  self.postMessage({ type: "done", runId, ...result });
+}
+
 function runOptimizationV3(payload, runId) {
   const stopBuffer = payload.stopBuffer || null;
   const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
 
+  // Engine selection: explicit solverMode wins; fall back to the legacy
+  // useRust boolean (true → rust, false → js) for older payloads.
+  const solverMode = payload.solverMode
+    || (payload.useRust ? "rust" : (D4_USE_RUST ? "rust" : "js"));
+
+  // ── Rules-based engine path ────────────────────────────────────────────────
+  if (solverMode === "rules") {
+    runRulesOptimizationV3(payload, runId, stopView);
+    return;
+  }
+
   // ── Rust WASM path ────────────────────────────────────────────────────────
-  if ((D4_USE_RUST || payload.useRust) && rustWorker && typeof rustWorker.optimize_payload === "function") {
+  if (solverMode === "rust" && rustWorker && typeof rustWorker.optimize_payload === "function") {
     const payloadJson = JSON.stringify(payload);
     const ilpCb = makeRustIlpCallback();
     let result;
@@ -7109,7 +7224,10 @@ if (typeof self !== "undefined") {
     if (payload.type === "run") {
       const runId = Number(payload.runId) || 0;
       try {
-        if (payload.useRust && !rustWorker && !_rustWorkerFailed) {
+        const wantsRust = payload.solverMode
+          ? payload.solverMode === "rust"
+          : (payload.useRust === true || D4_USE_RUST);
+        if (wantsRust && !rustWorker && !_rustWorkerFailed) {
           await ensureRustWorker();
         }
         runOptimizationV3(payload, runId);
@@ -7133,29 +7251,38 @@ if (typeof self !== "undefined") {
         const distPayload = {
           ...payload,
           tightenStepsLevel: "light",
-          tightenStepsOverrides: { lightRollouts: Number(payload.distRollouts) || 200 },
+          // Preserve any other overrides (notably maxSteps, the configurable
+          // step cap) while pinning the rollout count for the graph.
+          tightenStepsOverrides: {
+            ...(payload.tightenStepsOverrides || {}),
+            lightRollouts: Number(payload.distRollouts) || 200,
+          },
           includeRolloutData: true,
         };
         const stopBuffer = payload.stopBuffer || null;
         const stopView = stopBuffer ? new Int32Array(stopBuffer) : null;
-        const result = runMCVerificationV3(distPayload, intermediateResult, {
-          stopView,
-          onProgress: (progress) => {
-            self.postMessage({
-              type: "distribution-progress",
-              runId,
-              completed: progress.completed,
-              total: progress.total,
-            });
-          },
-        });
-        self.postMessage({
-          type: "distribution-done",
-          runId,
-          goldStandard: result.diagnostics && result.diagnostics.goldStandard
+        const onProgress = (progress) => {
+          self.postMessage({
+            type: "distribution-progress",
+            runId,
+            completed: progress.completed,
+            total: progress.total,
+          });
+        };
+        const solverMode = distPayload.solverMode
+          || (distPayload.useRust ? "rust" : (D4_USE_RUST ? "rust" : "js"));
+        let goldStandard = null;
+        if (solverMode === "rules") {
+          // Simulate the RULES policy (not the optimizer) so the graph matches
+          // the headline recommendation the user is actually following.
+          goldStandard = runRulesPolicyMCV3(distPayload, { stopView, onProgress });
+        } else {
+          const result = runMCVerificationV3(distPayload, intermediateResult, { stopView, onProgress });
+          goldStandard = result.diagnostics && result.diagnostics.goldStandard
             ? result.diagnostics.goldStandard
-            : null,
-        });
+            : null;
+        }
+        self.postMessage({ type: "distribution-done", runId, goldStandard });
       } catch (error) {
         self.postMessage({
           type: "distribution-done",
@@ -7176,6 +7303,7 @@ if (typeof module !== "undefined" && module.exports) {
     DECOMPOSITION_STRATEGY,
     RESIDUAL_STRATEGY,
     BUDGET_RESIDUAL_STRATEGY,
+    RULES_STRATEGY,
     DEFAULT_MAX_STEPS,
     MAX_STEPS_CAP,
     normalizeMaxStepsV3,

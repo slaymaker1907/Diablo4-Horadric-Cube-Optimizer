@@ -41,6 +41,7 @@ For game mechanics (prism categories, cube operations, GA rules, Enchantress beh
 
 - GA preservation is always-on (`strictMode: true` is always sent from the UI). There is no toggle.
 - Thinking Time widens the residual search budget but is not a wall-clock cutoff for exact routes. `timeMs = 0` uses the largest configured budget.
+- Max Cube Steps (default 200, 1-1000) is a hard limit on cube operations (Enchantress visits are free): exceeding it counts as failure, exactly like breaking a Greater Affix. The optimizer maximizes the chance of finishing within the limit, then minimizes the expected steps used; the result panel shows the success-vs-budget summary for budget-DP runs.
 - The browser worker contract must remain stable enough that [d4cubeoptimv3.html](../d4cubeoptimv3.html) can render results without special-case interpretation.
 
 ## Required User-Facing Warnings

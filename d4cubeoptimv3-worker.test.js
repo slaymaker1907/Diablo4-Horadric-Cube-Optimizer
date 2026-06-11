@@ -585,8 +585,11 @@ test("optimizeScenarioV3 compares wide-gap ILP approximations against residual a
     ilp.solveILP = originalSolveILP;
   }
 
+  // Finite-only routing: wide-gap approximate ILP incumbents are no longer
+  // compared against the LAO* residual — the case re-solves through the
+  // finite-horizon budget DP.
   assertStableDiagnosticsContract(result, {
-    strategy: worker.RESIDUAL_STRATEGY,
+    strategy: worker.BUDGET_RESIDUAL_STRATEGY,
     decompositionStatus: "ESCALATED",
   });
   assert.equal(result.diagnostics.feasibility.ok, true);
@@ -594,6 +597,8 @@ test("optimizeScenarioV3 compares wide-gap ILP approximations against residual a
   assert.ok(result.action);
   assert.equal(typeof result.successProb, "number");
   assert.ok(result.successProb > 0);
+  assert.equal(result.diagnostics.budget.binds, true);
+  assert.equal(result.diagnostics.residual.maxSteps, worker.DEFAULT_MAX_STEPS);
 });
 
 test("F4 fails when required plus protected affixes exceed slot capacity", { timeout: TEST_TIMEOUT_MS }, () => {
@@ -1183,7 +1188,7 @@ test("optimizeScenarioV3 escalates decomposition-ILP infeasible cases to the res
   });
 
   assertStableDiagnosticsContract(result, {
-    strategy: worker.RESIDUAL_STRATEGY,
+    strategy: worker.BUDGET_RESIDUAL_STRATEGY,
     decompositionStatus: "ESCALATED",
     ilpStatus: "NOT_RUN",
     residualStatus: "OPTIMAL",
@@ -1192,7 +1197,10 @@ test("optimizeScenarioV3 escalates decomposition-ILP infeasible cases to the res
   assert.match(result.diagnostics.decomposition.reason, /decomposition ilp found no feasible exact host assignment/i);
   assert.equal(result.action.type, "remove");
   assert.equal(result.action.prism, "Protector");
-  assert.equal(result.successProb, 1);
+  // P(success within the default 200-step budget); the infinite-horizon
+  // value is exactly 1 and the within-budget tail loss is below double
+  // precision on this fixture.
+  assert.ok(result.successProb > 1 - 1e-9);
 });
 
 test("optimizePayloadV3 uses timeMs to widen the residual search budget on hard cases", { timeout: 5000 }, () => {
@@ -1226,23 +1234,28 @@ test("optimizePayloadV3 uses timeMs to widen the residual search budget on hard 
     timeMs: 30000,
   });
 
+  // Finite-only routing: the default state limit still overflows on this
+  // fixture, but the budget DP now solves the PARTIAL graph pessimistically
+  // (unexpanded frontier = failure) instead of returning a null action.
   assertStableDiagnosticsContract(defaultBudget, {
-    strategy: worker.RESIDUAL_STRATEGY,
+    strategy: worker.BUDGET_RESIDUAL_STRATEGY,
     decompositionStatus: "ESCALATED",
     ilpStatus: "NOT_RUN",
-    residualStatus: "STATE_LIMIT",
+    residualStatus: "APPROXIMATE_STATE_LIMIT",
   });
   assertStableDiagnosticsContract(extendedBudget, {
-    strategy: worker.RESIDUAL_STRATEGY,
+    strategy: worker.BUDGET_RESIDUAL_STRATEGY,
     decompositionStatus: "ESCALATED",
     ilpStatus: "NOT_RUN",
     residualStatus: "OPTIMAL",
   });
-  assert.equal(defaultBudget.action, null);
+  assert.equal(defaultBudget.approximate, true);
   assert.equal(extendedBudget.action.type, "remove");
   assert.equal(extendedBudget.action.prism, "Protector");
   assert.ok(extendedBudget.successProb > 0.999);
   assert.ok(Number.isFinite(extendedBudget.expectedSteps));
+  // The pessimistic partial-graph success probability is a sound lower bound.
+  assert.ok(defaultBudget.successProb <= extendedBudget.successProb + 1e-9);
   assert.ok(extendedBudget.diagnostics.residual.stateLimit > defaultBudget.diagnostics.residual.stateLimit);
   assert.ok(extendedBudget.diagnostics.residual.abstractStates > defaultBudget.diagnostics.residual.abstractStates);
 });
@@ -2346,11 +2359,11 @@ function buildLooseResidualFixture() {
   };
 }
 
-test("refinement tightens the residual headline when applied", { timeout: TEST_TIMEOUT_MS }, () => {
-  // Mirror of user's Spiritborn-Amulet scenario in a small fixture.
-  // The recommended action is Remove(Adept) which is deterministic
-  // (Mainstat is the only Adept-category affix on the item). Approach 1
-  // should refine the headline to 1 + V(post-Remove state).
+test("budget-DP results skip refinement and are deterministic across refine options", { timeout: TEST_TIMEOUT_MS }, () => {
+  // The Spiritborn-Amulet-style residual scenario now routes through the
+  // finite-horizon budget DP, which is exact on the abstraction — the
+  // concrete Bellman-backup refinement (a residual-LAO*-only correction)
+  // must not fire, and refine options must not change the answer.
   const { data, byName } = buildLooseResidualFixture();
   const state = buildState([
     { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
@@ -2365,21 +2378,25 @@ test("refinement tightens the residual headline when applied", { timeout: TEST_T
     { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
   ]);
 
-  const refined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
-  const unrefined = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 0 });
+  const withRefine = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 2, refineTopK: 6 });
+  const withoutRefine = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 0 });
 
-  assert.equal(refined.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  assert.equal(unrefined.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  assert.ok(refined.diagnostics.refinement, "Expected diagnostics.refinement when refinement applies");
-  assert.equal(refined.diagnostics.refinement.applied, true);
-  approxEqual(refined.diagnostics.refinement.originalSteps, unrefined.expectedSteps, 1e-6);
-  assert.ok(refined.expectedSteps < unrefined.expectedSteps,
-    `Expected refinement to STRICTLY tighten on this fixture; got refined=${refined.expectedSteps}, unrefined=${unrefined.expectedSteps}`);
-  // The recommended action is Remove(Adept), which is deterministic on this
-  // fixture (Mainstat is the only Adept-category affix on the item). So
-  // refined = 1 + V(post-Remove state) by Bellman.
-  assert.equal(refined.action.type, "remove");
-  assert.equal(refined.action.prism, "Adept");
+  assert.equal(withRefine.diagnostics.strategy, worker.BUDGET_RESIDUAL_STRATEGY);
+  assert.equal(withoutRefine.diagnostics.strategy, worker.BUDGET_RESIDUAL_STRATEGY);
+  assert.equal(withRefine.diagnostics.refinement, undefined);
+  assert.deepEqual(withRefine.action, withoutRefine.action);
+  approxEqual(withRefine.expectedSteps, withoutRefine.expectedSteps, 1e-9);
+  approxEqual(withRefine.successProb, withoutRefine.successProb, 1e-12);
+  // The recommended action is Remove(Adept), deterministic on this fixture
+  // (Mainstat is the only Adept-category affix on the item).
+  assert.equal(withRefine.action.type, "remove");
+  assert.equal(withRefine.action.prism, "Adept");
+  // successByBudget is monotone non-decreasing in the budget.
+  const curve = withRefine.diagnostics.residual.successByBudget;
+  assert.ok(Array.isArray(curve) && curve.length === worker.DEFAULT_MAX_STEPS + 1);
+  for (let i = 1; i < curve.length; i++) {
+    assert.ok(curve[i] >= curve[i - 1] - 1e-12, `curve must be monotone at ${i}`);
+  }
 });
 
 test("refinement is skipped when decomposition wins routing", { timeout: TEST_TIMEOUT_MS }, () => {
@@ -2594,86 +2611,7 @@ test("Case A picks enchant-follow-up formula when no slot is enchanted, falls ba
 
 // ─── Top-K candidate refinement + depth-N Bellman backup ─────────────────────
 
-test("top-K refinement (refineTopK:6) is at least as good as top-1", { timeout: TEST_TIMEOUT_MS * 3 }, () => {
-  // Uses the same looseResidualFixture scenario as the "refinement tightens"
-  // test.  The important property is monotonicity: refining more candidates
-  // can only keep or improve the recommended action's expectedSteps vs K=1.
-  // We also verify that the refinement.topK diagnostic is correctly populated.
-  const { data, byName } = buildLooseResidualFixture();
-  const state = buildState([
-    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
-    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
-    { affixId: byName["Vulnerable Damage"].id, isGA: false, isEnchanted: true },
-    { affixId: byName["Mainstat"].id, isGA: false, isEnchanted: false },
-  ]);
-  const target = buildTarget([
-    { affixId: byName["Movement Speed"].id, requireGA: false },
-    { affixId: byName["Attack Speed"].id, requireGA: false },
-    { affixId: byName["Vulnerable Damage"].id, requireGA: false },
-    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
-  ]);
 
-  const k1 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 1 });
-  const k6 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 6 });
-
-  assert.equal(k1.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  assert.equal(k6.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  // Both should have refinement diagnostics.
-  assert.ok(k1.diagnostics.refinement, "K=1: expected diagnostics.refinement");
-  assert.ok(k6.diagnostics.refinement, "K=6: expected diagnostics.refinement");
-  assert.equal(k1.diagnostics.refinement.applied, true);
-  assert.equal(k6.diagnostics.refinement.applied, true);
-  // K=6 must have refined at least as many candidates as K=1.
-  assert.ok(
-    k6.diagnostics.refinement.topK >= k1.diagnostics.refinement.topK,
-    `K=6 topK (${k6.diagnostics.refinement.topK}) should be ≥ K=1 topK (${k1.diagnostics.refinement.topK})`
-  );
-  // Depth is reported correctly.
-  assert.equal(k1.diagnostics.refinement.depth, 1);
-  assert.equal(k6.diagnostics.refinement.depth, 1);
-  // Monotonicity: refining more candidates never worsens the result.
-  assert.ok(
-    k6.expectedSteps <= k1.expectedSteps + 1e-9,
-    `K=6 (${k6.expectedSteps}) should be ≤ K=1 (${k1.expectedSteps})`
-  );
-});
-
-test("depth-2 refinement produces expected-steps ≤ depth-1 on residual scenario", { timeout: TEST_TIMEOUT_MS * 5 }, () => {
-  // Smoke test for the depth-N recursion: passing refineDepth-1 down to
-  // successor sub-calls means each successor's value is itself refined,
-  // tightening (or equalling) the root Bellman backup vs depth-1.
-  const { data, byName } = buildLooseResidualFixture();
-  const state = buildState([
-    { affixId: byName["Movement Speed"].id, isGA: false, isEnchanted: false },
-    { affixId: byName["Attack Speed"].id, isGA: false, isEnchanted: false },
-    { affixId: byName["Vulnerable Damage"].id, isGA: false, isEnchanted: true },
-    { affixId: byName["Mainstat"].id, isGA: false, isEnchanted: false },
-  ]);
-  const target = buildTarget([
-    { affixId: byName["Movement Speed"].id, requireGA: false },
-    { affixId: byName["Attack Speed"].id, requireGA: false },
-    { affixId: byName["Vulnerable Damage"].id, requireGA: false },
-    { affixId: byName["Elemental Damage (Physical)"].id, requireGA: false },
-  ]);
-
-  const d1 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 1, refineTopK: 1 });
-  const d2 = worker.optimizePayloadV3({ state, target, data, gaConfig: {} }, { refineDepth: 2, refineTopK: 1 });
-
-  assert.equal(d1.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  assert.equal(d2.diagnostics.strategy, worker.RESIDUAL_STRATEGY);
-  assert.ok(d1.diagnostics.refinement, "depth-1: expected diagnostics.refinement");
-  assert.ok(d2.diagnostics.refinement, "depth-2: expected diagnostics.refinement");
-  assert.equal(d1.diagnostics.refinement.applied, true);
-  assert.equal(d2.diagnostics.refinement.applied, true);
-  // The depth field reflects the requested depth.
-  assert.equal(d1.diagnostics.refinement.depth, 1);
-  assert.equal(d2.diagnostics.refinement.depth, 2);
-  // Depth-2 can only be at most as expensive as depth-1 (monotonicity).
-  assert.ok(
-    d2.expectedSteps <= d1.expectedSteps + 1e-9,
-    `depth-2 (${d2.expectedSteps}) should be ≤ depth-1 (${d1.expectedSteps})`
-  );
-});
 
 test("Case A candidate flags looseEstimate when stuck-recovery conditions are met", { timeout: TEST_TIMEOUT_MS }, () => {
   // Bug 2 scenario: an enchanted slot whose affix IS a target (so re-enchant
@@ -2826,4 +2764,225 @@ test("Adept focused-reroll lockout: blocked with Mainstat + skill, allowed other
     { affixId: byName["to Basic Skills"].id },
   ]);
   assert.equal(worker.isAdeptFocusedBlocked(enchantLocked, env, "Adept"), false);
+});
+
+// ─── Finite-horizon budget DP ────────────────────────────────────────────────
+
+function buildBudgetDPFixture() {
+  // Category "Farm" holds the junk J plus the missing target X and two more
+  // junk results, all weight 1: a focused(Farm) reroll is an exact geometric
+  // trial with p = 1/4. The three matched fillers live in other categories.
+  const catalog = buildCatalogFixture({
+    Farm: ["Junk Seed", "Wanted", "Other A", "Other B"],
+    Filler1: ["Maximum Life"],
+    Filler2: ["Movement Speed"],
+    Filler3: ["Maximum Resource"],
+  });
+  return {
+    data: {
+      affixes: catalog.affixes,
+      categories: catalog.categories,
+      targetAffixIds: [],
+      maxAffixSlots: 4,
+    },
+    byName: catalog.byName,
+  };
+}
+
+function buildBudgetDPPayload(byName, data, options = {}) {
+  const state = buildState([
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Movement Speed"].id },
+    { affixId: byName["Maximum Resource"].id },
+    { affixId: byName["Junk Seed"].id },
+  ], { isLegendary: !!options.isLegendary });
+  const target = buildTarget([
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Movement Speed"].id },
+    { affixId: byName["Maximum Resource"].id },
+    { affixId: byName["Wanted"].id },
+  ]);
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+  return {
+    state,
+    target,
+    data,
+    gaConfig: { disableEnchanting: options.disableEnchanting !== false },
+  };
+}
+
+test("budget DP matches the exact truncated-geometric closed form", { timeout: TEST_TIMEOUT_MS }, () => {
+  // With enchanting disabled the unique optimal line is focused(Farm) every
+  // step: success per step p = 1/4 (self-rolls and other junk keep the same
+  // structure). Within budget b: P = 1 - q^b; E[steps | success] is the
+  // truncated-geometric conditional mean.
+  const { data, byName } = buildBudgetDPFixture();
+  const payload = buildBudgetDPPayload(byName, data, { disableEnchanting: true });
+
+  const p = 1 / 4;
+  const q = 1 - p;
+  const result = worker.solveResidualBudgetPayloadV3(payload, { maxSteps: 3 });
+
+  assert.equal(result.diagnostics.strategy, worker.BUDGET_RESIDUAL_STRATEGY);
+  // chaotic(Farm) and focused(Farm) are equivalent 1/4 trials on this fixture
+  // (the filler categories only produce duplicates, so chaotic's add-side
+  // renormalizes onto Farm); the tie-break picks chaotic by action key.
+  assert.ok(["focused", "chaotic"].includes(result.action.type));
+  assert.equal(result.action.prism, "Farm");
+
+  const expectedP = 1 - Math.pow(q, 3);
+  approxEqual(result.successProb, expectedP, 1e-12);
+  let weighted = 0;
+  for (let k = 1; k <= 3; k++) {
+    weighted += k * p * Math.pow(q, k - 1);
+  }
+  approxEqual(result.expectedSteps, weighted / expectedP, 1e-12);
+
+  // The curve matches 1 - q^b at every integer budget.
+  const curve = result.diagnostics.residual.successByBudget;
+  assert.equal(curve.length, 4);
+  for (let b = 0; b <= 3; b++) {
+    approxEqual(curve[b], 1 - Math.pow(q, b), 1e-6); // curve is rounded to 1e-6
+  }
+});
+
+test("budget DP zero-cost layering: fresh enchant finishes within a 0.5-step budget", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildBudgetDPFixture();
+  const payload = buildBudgetDPPayload(byName, data, { disableEnchanting: false });
+
+  const result = worker.solveResidualBudgetPayloadV3(payload, { maxSteps: 0.5 });
+  assert.equal(result.action.type, "enchant");
+  assert.equal(result.action.targetAffixId, byName["Wanted"].id);
+  approxEqual(result.successProb, 1, 1e-12);
+  approxEqual(result.expectedSteps, 0, 1e-12);
+});
+
+test("budget DP policy is budget-dependent: gamble at 1 step, sure line with room", { timeout: TEST_TIMEOUT_MS }, () => {
+  // J (junk) sits alone in Farm together with the missing target X, so
+  // focused(Farm) is a 1/4 trial. X also lives in Pure ({X, C}) where an add
+  // hits at 1/2 — but adds need a free slot, so the sure line opens with a
+  // deterministic remove (2+ steps). With one step left only the immediate
+  // trials have any success mass and focused(Farm) is the best of them; with
+  // room to spare the remove-first line wins.
+  const catalog = buildCatalogFixture({
+    Farm: ["Junk Seed", "Wanted", "Other A", "Other B"],
+    Pure: ["Wanted", "Pure Other"],
+    Filler1: ["Maximum Life", "Filler One"],
+    Filler2: ["Movement Speed", "Filler Two"],
+    Filler3: ["Maximum Resource", "Filler Three"],
+  });
+  const data = {
+    affixes: catalog.affixes,
+    categories: catalog.categories,
+    targetAffixIds: [],
+    maxAffixSlots: 4,
+  };
+  const byName = catalog.byName;
+  // Maximum Life is pre-enchanted: the sticky-slot rule then suppresses every
+  // fresh enchant (including the free same-affix marks the v2 action layer
+  // emits regardless of disableEnchanting), keeping this a pure cube duel.
+  const state = buildState([
+    { affixId: byName["Maximum Life"].id, isEnchanted: true },
+    { affixId: byName["Movement Speed"].id },
+    { affixId: byName["Maximum Resource"].id },
+    { affixId: byName["Junk Seed"].id },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Maximum Life"].id },
+    { affixId: byName["Movement Speed"].id },
+    { affixId: byName["Maximum Resource"].id },
+    { affixId: byName["Wanted"].id },
+  ]);
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+  const payload = { state, target, data, gaConfig: { disableEnchanting: true } };
+
+  const wide = worker.solveResidualBudgetPayloadV3(payload, { maxSteps: 200 });
+  assert.equal(wide.action.type, "remove");
+  assert.ok(wide.successProb > 0.999);
+
+  const tight = worker.solveResidualBudgetPayloadV3(payload, { maxSteps: 1 });
+  assert.equal(tight.action.type, "focused");
+  assert.equal(tight.action.prism, "Farm");
+  approxEqual(tight.successProb, 1 / 4, 1e-9);
+
+  assert.notEqual(wide.action.type, tight.action.type);
+});
+
+test("budget DP success curve is monotone and the policy table replays through MC", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildBudgetDPFixture();
+  const payload = buildBudgetDPPayload(byName, data, { disableEnchanting: true });
+
+  const maxSteps = 10;
+  const result = worker.solveResidualBudgetPayloadV3(payload, { maxSteps });
+  const curve = result.diagnostics.residual.successByBudget;
+  for (let b = 1; b < curve.length; b++) {
+    assert.ok(curve[b] >= curve[b - 1] - 1e-12, `curve must be monotone at ${b}`);
+  }
+
+  // MC differential: replaying the registered policy table must reproduce
+  // the DP success probability within Monte Carlo noise, with zero table
+  // misses and failures classified as budget-exceeded.
+  const rollouts = 400;
+  const mcPayload = {
+    ...payload,
+    maxSteps,
+    tightenStepsLevel: "heavy",
+    tightenStepsOverrides: { heavyRollouts: rollouts },
+  };
+  const verified = worker.runMCVerificationV3(mcPayload, result, {});
+  const gs = verified.diagnostics.goldStandard;
+  assert.equal(gs.applied, true);
+  assert.equal(gs.policyTableMisses, 0);
+  assert.equal(gs.maxSteps, maxSteps);
+  // Failures split between budget-exceeded and dead (the policy table marks
+  // budget-hopeless states as dead, ending those rollouts early); nothing
+  // may hit the transition cap.
+  assert.equal(gs.cappedRolloutCount, 0);
+  const failures = gs.rollouts - Math.round(gs.successRate * gs.rollouts);
+  assert.equal(gs.deadRolloutCount + gs.budgetExceededRolloutCount, failures);
+  const se = Math.sqrt(result.successProb * (1 - result.successProb) / rollouts);
+  assert.ok(
+    Math.abs(gs.successRate - result.successProb) <= 4 * se + 1e-9,
+    `MC success ${gs.successRate} vs DP ${result.successProb} (4*SE=${(4 * se).toFixed(4)})`
+  );
+});
+
+test("budget gate: decomposition keeps non-binding cases, tight budgets route to the DP", { timeout: TEST_TIMEOUT_MS }, () => {
+  const { data, byName } = buildFixture();
+  const state = buildState([
+    { affixId: byName["Armor"].id, isGA: false, isEnchanted: false },
+  ]);
+  const target = buildTarget([
+    { affixId: byName["Armor"].id, requireGA: false },
+    { affixId: byName["Critical Strike Chance"].id, requireGA: false },
+  ]);
+  data.targetAffixIds = target.affixes.map((entry) => entry.affixId);
+
+  const relaxed = worker.optimizePayloadV3({ state, target, data, gaConfig: {} });
+  assert.equal(relaxed.diagnostics.strategy, worker.DECOMPOSITION_STRATEGY);
+  assert.ok(relaxed.diagnostics.budget);
+  assert.equal(relaxed.diagnostics.budget.binds, false);
+  assert.equal(relaxed.diagnostics.budget.maxSteps, worker.DEFAULT_MAX_STEPS);
+
+  const tight = worker.optimizePayloadV3({ state, target, data, gaConfig: {}, maxSteps: 3 });
+  assert.equal(tight.diagnostics.strategy, worker.BUDGET_RESIDUAL_STRATEGY);
+  assert.equal(tight.diagnostics.budget.binds, true);
+  assert.equal(tight.diagnostics.residual.maxSteps, 3);
+  // Add anything (cost 1), then fresh-enchant the landed slot to the missing
+  // target (cost 0): success is guaranteed in exactly one cube step, well
+  // inside the 3-step budget.
+  approxEqual(tight.successProb, 1, 1e-9);
+  approxEqual(tight.expectedSteps, 1, 1e-9);
+});
+
+test("normalizeMaxStepsV3 defaults, clamps, and keeps the half-step grid", () => {
+  assert.equal(worker.normalizeMaxStepsV3(undefined), worker.DEFAULT_MAX_STEPS);
+  assert.equal(worker.normalizeMaxStepsV3(null), worker.DEFAULT_MAX_STEPS);
+  assert.equal(worker.normalizeMaxStepsV3(0), worker.DEFAULT_MAX_STEPS);
+  assert.equal(worker.normalizeMaxStepsV3(-5), worker.DEFAULT_MAX_STEPS);
+  assert.equal(worker.normalizeMaxStepsV3("nope"), worker.DEFAULT_MAX_STEPS);
+  assert.equal(worker.normalizeMaxStepsV3(0.2), 0.5);
+  assert.equal(worker.normalizeMaxStepsV3(12.4), 12.5);
+  assert.equal(worker.normalizeMaxStepsV3(200), 200);
+  assert.equal(worker.normalizeMaxStepsV3(99999), worker.MAX_STEPS_CAP);
 });

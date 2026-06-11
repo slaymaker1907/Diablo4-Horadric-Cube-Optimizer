@@ -811,7 +811,7 @@
 		<div class="title-wrap">
 			<h1>Horadric Cube Affix Optimizer v3</h1>
 			<div class="subtitle">
-				Hybrid exact solver with feasibility checks, decomposition-plus-ILP routing, and residual LAO* escalation.
+				Hybrid exact solver with feasibility checks, decomposition-plus-ILP routing, and finite-horizon budget-DP escalation.
 			</div>
 		</div>
 
@@ -822,6 +822,11 @@
 					<input id="thinking-seconds" type="number" min="0" step="1" value="0">
 				</div>
 				<button id="thinking-info-btn" class="btn ghost" title="About Thinking Time">ℹ</button>
+				<div class="field" style="width: 170px;">
+					<label for="max-steps">Max Cube Steps</label>
+					<input id="max-steps" type="number" min="1" max="1000" step="1" value="200">
+				</div>
+				<button id="max-steps-info-btn" class="btn ghost" title="About Max Cube Steps">ℹ</button>
 				<button id="run-btn" class="btn">Optimize</button>
 				<button id="stop-btn" class="btn stop" disabled>Stop</button>
 				<button id="reset-btn" class="btn ghost">Reset</button>
@@ -832,6 +837,11 @@
 				<div class="status" id="run-status"></div>
 				<div id="thinking-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
 					Higher values allow larger residual searches. 0 = largest residual budget.
+				</div>
+				<div id="max-steps-info-box" style="display:none;flex-basis:100%;font-size:0.84rem;color:var(--muted);margin-top:4px;">
+					Hard limit on cube operations (Enchantress visits are free): exceeding it counts as
+					failure, exactly like breaking a Greater Affix. The optimizer maximizes the chance of
+					finishing within this many steps, then minimizes the expected steps used.
 				</div>
 			</div>
 		</div>
@@ -892,7 +902,7 @@
 							<span class="value" id="result-action">-</span>
 						</div>
 						<div class="metric">
-							<span class="label">P(Success, GA Preserved)</span>
+							<span class="label" id="result-success-label">P(Success, GA Preserved)</span>
 							<span class="value" id="result-success">-</span>
 						</div>
 						<div class="metric">
@@ -901,6 +911,10 @@
 							<span class="note" style="font-size:0.75em;color:#aaa;display:block">Counts steps until success or GA break</span>
 						</div>
 					</div>
+
+
+					<div id="budget-curve-line" style="display:none;margin-top:8px;font-size:0.86rem;color:var(--muted);line-height:1.5;"></div>
+
 
 					<div class="divider"></div>
 
@@ -1372,7 +1386,7 @@
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-06-10-v3-rules-sim-graph";
+		const WORKER_VERSION = "2026-06-11-v3-budget-dp";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1431,6 +1445,7 @@
 			},
 			settings: {
 				thinkingSeconds: 0,
+				maxSteps: 200, // hard cube-step budget; exceeding it = failure
 				allowEnchant: false,
 			},
 			lastAction: {
@@ -1474,6 +1489,7 @@
 			resetBtn: document.getElementById("reset-btn"),
 			runStatus: document.getElementById("run-status"),
 			thinkingSeconds: document.getElementById("thinking-seconds"),
+			maxSteps: document.getElementById("max-steps"),
 
 			gearSlot: document.getElementById("gear-slot"),
 			characterClass: document.getElementById("character-class"),
@@ -1583,6 +1599,10 @@
 			els.resetSourceBtn.addEventListener("click", resetSource);
 			document.getElementById("thinking-info-btn").addEventListener("click", () => {
 				const box = document.getElementById("thinking-info-box");
+				box.style.display = box.style.display === "none" ? "block" : "none";
+			});
+			document.getElementById("max-steps-info-btn").addEventListener("click", () => {
+				const box = document.getElementById("max-steps-info-box");
 				box.style.display = box.style.display === "none" ? "block" : "none";
 			});
 
@@ -1885,6 +1905,14 @@
 				renderStatus("Idle", "");
 			});
 
+			els.maxSteps.addEventListener("change", () => {
+				const steps = clampInt(els.maxSteps.value, 1, 1000, 200);
+				appState.settings.maxSteps = steps;
+				els.maxSteps.value = steps;
+				saveState();
+				renderStatus("Idle", "");
+			});
+
 			els.gearSlot.addEventListener("change", () => {
 				const snapshot = snapshotAffixLegality();
 				const skillSnapshot = snapshotSkillFilterLegality();
@@ -2081,6 +2109,7 @@
 
 			const thinkingSeconds = clampInt(appState.settings.thinkingSeconds, 0, 86400, 0);
 			const timeMs = thinkingSeconds === 0 ? 0 : thinkingSeconds * 1000;
+			const maxSteps = clampInt(appState.settings.maxSteps, 1, 1000, 200);
 			const currentGA = runState.affixes.filter((entry) => entry.isGA).map((entry) => entry.affixId);
 
 			// Build base tighten overrides (adaptive timeout always wired)
@@ -2123,6 +2152,7 @@
 					disableEnchanting: !appState.settings.allowEnchant,
 				},
 				timeMs,
+				maxSteps,
 				stopBuffer,
 				tree: treeCache,
 				tightenStepsLevel,
@@ -2163,6 +2193,46 @@
 			ensureWorker();
 		}
 
+		// Step-budget rendering: relabel the success metric with the active hard
+		// limit and summarize the success-vs-budget curve the budget DP computes
+		// as a byproduct (smallest budget reaching 50% / 90% / 99% success).
+		function renderBudgetLine(diagnostics) {
+			const line = document.getElementById("budget-curve-line");
+			const label = document.getElementById("result-success-label");
+			if (!line || !label) return;
+			const budget = diagnostics && diagnostics.budget;
+			if (!budget || !Number.isFinite(budget.maxSteps)) {
+				line.style.display = "none";
+				line.textContent = "";
+				label.textContent = "P(Success, GA Preserved)";
+				return;
+			}
+			label.textContent = `P(Success ≤ ${budget.maxSteps} steps, GA Preserved)`;
+			const parts = [];
+			if (budget.binds === false) {
+				parts.push(`Step limit ${budget.maxSteps}: not binding — expected steps are far below it.`);
+			}
+			const residual = diagnostics.residual;
+			const curve = residual && Array.isArray(residual.successByBudget) ? residual.successByBudget : null;
+			if (curve && curve.length > 1) {
+				const summaries = [0.5, 0.9, 0.99].map((threshold) => {
+					const idx = curve.findIndex((p) => p >= threshold);
+					return idx >= 0
+						? `≥${Math.round(threshold * 100)}% by ${idx} steps`
+						: `≥${Math.round(threshold * 100)}% not reached within ${curve.length - 1}`;
+				});
+				parts.push(`Success vs budget: ${summaries.join(", ")}.`);
+			}
+			if (parts.length === 0) {
+				line.style.display = "none";
+				line.textContent = "";
+				return;
+			}
+			line.style.display = "";
+			line.textContent = parts.join(" ");
+		}
+
+
 		function applyWorkerResult(message, isFinal) {
 			currentBestAction = message.action || null;
 			// Headline result for the Simulation Graph (compute-distribution
@@ -2201,6 +2271,7 @@
 			}
 
 			renderSolverDiagnostics(lastDiagnostics);
+			renderBudgetLine(lastDiagnostics);
 			renderGARisk(lastOneStepRisk);
 			renderCandidates(lastDiagnostics);
 			renderManualControls();
@@ -2942,6 +3013,7 @@
 			renderCandidates(lastDiagnostics);
 			renderHistory();
 			els.thinkingSeconds.value = appState.settings.thinkingSeconds;
+			els.maxSteps.value = clampInt(appState.settings.maxSteps, 1, 1000, 200);
 			renderDistGraphBtn();
 		}
 

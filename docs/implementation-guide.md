@@ -9,7 +9,8 @@
 
 ## Current v3 Routing Model
 
-- Preserve the current route ordering in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js): feasibility checks, closed-form cases, decomposition plus ILP, then residual LAO*.
+- Preserve the current route ordering in [d4cubeoptimv3-worker.js](../d4cubeoptimv3-worker.js): feasibility checks, closed-form cases, decomposition plus ILP, then the finite-horizon residual budget DP.
+- Every run carries a hard step budget (`payload.maxSteps`, default 200): exceeding it is failure, like a GA break. Exact decomposition results are kept only when `expectedSteps <= maxSteps/4` (the deadline provably barely binds — `diagnostics.budget.binds = false`); everything else routes to `solveResidualBudgetPayloadV3` (strategy `v3-residual-budget-dp`). The residual LAO* and the concrete Bellman-backup refinement remain exported and unit-tested but are no longer routed in production.
 - Decomposition `INFEASIBLE` is not a terminal user result in v3. When the decomposition assignment model cannot produce a feasible exact host assignment, the worker escalates to the residual solver.
 - The public diagnostics contract is part of the product interface. Keep `diagnostics.feasibility`, `diagnostics.decomposition`, `diagnostics.ilp`, and `diagnostics.residual` present with explicit statuses.
 

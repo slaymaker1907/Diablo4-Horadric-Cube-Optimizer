@@ -107,7 +107,16 @@ const FEASIBILITY_STRATEGY = "v3-feasibility";
 const FALLBACK_STRATEGY = "v3-v2-fallback";
 const DECOMPOSITION_STRATEGY = "v3-decomposition-ilp";
 const RESIDUAL_STRATEGY = "v3-residual-lao-star";
+const BUDGET_RESIDUAL_STRATEGY = "v3-residual-budget-dp";
 const RULES_STRATEGY = "v3-rules-policy";
+
+/**
+ * Every optimization runs under a hard step budget: exceeding it is failure,
+ * exactly like breaking a protected GA. There is no unlimited mode — missing
+ * or invalid payload.maxSteps falls back to DEFAULT_MAX_STEPS.
+ */
+const DEFAULT_MAX_STEPS = 200;
+const MAX_STEPS_CAP = 1000;
 const CLOSED_FORM_CASE_IDS = Object.freeze({
   A: "A",
   B: "B",
@@ -2830,6 +2839,38 @@ const APPROX_COMPARE_SUCCESS_EPSILON = 1e-9;
 const APPROX_COMPARE_STEPS_EPSILON = 1e-9;
 const ILP_APPROX_BOUND_GAP_THRESHOLD = 0.25;
 
+/**
+ * Fraction of the step budget below which the (infinite-horizon) closed-form
+ * / decomposition result is accepted as-is: at expectedSteps <= maxSteps/4
+ * the probability of exceeding the budget is negligible, so the deadline
+ * provably barely binds and the fast exact layer keeps its answer.
+ */
+const BUDGET_GATE_FRACTION = 0.25;
+
+/**
+ * Success-probability tie tolerance for the budget DP's lexicographic
+ * objective. Finite horizons produce REAL (non-epsilon) success differences
+ * between near-equivalent lines — e.g. ~1e-7 between two junk removals —
+ * and maximizing P strictly would trade whole expected steps for success
+ * mass far below anything measurable. Differences within this tolerance
+ * are treated as ties and resolved by expected steps instead.
+ */
+const BUDGET_DP_SUCCESS_TIE_EPSILON = 1e-6;
+
+/**
+ * Normalize a payload step budget. Budgets are measured in cube-step cost
+ * units (actionCost: cube ops 1, fresh enchant 0, re-enchant 0.5), so values
+ * are rounded to the 0.5 grid; MC-verification sub-calls legitimately pass
+ * fractional remainders.
+ */
+function normalizeMaxStepsV3(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) {
+    return DEFAULT_MAX_STEPS;
+  }
+  return Math.min(MAX_STEPS_CAP, Math.max(0.5, Math.round(num * 2) / 2));
+}
+
 function normalizeIdList(list) {
   return Array.from(new Set(
     (Array.isArray(list) ? list : [])
@@ -4193,6 +4234,12 @@ function buildResidualDiagnosticsV3(details = {}) {
     phase1PolicyStates: Number.isFinite(details.phase1PolicyStates) ? details.phase1PolicyStates : 0,
     phase2PolicyStates: Number.isFinite(details.phase2PolicyStates) ? details.phase2PolicyStates : 0,
     heuristic: typeof details.heuristic === "string" ? details.heuristic : "",
+    // Budget-DP fields (present only on the v3-residual-budget-dp strategy).
+    ...(Number.isFinite(details.maxSteps) ? { maxSteps: details.maxSteps } : {}),
+    ...(Number.isFinite(details.layers) ? { layers: details.layers } : {}),
+    ...(Number.isFinite(details.budgetPrunedStates) ? { budgetPrunedStates: details.budgetPrunedStates } : {}),
+    ...(Number.isFinite(details.frontierStates) ? { frontierStates: details.frontierStates } : {}),
+    ...(Array.isArray(details.successByBudget) ? { successByBudget: details.successByBudget } : {}),
   };
 }
 
@@ -4212,6 +4259,7 @@ function buildWorkerDiagnosticsV3(summaryDiagnostics = {}, options = {}) {
     decomposition: buildDecompositionDiagnosticsV3(options.decomposition),
     ilp: buildILPDiagnosticsV3(options.ilp),
     residual: buildResidualDiagnosticsV3(options.residual),
+    ...(options.budget ? { budget: options.budget } : {}),
   };
 }
 
@@ -4443,6 +4491,34 @@ function getEffectiveResidualEnvOverridesV3(payload, options = {}) {
   };
 }
 
+/**
+ * Admissible lower bound on remaining CUBE cost from a state: each cube
+ * action adds at most one missing target instance, and one fresh enchant
+ * (cost 0) can supply one target for free while the sticky slot is unused.
+ * Always <= the true remaining cost, so budget pruning with it is sound.
+ */
+function residualBudgetHeuristicV3(state, env) {
+  const targetCounts = (env && env.targetCounts) || {};
+  const present = Object.create(null);
+  let hasEnchanted = false;
+  for (const entry of (state && Array.isArray(state.affixes)) ? state.affixes : []) {
+    if (!entry || !entry.affixId) {
+      continue;
+    }
+    present[entry.affixId] = (present[entry.affixId] || 0) + 1;
+    if (entry.isEnchanted) {
+      hasEnchanted = true;
+    }
+  }
+  let missing = 0;
+  for (const [affixId, required] of Object.entries(targetCounts)) {
+    missing += Math.max(0, required - (present[affixId] || 0));
+  }
+  return Math.max(0, missing - (hasEnchanted ? 0 : 1));
+}
+
+const BUDGET_PRUNE_DEAD_REASON = "The step budget cannot be met from this state.";
+
 function buildResidualReachableGraphV3(rootState, target, data, gaConfig, options = {}) {
   if (typeof attachUnsatisfactoryToState !== "function") {
     return {
@@ -4469,19 +4545,26 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
   const keyToIndex = new Map([[rootKey, 0]]);
   const nodes = [createResidualGraphNodeV3(root, rootKey, target, env)];
   let deadStates = nodes[0].deadReason ? 1 : 0;
+  let budgetPrunedStates = 0;
 
-  for (let queueIndex = 0; queueIndex < nodes.length; queueIndex += 1) {
-    if (shouldStop(stopView)) {
-      throw new Error("Optimization stopped.");
-    }
+  // Budget pruning (active only when options.budgetPrune.maxSteps is set):
+  // nodes are settled in exact min-cost-from-root order (bucket queue over
+  // scaled 0/1/2 edge costs), and a node provably unable to finish within
+  // the budget (minCost + heuristic > maxSteps) is marked dead instead of
+  // expanded. Without the option the historical FIFO order is preserved.
+  const budgetPrune = options.budgetPrune && Number.isFinite(options.budgetPrune.maxSteps)
+    ? { maxScaled: Math.round(options.budgetPrune.maxSteps * 2) }
+    : null;
 
-    const node = nodes[queueIndex];
-    if (node.success || node.deadReason) {
-      continue;
-    }
-
+  let overflow = false;
+  // Expand one node: build its actionEntries, creating child nodes on
+  // discovery. `onChild(childIndex, scaledEdgeCost)` is invoked for every
+  // transition (new or existing child). Returns false when the state limit
+  // is hit (the shared overflow result is produced by the caller).
+  const expandNode = (node, onChild) => {
     const actionEntries = [];
     for (const action of node.actions) {
+      const scaledEdgeCost = Math.round(actionCost(action, node.state) * 2);
       const merged = new Map();
 
       for (const outcome of getActionOutcomesV2(node.state, action, env)) {
@@ -4506,16 +4589,9 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
 
         if (childIndex === undefined) {
           if (nodes.length >= limit) {
-            return {
-              ok: false,
-              limit,
-              rootKey,
-              nodes,
-              deadStates,
-              context,
-              env,
-              reason: `Residual abstract graph exceeded limit (${limit} states).`,
-            };
+            overflow = true;
+            node.actionEntries = [];
+            return false;
           }
 
           childIndex = nodes.length;
@@ -4525,6 +4601,10 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
             deadStates += 1;
           }
           nodes.push(childNode);
+        }
+
+        if (onChild) {
+          onChild(childIndex, scaledEdgeCost);
         }
 
         transitions.push({
@@ -4541,6 +4621,98 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
     }
 
     node.actionEntries = actionEntries;
+    return true;
+  };
+
+  if (!budgetPrune) {
+    for (let queueIndex = 0; queueIndex < nodes.length; queueIndex += 1) {
+      if (shouldStop(stopView)) {
+        throw new Error("Optimization stopped.");
+      }
+
+      const node = nodes[queueIndex];
+      if (node.success || node.deadReason) {
+        continue;
+      }
+      if (!expandNode(node, null)) {
+        break;
+      }
+    }
+  } else {
+    const minCost = [0];
+    const settled = [];
+    const buckets = [[0]];
+
+    const onChild = (childIndex, scaledEdgeCost, settleCost) => {
+      const candidate = settleCost + scaledEdgeCost;
+      if (minCost[childIndex] === undefined || candidate < minCost[childIndex]) {
+        minCost[childIndex] = candidate;
+        if (!settled[childIndex] && candidate <= budgetPrune.maxScaled) {
+          while (buckets.length <= candidate) {
+            buckets.push(null);
+          }
+          (buckets[candidate] || (buckets[candidate] = [])).push(childIndex);
+        }
+      }
+    };
+
+    for (let cost = 0; cost < buckets.length && !overflow; cost += 1) {
+      const bucket = buckets[cost];
+      if (!bucket) {
+        continue;
+      }
+      // The bucket may grow while being processed (zero-cost enchant edges).
+      for (let bucketIndex = 0; bucketIndex < bucket.length && !overflow; bucketIndex += 1) {
+        if (shouldStop(stopView)) {
+          throw new Error("Optimization stopped.");
+        }
+        const index = bucket[bucketIndex];
+        if (settled[index] || minCost[index] !== cost) {
+          continue; // stale entry — settled earlier or relaxed cheaper
+        }
+        settled[index] = true;
+        const node = nodes[index];
+        if (node.success || node.deadReason) {
+          continue;
+        }
+        if (cost + residualBudgetHeuristicV3(node.state, env) * 2 > budgetPrune.maxScaled) {
+          node.deadReason = BUDGET_PRUNE_DEAD_REASON;
+          node.actions = [];
+          node.actionEntries = [];
+          deadStates += 1;
+          budgetPrunedStates += 1;
+          continue;
+        }
+        expandNode(node, (childIndex, scaledEdgeCost) => onChild(childIndex, scaledEdgeCost, cost));
+      }
+    }
+
+    if (!overflow) {
+      // Anything never settled is unreachable within the budget: dead.
+      for (const [index, node] of nodes.entries()) {
+        if (!settled[index] && !node.success && !node.deadReason) {
+          node.deadReason = BUDGET_PRUNE_DEAD_REASON;
+          node.actions = [];
+          node.actionEntries = [];
+          deadStates += 1;
+          budgetPrunedStates += 1;
+        }
+      }
+    }
+  }
+
+  if (overflow) {
+    return {
+      ok: false,
+      limit,
+      rootKey,
+      nodes,
+      deadStates,
+      budgetPrunedStates,
+      context,
+      env,
+      reason: `Residual abstract graph exceeded limit (${limit} states).`,
+    };
   }
 
   return {
@@ -4549,6 +4721,7 @@ function buildResidualReachableGraphV3(rootState, target, data, gaConfig, option
     rootIndex: 0,
     nodes,
     deadStates,
+    budgetPrunedStates,
     context,
     env,
   };
@@ -4967,6 +5140,462 @@ function solveResidualLAOStarV3(graph, target, data, gaConfig, options = {}) {
     status: "OPTIMAL",
     phase1,
     phase2,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Residual budget-DP (finite horizon).
+//
+// Every run carries a hard step budget; exceeding it is failure, like a GA
+// break. The optimal policy is budget-dependent (non-stationary), so instead
+// of LAO*-style value iteration we run exact backward induction over the
+// abstract graph, layered by remaining budget in 0.5-step granularity
+// (actionCost: cube 1, fresh enchant 0, re-enchant 0.5; layer index =
+// 2 × remaining budget).
+//
+// Lexicographic objective per (node, remaining): maximize success
+// probability P within the remaining budget; among epsilon-equal-P actions
+// minimize the success-weighted cost W (E[steps | success] = W / P).
+//
+// Zero-cost (fresh enchant) edges stay within a layer, but the sticky-slot
+// rule guarantees they always lead to a node whose state has an enchanted
+// slot — and such nodes have no zero-cost actions. Each layer is therefore
+// evaluated in two passes (enchanted-slot nodes first), which makes the
+// same-layer reads exact without any inner fixpoint.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function solveResidualBudgetDPV3(graph, options = {}) {
+  const maxSteps = normalizeMaxStepsV3(options.maxSteps);
+  const layers = Math.round(maxSteps * 2);
+  const nodes = graph.nodes;
+  const count = nodes.length;
+  const stopView = options.stopView || null;
+
+  const enchantedSlotFlags = new Uint8Array(count);
+  const frontierFlags = new Uint8Array(count);
+  const entryKeys = new Array(count);
+  let frontierStates = 0;
+  for (let i = 0; i < count; i += 1) {
+    const node = nodes[i];
+    const affixes = (node.state && node.state.affixes) || [];
+    enchantedSlotFlags[i] = affixes.some((entry) => entry && entry.isEnchanted) ? 1 : 0;
+    // Frontier: discovered but never expanded (partial graph after a state-
+    // limit overflow). Treated pessimistically as failure — the resulting
+    // policy is a sound lower bound on success probability.
+    if (!node.success && !node.deadReason
+        && node.actions.length > 0 && node.actionEntries.length === 0) {
+      frontierFlags[i] = 1;
+      frontierStates += 1;
+    }
+    entryKeys[i] = node.actionEntries.map((entry) => actionKey(entry.action));
+  }
+
+  // Rolling value windows: a backup at layer l reads layers l (fresh
+  // enchant), l-1 (re-enchant), and l-2 (cube op) only.
+  const pRing = [new Float64Array(count), new Float64Array(count), new Float64Array(count)];
+  const wRing = [new Float64Array(count), new Float64Array(count), new Float64Array(count)];
+  const policyLayers = new Array(layers + 1);
+  const rootSuccessByBudget = new Float64Array(layers + 1);
+  const rootIndex = Number.isFinite(graph.rootIndex) ? graph.rootIndex : 0;
+
+  const backupNode = (index, layer, pCur, wCur, policy) => {
+    const node = nodes[index];
+    if (node.success) {
+      pCur[index] = 1;
+      wCur[index] = 0;
+      policy[index] = -1;
+      return;
+    }
+    if (node.deadReason || frontierFlags[index]) {
+      pCur[index] = 0;
+      wCur[index] = 0;
+      policy[index] = -1;
+      return;
+    }
+
+    let bestP = -1;
+    let bestW = Infinity;
+    let bestEntry = -1;
+    let bestKey = "";
+    const keys = entryKeys[index];
+
+    for (let entryIndex = 0; entryIndex < node.actionEntries.length; entryIndex += 1) {
+      const entry = node.actionEntries[entryIndex];
+      const scaledCost = Math.round(entry.cubeCost * 2);
+      if (scaledCost > layer) {
+        continue; // unaffordable — taking it would exceed the budget
+      }
+      const pSrc = scaledCost === 0 ? pCur : pRing[(layer - scaledCost) % 3];
+      const wSrc = scaledCost === 0 ? wCur : wRing[(layer - scaledCost) % 3];
+
+      let actionP = 0;
+      let actionW = 0;
+      let valid = true;
+      for (const transition of entry.transitions) {
+        const child = transition.childIndex;
+        if (scaledCost === 0 && !enchantedSlotFlags[child]) {
+          // Defensive: a zero-cost edge must land on an enchanted-slot node
+          // (sticky rule); anything else would read an unevaluated value.
+          valid = false;
+          break;
+        }
+        actionP += transition.probability * pSrc[child];
+        actionW += transition.probability * wSrc[child];
+      }
+      if (!valid) {
+        continue;
+      }
+      actionW += entry.cubeCost * actionP;
+
+      const key = keys[entryIndex];
+      if (actionP > bestP + BUDGET_DP_SUCCESS_TIE_EPSILON) {
+        bestP = actionP; bestW = actionW; bestEntry = entryIndex; bestKey = key;
+      } else if (Math.abs(actionP - bestP) <= BUDGET_DP_SUCCESS_TIE_EPSILON) {
+        if (actionW < bestW - APPROX_COMPARE_STEPS_EPSILON
+            || (Math.abs(actionW - bestW) <= APPROX_COMPARE_STEPS_EPSILON && key < bestKey)) {
+          bestP = Math.max(bestP, actionP); bestW = actionW; bestEntry = entryIndex; bestKey = key;
+        }
+      }
+    }
+
+    if (bestEntry < 0) {
+      pCur[index] = 0;
+      wCur[index] = 0;
+      policy[index] = -1;
+      return;
+    }
+    pCur[index] = bestP;
+    wCur[index] = bestW;
+    policy[index] = bestEntry;
+  };
+
+  for (let layer = 0; layer <= layers; layer += 1) {
+    if (shouldStop(stopView)) {
+      throw new Error("Optimization stopped.");
+    }
+    const pCur = pRing[layer % 3];
+    const wCur = wRing[layer % 3];
+    const policy = new Int16Array(count);
+    // Pass A: enchanted-slot nodes (no zero-cost actions of their own).
+    for (let index = 0; index < count; index += 1) {
+      if (enchantedSlotFlags[index]) {
+        backupNode(index, layer, pCur, wCur, policy);
+      }
+    }
+    // Pass B: the rest — their fresh-enchant edges read pass-A values.
+    for (let index = 0; index < count; index += 1) {
+      if (!enchantedSlotFlags[index]) {
+        backupNode(index, layer, pCur, wCur, policy);
+      }
+    }
+    policyLayers[layer] = policy;
+    rootSuccessByBudget[layer] = pCur[rootIndex];
+  }
+
+  // Per-action stats for the root at the full budget (for the UI candidates).
+  const pTop = pRing[layers % 3];
+  const wTop = wRing[layers % 3];
+  const rootNode = nodes[rootIndex];
+  const rootCandidates = [];
+  for (let entryIndex = 0; entryIndex < rootNode.actionEntries.length; entryIndex += 1) {
+    const entry = rootNode.actionEntries[entryIndex];
+    const scaledCost = Math.round(entry.cubeCost * 2);
+    if (scaledCost > layers) {
+      continue;
+    }
+    const pSrc = scaledCost === 0 ? pTop : pRing[(layers - scaledCost) % 3];
+    const wSrc = scaledCost === 0 ? wTop : wRing[(layers - scaledCost) % 3];
+    let actionP = 0;
+    let actionW = 0;
+    let valid = true;
+    for (const transition of entry.transitions) {
+      if (scaledCost === 0 && !enchantedSlotFlags[transition.childIndex]) {
+        valid = false;
+        break;
+      }
+      actionP += transition.probability * pSrc[transition.childIndex];
+      actionW += transition.probability * wSrc[transition.childIndex];
+    }
+    if (!valid) {
+      continue;
+    }
+    actionW += entry.cubeCost * actionP;
+    rootCandidates.push({ entryIndex, successProb: actionP, weightedCost: actionW });
+  }
+
+  return {
+    status: "OPTIMAL",
+    maxSteps,
+    layers,
+    policyLayers,
+    rootSuccessByBudget,
+    rootSuccess: pTop[rootIndex],
+    rootWeightedCost: wTop[rootIndex],
+    rootCandidates,
+    frontierStates,
+  };
+}
+
+// ── Budget policy handle ─────────────────────────────────────────────────────
+// The latest root budget-DP solution is cached in-module so the MC verifier
+// can replay the non-stationary policy table directly instead of re-solving
+// per (state, remaining-budget) pair. Never serialized / posted to the UI.
+
+let _budgetPolicyHandleV3 = null;
+
+function budgetPolicySignatureV3(payload, maxSteps) {
+  const targetIds = getTargetEntries(payload.target).map((entry) => entry.affixId).sort().join(",");
+  const ga = payload.gaConfig || {};
+  return [
+    stateKey(payload.state),
+    targetIds,
+    normalizeIdList(ga.currentGAAffixes).join(","),
+    normalizeIdList(ga.unsatisfactoryAffixIds).join(","),
+    ga.strictMode ? 1 : 0,
+    ga.disableEnchanting ? 1 : 0,
+    maxSteps,
+  ].join("#");
+}
+
+function getBudgetPolicyHandleV3() {
+  return _budgetPolicyHandleV3;
+}
+
+/**
+ * Look up the table action for a concrete rollout state at the given
+ * remaining budget. Returns:
+ *   - an action object (slot indices remapped to the concrete state),
+ *   - null when the table says the state has no useful action, or
+ *   - undefined on a miss (state outside the solved graph) — callers fall
+ *     back to a fresh sub-solve.
+ */
+function lookupBudgetPolicyActionV3(handle, state, remaining) {
+  if (!handle || !handle.context) {
+    return undefined;
+  }
+  let key;
+  try {
+    const attached = typeof cloneStateV2 === "function" ? cloneStateV2(state) : state;
+    key = residualStateKeyV3(normalizeOutcomeStateV2(attached), handle.context);
+  } catch (_) {
+    return undefined;
+  }
+  const index = handle.keyToIndex.get(key);
+  if (index === undefined) {
+    return undefined;
+  }
+  const layer = Math.max(0, Math.min(handle.layers, Math.round(remaining * 2)));
+  const entryIndex = handle.policyLayers[layer][index];
+  if (entryIndex < 0) {
+    return null;
+  }
+  const node = handle.graph.nodes[index];
+  const entry = node.actionEntries[entryIndex];
+  if (!entry) {
+    return null;
+  }
+  const action = entry.action;
+  if (action.type !== "enchant") {
+    return action; // prism actions are slot-independent
+  }
+  // Enchant actions are slot-indexed against the abstract node's state, whose
+  // affix order can differ from the concrete rollout state (keys sort
+  // tokens). Remap the source index by matching the slot signature.
+  const source = node.state.affixes[action.sourceIndex];
+  if (!source) {
+    return undefined;
+  }
+  const concreteIndex = (state.affixes || []).findIndex((entry2) => (
+    entry2
+    && entry2.affixId === source.affixId
+    && !!entry2.isGA === !!source.isGA
+    && !!entry2.isEnchanted === !!source.isEnchanted
+  ));
+  if (concreteIndex < 0) {
+    return undefined;
+  }
+  return { ...action, sourceIndex: concreteIndex };
+}
+
+function buildBudgetResidualFailureResultV3(message, feasibility, decompositionInput, details = {}) {
+  const base = buildResidualFailureResultV3(message, feasibility, decompositionInput, details);
+  base.diagnostics.strategy = BUDGET_RESIDUAL_STRATEGY;
+  base.diagnostics.phase = "phase-6-residual-budget-dp";
+  return base;
+}
+
+function downsampleSuccessByBudgetV3(rootSuccessByBudget, layers, maxSteps) {
+  const points = Math.floor(maxSteps);
+  const curve = new Array(points + 1);
+  for (let k = 0; k <= points; k += 1) {
+    const layer = Math.min(layers, 2 * k);
+    curve[k] = Math.round(rootSuccessByBudget[layer] * 1e6) / 1e6;
+  }
+  return curve;
+}
+
+function solveResidualBudgetPayloadV3(payload, options = {}) {
+  const maxSteps = normalizeMaxStepsV3(
+    options.maxSteps != null ? options.maxSteps : (payload && payload.maxSteps)
+  );
+  const feasibility = options.feasibility || analyzeFeasibilityV3(payload.state, payload.target, payload.data, payload.gaConfig);
+  const decompositionInput = options.decompositionInput || buildDecompositionPlanInputV3(
+    payload.state,
+    payload.target,
+    payload.data,
+    payload.gaConfig,
+    { feasibility }
+  );
+  const baseEnv = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
+  const v2Env = options.residualEnv || buildResidualEnvV3(
+    payload.data,
+    payload.gaConfig,
+    payload.target,
+    options.residualEnvOverrides || {}
+  );
+
+  if (!v2Env) {
+    return buildBudgetResidualFailureResultV3(
+      "Residual solver helpers are unavailable in this environment.",
+      feasibility,
+      decompositionInput,
+      { status: "UNAVAILABLE", maxSteps }
+    );
+  }
+
+  const graph = buildResidualReachableGraphV3(payload.state, payload.target, payload.data, payload.gaConfig, {
+    feasibility,
+    baseEnv,
+    v2Env,
+    stopView: options.stopView || null,
+    budgetPrune: { maxSteps },
+  });
+  if (!Array.isArray(graph.nodes) || graph.nodes.length === 0) {
+    return buildBudgetResidualFailureResultV3(
+      graph.reason || "Residual abstract graph could not be built.",
+      feasibility,
+      decompositionInput,
+      { status: "UNAVAILABLE", maxSteps }
+    );
+  }
+
+  // A state-limit overflow leaves a partial graph; the DP still runs on it
+  // with unexpanded frontier nodes treated as failures, yielding a sound
+  // lower-bound policy instead of a null-action failure.
+  const approximate = !graph.ok;
+  const dp = solveResidualBudgetDPV3(graph, { maxSteps, stopView: options.stopView || null });
+
+  const rootIndex = Number.isFinite(graph.rootIndex) ? graph.rootIndex : 0;
+  const rootNode = graph.nodes[rootIndex];
+
+  const residualDiagnostics = {
+    status: approximate ? "APPROXIMATE_STATE_LIMIT" : "OPTIMAL",
+    ...(approximate ? { approximate: true } : {}),
+    maxSteps,
+    layers: dp.layers,
+    abstractStates: graph.nodes.length,
+    deadStates: graph.deadStates,
+    budgetPrunedStates: graph.budgetPrunedStates || 0,
+    frontierStates: dp.frontierStates,
+    stateLimit: v2Env.stateLimit,
+    successByBudget: downsampleSuccessByBudgetV3(dp.rootSuccessByBudget, dp.layers, maxSteps),
+    heuristic: "Finite-horizon backward induction over the abstract graph; layers = 2 x remaining budget.",
+  };
+  const decompositionDiagnostics = {
+    status: "ESCALATED",
+    applicable: false,
+    reason: decompositionInput && typeof decompositionInput.reason === "string" ? decompositionInput.reason : "",
+    optionCount: decompositionInput && Array.isArray(decompositionInput.options) ? decompositionInput.options.length : 0,
+    targetCount: decompositionInput && Array.isArray(decompositionInput.targets) ? decompositionInput.targets.length : 0,
+    residualTargets: decompositionInput && Array.isArray(decompositionInput.residualTargets)
+      ? decompositionInput.residualTargets
+      : [],
+  };
+
+  let summary;
+  if (rootNode.success) {
+    summary = terminalSummaryV2();
+  } else if (rootNode.deadReason) {
+    summary = emptySummary(rootNode.deadReason);
+  } else {
+    const entryIndex = dp.policyLayers[dp.layers][rootIndex];
+    const action = entryIndex >= 0 ? rootNode.actionEntries[entryIndex].action : null;
+    const successProb = dp.rootSuccess;
+    const expectedSteps = successProb > v2Env.epsilon && Number.isFinite(dp.rootWeightedCost)
+      ? dp.rootWeightedCost / successProb
+      : null;
+    const candidateActions = dp.rootCandidates
+      .map((candidate) => {
+        const entry = rootNode.actionEntries[candidate.entryIndex];
+        const breakdown = getActionProbabilityBreakdown(rootNode.state, entry.action, v2Env);
+        return {
+          action: entry.action,
+          visits: 0,
+          successProb: candidate.successProb,
+          expectedSteps: candidate.successProb > v2Env.epsilon
+            ? candidate.weightedCost / candidate.successProb
+            : null,
+          rank: candidate.successProb,
+          probabilityBreakdown: breakdown.outcomes,
+          sourceBreakdown: breakdown.sources,
+        };
+      })
+      .sort((left, right) => (
+        right.successProb - left.successProb
+        || ((left.expectedSteps == null ? Infinity : left.expectedSteps)
+          - (right.expectedSteps == null ? Infinity : right.expectedSteps))
+      ));
+
+    summary = {
+      action,
+      successProb,
+      expectedSteps,
+      variance: null,
+      stdDev: null,
+      oneStepRisk: action
+        ? getOneStepTargetLossRisk(rootNode.state, action, v2Env, payload.target)
+        : [],
+      diagnostics: {
+        reason: action
+          ? null
+          : (successProb <= v2Env.epsilon
+            ? `No policy reaches the target within ${maxSteps} steps.`
+            : "No valid action from current state."),
+        rootVisits: 0,
+        expandedStates: graph.nodes.length,
+        deadStates: graph.deadStates,
+        candidateActions: candidateActions.slice(0, 6),
+      },
+    };
+  }
+
+  if (options.registerPolicyHandle !== false) {
+    _budgetPolicyHandleV3 = {
+      signature: budgetPolicySignatureV3(payload, maxSteps),
+      graph,
+      keyToIndex: new Map(graph.nodes.map((node, index) => [node.key, index])),
+      policyLayers: dp.policyLayers,
+      layers: dp.layers,
+      maxSteps,
+      context: graph.context,
+    };
+  }
+
+  return {
+    iterations: dp.layers,
+    ...(approximate ? { approximate: true } : {}),
+    ...summary,
+    diagnostics: buildWorkerDiagnosticsV3(summary.diagnostics, {
+      strategy: BUDGET_RESIDUAL_STRATEGY,
+      phase: "phase-6-residual-budget-dp",
+      feasibility,
+      decomposition: decompositionDiagnostics,
+      residual: residualDiagnostics,
+      budget: { maxSteps, binds: true },
+    }),
+    tree: null,
+    stoppedByUser: false,
+    elapsedMs: 0,
   };
 }
 
@@ -5464,6 +6093,16 @@ function computeOptimizationResultV3(payload, options = {}) {
   }
 
   const residualEnvOverrides = getEffectiveResidualEnvOverridesV3(payload, options);
+  const maxSteps = normalizeMaxStepsV3(payload && payload.maxSteps);
+  const budgetSolverOptions = (decompositionInput) => ({
+    feasibility,
+    decompositionInput,
+    maxSteps,
+    stopView: options.stopView || null,
+    residualEnv: options.residualEnv || null,
+    residualEnvOverrides,
+    registerPolicyHandle: options.registerPolicyHandle,
+  });
 
   const decompositionInput = buildDecompositionPlanInputV3(
     payload.state,
@@ -5476,49 +6115,50 @@ function computeOptimizationResultV3(payload, options = {}) {
     const solution = solveDecompositionPlanV3(decompositionInput);
     if (solution.ok) {
       const decompositionResult = buildDecompositionResultV3(solution, feasibility);
-      if (!shouldCompareApproximateILPWithResidualV3(solution)) {
+      // Budget gate: the closed-form/decomposition math is infinite-horizon.
+      // Its exact answer is kept only when the deadline provably barely
+      // binds (expected steps well below the budget); otherwise the case is
+      // re-solved with the finite-horizon budget-DP.
+      const exact = !shouldCompareApproximateILPWithResidualV3(solution);
+      if (exact
+          && Number.isFinite(decompositionResult.expectedSteps)
+          && decompositionResult.expectedSteps <= maxSteps * BUDGET_GATE_FRACTION) {
+        decompositionResult.diagnostics = {
+          ...decompositionResult.diagnostics,
+          budget: {
+            maxSteps,
+            binds: false,
+            gate: `expectedSteps<=maxSteps*${BUDGET_GATE_FRACTION}`,
+          },
+        };
         return decompositionResult;
       }
 
-      const residualApproxCandidate = solveResidualPayloadV3(payload, {
-        feasibility,
-        decompositionInput: {
-          ...decompositionInput,
-          ok: false,
-          reason: "Decomposition returned only a wide-gap approximate ILP incumbent, so the case was also evaluated by the residual solver.",
-        },
-        stopView: options.stopView || null,
-        residualEnv: options.residualEnv || null,
-        residualEnvOverrides,
-      });
-
-      return choosePreferredApproximateResultV3(decompositionResult, residualApproxCandidate);
+      return solveResidualBudgetPayloadV3(payload, budgetSolverOptions({
+        ...decompositionInput,
+        ok: false,
+        reason: exact
+          ? `The exact decomposition estimate (${decompositionResult.expectedSteps == null ? "n/a" : decompositionResult.expectedSteps.toFixed(2)} steps) is not safely below the ${maxSteps}-step budget, so the case was solved with the finite-horizon budget DP.`
+          : "Decomposition returned only a wide-gap approximate ILP incumbent, so the case was solved with the finite-horizon budget DP.",
+      }));
     }
     if (solution.ilpResult && solution.ilpResult.status === "INFEASIBLE") {
-      return solveResidualPayloadV3(payload, {
-        feasibility,
-        decompositionInput: {
-          ...decompositionInput,
-          ok: false,
-          reason: "The decomposition ILP found no feasible exact host assignment, so the case was escalated to the residual solver.",
-        },
-        stopView: options.stopView || null,
-        residualEnv: options.residualEnv || null,
-        residualEnvOverrides,
-      });
+      return solveResidualBudgetPayloadV3(payload, budgetSolverOptions({
+        ...decompositionInput,
+        ok: false,
+        reason: "The decomposition ILP found no feasible exact host assignment, so the case was escalated to the residual solver.",
+      }));
     }
     if (solution.ilpResult) {
-      return buildILPFailureResultV3(solution, feasibility);
+      return solveResidualBudgetPayloadV3(payload, budgetSolverOptions({
+        ...decompositionInput,
+        ok: false,
+        reason: `The decomposition ILP terminated without an exact assignment (${solution.ilpResult.status}), so the case was escalated to the residual solver.`,
+      }));
     }
   }
 
-  return solveResidualPayloadV3(payload, {
-    feasibility,
-    decompositionInput,
-    stopView: options.stopView || null,
-    residualEnv: options.residualEnv || null,
-    residualEnvOverrides,
-  });
+  return solveResidualBudgetPayloadV3(payload, budgetSolverOptions(decompositionInput));
 }
 
 // Approach 1 — one-step concrete refinement of residual headline values.
@@ -5920,12 +6560,20 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
   let truncatedRolloutCount = 0;
   let deadRolloutCount = 0;
   let cappedRolloutCount = 0;
+  let budgetExceededRolloutCount = 0;
+  let successStepSum = 0;       // cube-cost sum over successful rollouts
+  let successRolloutCount = 0;
   const successSteps = [];  // actual steps for successful rollouts (when includeRolloutData)
   const failureSteps = [];  // actual steps for failed/truncated rollouts (before cap)
   const includeRolloutData = !!payload.includeRolloutData;
   const useCubeStepCosts = !!options.useCubeStepCosts;
-  // Per-rollout transition cap; a rollout exceeding it is counted as a failure
-  // (truncated/capped). Configurable via the MC budget; defaults to the constant.
+  // Hard step budget: every run carries one (default applied here for legacy
+  // payloads). Exceeding it fails the rollout, exactly like a GA break.
+  const maxSteps = normalizeMaxStepsV3(
+    options.maxSteps != null ? options.maxSteps : (payload && payload.maxSteps)
+  );
+  // Per-rollout transition cap (outer safety net on rollout LENGTH, distinct
+  // from the cube-cost budget above); configurable via the MC budget.
   const stepCap = (budget && Number.isFinite(budget.stepCap) && budget.stepCap > 0)
     ? budget.stepCap
     : MC_ROLLOUT_STEP_CAP;
@@ -5940,10 +6588,12 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
 
     let state = payload.state;
     let steps = 0;
+    let costUsed = 0;
     let transitions = 0;
     let truncated = false;
     let dead = false;
     let capped = false;
+    let budgetExceeded = false;
 
     while (true) {
       const term = isTerminal(state, payload.target, env);
@@ -5964,12 +6614,22 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
         break;
       }
 
-      const action = policyFn(state);
+      const action = policyFn(state, maxSteps - costUsed);
       if (!action) {
         truncated = true;
         dead = true;
         if (includeRolloutData) failureSteps.push(steps);
         steps = stepCap;
+        break;
+      }
+
+      const cost = actionCost(action, state);
+      if (costUsed + cost > maxSteps) {
+        // Taking this action would blow the hard step budget — failure.
+        truncated = true;
+        budgetExceeded = true;
+        if (includeRolloutData) failureSteps.push(steps);
+        steps = MC_ROLLOUT_STEP_CAP;
         break;
       }
 
@@ -5989,7 +6649,8 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
       }
 
       const chosen = pickWeightedOutcomeV3(outcomes);
-      steps += useCubeStepCosts ? actionCost(action, state) : 1;
+      steps += useCubeStepCosts ? cost : 1;
+      costUsed += cost;
       transitions++;
       state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
     }
@@ -5999,8 +6660,11 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
       truncatedRolloutCount++;
       if (dead) deadRolloutCount++;
       if (capped) cappedRolloutCount++;
-    } else if (includeRolloutData) {
-      successSteps.push(steps);
+      if (budgetExceeded) budgetExceededRolloutCount++;
+    } else {
+      successStepSum += steps;
+      successRolloutCount++;
+      if (includeRolloutData) successSteps.push(steps);
     }
 
     const completed = stepCounts.length;
@@ -6030,6 +6694,10 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
     truncatedRolloutCount,
     deadRolloutCount,
     cappedRolloutCount,
+    budgetExceededRolloutCount,
+    successRolloutCount,
+    successMean: successRolloutCount > 0 ? successStepSum / successRolloutCount : NaN,
+    maxSteps,
     successSteps,
     failureSteps,
     aborted,
@@ -6045,27 +6713,62 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
   if (!Number.isFinite(intermediateResult.expectedSteps)) return intermediateResult;
 
   const env = buildEnv(payload.data || {}, payload.gaConfig || {}, payload.target || {});
-  const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
   const includeRolloutData = !!payload.includeRolloutData;
+  const maxSteps = normalizeMaxStepsV3(payload && payload.maxSteps);
+  const strategy = intermediateResult.diagnostics && intermediateResult.diagnostics.strategy;
+  let policyTableMisses = 0;
 
   if (typeof options.onProgress === "function") {
     options.onProgress({ completed: 0, total: budget.targetRollouts, intermediateResult });
   }
 
-  // Seed cache with the headline state's action — the optimizer already
-  // computed it for the displayed recommendation.
-  actionCache.set(stateKey(payload.state), intermediateResult.action);
-
-  const policyFn = (state) => {
-    const key = stateKey(state);
-    let action = actionCache.get(key);
-    if (action === undefined) {
-      const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0 });
-      action = subResult && subResult.action ? subResult.action : null;
-      actionCache.set(key, action);
-    }
-    return action;
-  };
+  let policyFn;
+  if (strategy === BUDGET_RESIDUAL_STRATEGY) {
+    // Non-stationary policy: replay the budget-DP table (registered by the
+    // headline solve) per (abstract state, remaining budget); fall back to a
+    // budget-aware sub-solve only when a rollout leaves the solved graph.
+    const handle = getBudgetPolicyHandleV3();
+    const handleValid = !!(handle && handle.signature === budgetPolicySignatureV3(payload, maxSteps));
+    const subCache = new Map();             // `${stateKey}|b${scaled}` -> action|null
+    policyFn = (state, remaining) => {
+      if (handleValid) {
+        const fromTable = lookupBudgetPolicyActionV3(handle, state, remaining);
+        if (fromTable !== undefined) {
+          return fromTable;
+        }
+      }
+      policyTableMisses++;
+      const key = `${stateKey(state)}|b${Math.round(remaining * 2)}`;
+      if (subCache.has(key)) {
+        return subCache.get(key);
+      }
+      const subResult = optimizePayloadV3(
+        { ...payload, state, maxSteps: remaining },
+        { refineDepth: 0, registerPolicyHandle: false }
+      );
+      const action = subResult && subResult.action ? subResult.action : null;
+      subCache.set(key, action);
+      return action;
+    };
+  } else {
+    // Stationary regime (fast-path result; the deadline provably barely
+    // binds): cache by state alone — the budget still fails rollouts that
+    // exceed it, via the engine.
+    const actionCache = new Map();          // stateKey -> { type, prism, ... } or null (dead)
+    // Seed cache with the headline state's action — the optimizer already
+    // computed it for the displayed recommendation.
+    actionCache.set(stateKey(payload.state), intermediateResult.action);
+    policyFn = (state) => {
+      const key = stateKey(state);
+      let action = actionCache.get(key);
+      if (action === undefined) {
+        const subResult = optimizePayloadV3({ ...payload, state }, { refineDepth: 0, registerPolicyHandle: false });
+        action = subResult && subResult.action ? subResult.action : null;
+        actionCache.set(key, action);
+      }
+      return action;
+    };
+  }
 
   const run = runMCRolloutLoopV3(payload, env, policyFn, budget, options);
   const stats = computeMCStatsV3(run.stepCounts);
@@ -6095,10 +6798,16 @@ function runMCVerificationV3(payload, intermediateResult, options = {}) {
         stdev: stats.stdev,
         intermediateSteps: intermediateResult.expectedSteps,
         truncatedRolloutCount: run.truncatedRolloutCount,
-        cappedRolloutCount: run.cappedRolloutCount,
         deadRolloutCount: run.deadRolloutCount,
-        successRate,
+        cappedRolloutCount: run.cappedRolloutCount,
+        budgetExceededRolloutCount: run.budgetExceededRolloutCount,
+        successRate: completedRollouts > 0
+          ? run.successRolloutCount / completedRollouts
+          : NaN,
+        successMean: run.successMean,
+        maxSteps: run.maxSteps,
         stepCap: budget.stepCap,
+        policyTableMisses,
         wallTimeMs: run.wallTimeMs,
         aborted: run.aborted,
         earlyConverged: run.earlyConverged,
@@ -6143,9 +6852,12 @@ function runPolicyMCEvaluationV3(payload, policyFn, options = {}) {
     truncatedRolloutCount: run.truncatedRolloutCount,
     deadRolloutCount: run.deadRolloutCount,
     cappedRolloutCount: run.cappedRolloutCount,
+    budgetExceededRolloutCount: run.budgetExceededRolloutCount,
     successRate: completedRollouts > 0
       ? (completedRollouts - run.truncatedRolloutCount) / completedRollouts
       : NaN,
+    successMean: run.successMean,
+    maxSteps: run.maxSteps,
     wallTimeMs: run.wallTimeMs,
     aborted: run.aborted,
     earlyConverged: run.earlyConverged,
@@ -6369,6 +7081,27 @@ function runOptimizationV3(payload, runId) {
       result = null;
     }
 
+    // Budget gate for the Rust path: the Rust optimizer has no step-budget
+    // concept, so its result is only accepted when it is an exact
+    // decomposition answer whose deadline provably barely binds; everything
+    // else re-solves through the JS finite-horizon budget DP below.
+    if (result) {
+      const maxSteps = normalizeMaxStepsV3(payload && payload.maxSteps);
+      const rustStrategy = result.diagnostics && result.diagnostics.strategy;
+      const gatePassed = rustStrategy === DECOMPOSITION_STRATEGY
+        && !result.approximate
+        && Number.isFinite(result.expectedSteps)
+        && result.expectedSteps <= maxSteps * BUDGET_GATE_FRACTION;
+      if (gatePassed) {
+        result.diagnostics = {
+          ...result.diagnostics,
+          budget: { maxSteps, binds: false, gate: `expectedSteps<=maxSteps*${BUDGET_GATE_FRACTION}` },
+        };
+      } else {
+        result = null;
+      }
+    }
+
     if (result) {
       const wantsVerification = payload.tightenStepsLevel === "light"
         || payload.tightenStepsLevel === "heavy"
@@ -6569,7 +7302,11 @@ if (typeof module !== "undefined" && module.exports) {
     FALLBACK_STRATEGY,
     DECOMPOSITION_STRATEGY,
     RESIDUAL_STRATEGY,
+    BUDGET_RESIDUAL_STRATEGY,
     RULES_STRATEGY,
+    DEFAULT_MAX_STEPS,
+    MAX_STEPS_CAP,
+    normalizeMaxStepsV3,
     CLOSED_FORM_CASE_IDS,
     normalizeIdList,
     getCurrentAffixes,
@@ -6619,6 +7356,11 @@ if (typeof module !== "undefined" && module.exports) {
     computeResidualHeuristicStepsV3,
     solveResidualExactV3,
     solveResidualLAOStarV3,
+    solveResidualBudgetDPV3,
+    solveResidualBudgetPayloadV3,
+    residualBudgetHeuristicV3,
+    getBudgetPolicyHandleV3,
+    lookupBudgetPolicyActionV3,
     buildResidualApproximateResultV3,
     getValidActionsV2,
     solveResidualPayloadV3,

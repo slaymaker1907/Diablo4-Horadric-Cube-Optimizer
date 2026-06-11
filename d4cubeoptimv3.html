@@ -1091,16 +1091,6 @@
 					<label for="mc-timeout-input">Adaptive MC Timeout (seconds)</label>
 					<input id="mc-timeout-input" type="number" min="10" max="600" step="10" value="120" style="width:72px;">
 				</div>
-				<div class="field" style="margin-top:8px;">
-					<label for="mc-max-steps-input">Max MC Steps (per simulation)</label>
-					<input id="mc-max-steps-input" type="number" min="1" max="1000000" step="50" value="1000" style="width:90px;">
-				</div>
-				<div style="font-size:0.84rem;color:var(--muted);margin:4px 0 0;line-height:1.45;">
-					A simulated playthrough that needs more than this many cube/enchant steps is counted as a
-					<em>failure</em>, not a success — so the displayed success probability reflects reaching the
-					target within this budget. The success probability is shown only when a tightening option above
-					is selected (otherwise it reads "–").
-				</div>
 
 				<div class="divider"></div>
 
@@ -1376,17 +1366,13 @@
 		const SOLVER_MODE_KEY = "d4cubeoptim_solver_mode_v3";
 		const SOLVER_MODES = ["rust", "js", "rules"];
 		const MC_TIMEOUT_KEY = "d4opt-mc-timeout-s";
-		// Per-rollout MC step cap. A simulation exceeding it is a failure, so the
-		// displayed success probability reflects reaching the target within budget.
-		const MC_MAX_STEPS_KEY = "d4opt-mc-max-steps";
-		const MC_MAX_STEPS_DEFAULT = 1000;
 		const DIST_GRAPH_KEY = "d4opt-dist-graph-enabled";
 		const DIST_ROLLOUTS_KEY = "d4opt-dist-rollouts";
 		// Outcome-tracking store. Separate from the main state blob and from
 		// Copy Config; invalidated when MODEL_VERSION changes (baseline differs).
 		const TRACKING_KEY = "d4cubeoptim_tracking_v3";
 		const TRACKING_ROW_CAP = 5000;
-		const WORKER_VERSION = "2026-06-11-v3-budget-dp-r2";
+		const WORKER_VERSION = "2026-06-11-v3-mc-budget-clamp";
 
 		const CLASSES = Array.isArray(_cfg.CLASSES) && _cfg.CLASSES.length > 0
 			? _cfg.CLASSES.slice()
@@ -1460,7 +1446,6 @@
 			tightenStepsLevel: "none", // persisted to TIGHTEN_KEY, not main state blob
 			solverMode: "rust", // "rust" | "js" | "rules"; persisted to SOLVER_MODE_KEY, not main state blob
 			mcTimeoutS: 120, // persisted to MC_TIMEOUT_KEY
-			maxMCSteps: MC_MAX_STEPS_DEFAULT, // persisted to MC_MAX_STEPS_KEY
 			distGraphEnabled: false, // persisted to DIST_GRAPH_KEY
 			distRollouts: 200, // persisted to DIST_ROLLOUTS_KEY
 		};
@@ -1717,14 +1702,6 @@
 				saveMcTimeoutS(appState.mcTimeoutS);
 			});
 
-			// Max MC steps input (within Settings modal → Result Verification).
-			const mcMaxStepsInput = document.getElementById("mc-max-steps-input");
-			mcMaxStepsInput.addEventListener("change", () => {
-				appState.maxMCSteps = Math.max(1, Math.min(1000000, parseInt(mcMaxStepsInput.value, 10) || MC_MAX_STEPS_DEFAULT));
-				mcMaxStepsInput.value = appState.maxMCSteps;
-				saveMaxMCSteps(appState.maxMCSteps);
-			});
-
 			// Simulation Graph settings (within Settings modal).
 			const distGraphToggle = document.getElementById("dist-graph-toggle");
 			const distRolloutsInput = document.getElementById("dist-rollouts-input");
@@ -1838,7 +1815,6 @@
 				tightenStepsSelect.style.opacity = appState.distGraphEnabled ? "0.45" : "";
 				solverModeSelect.value = SOLVER_MODES.includes(appState.solverMode) ? appState.solverMode : "rust";
 				mcTimeoutInput.value = appState.mcTimeoutS || 120;
-				mcMaxStepsInput.value = appState.maxMCSteps || MC_MAX_STEPS_DEFAULT;
 				distGraphToggle.checked = appState.distGraphEnabled === true;
 				distRolloutsInput.value = appState.distRollouts || 200;
 				distRolloutsRow.style.display = appState.distGraphEnabled ? "" : "none";
@@ -2124,11 +2100,6 @@
 					tightenStepsOverrides = { adaptiveWallBudgetMs: timeoutMs };
 				}
 			}
-
-			// Configurable per-rollout MC step cap. Always forwarded so both the JS
-			// and Rust MC engines treat a simulation exceeding it as a failure.
-			const maxMCSteps = Math.max(1, Math.min(1000000, parseInt(appState.maxMCSteps, 10) || MC_MAX_STEPS_DEFAULT));
-			tightenStepsOverrides = { ...(tightenStepsOverrides || {}), maxSteps: maxMCSteps };
 
 			const solvePayload = {
 				type: "run",
@@ -2747,7 +2718,10 @@
 			const maxStep = allSteps.length > 0 ? Math.max(...allSteps) : 0;
 			const mean = gs.mean || 0;
 			const stdev = gs.stdev || 0;
-			const xMax = Math.max(maxStep + 1, Math.ceil(mean + 4 * stdev), 5);
+			// No rollout can exceed the cube-step budget, so never scale the x-axis
+			// past it (the mean+4σ heuristic is for unbounded distributions).
+			const budgetCap = Number.isFinite(gs.maxSteps) && gs.maxSteps > 0 ? gs.maxSteps + 1 : Infinity;
+			const xMax = Math.min(budgetCap, Math.max(maxStep + 1, Math.ceil(mean + 4 * stdev), 5));
 
 			// Build per-step bins
 			const binCount = Math.min(xMax + 1, 200);
@@ -4393,19 +4367,6 @@
 			try { localStorage.setItem(MC_TIMEOUT_KEY, JSON.stringify(v)); } catch {}
 		}
 
-		function loadMaxMCSteps() {
-			try {
-				const raw = localStorage.getItem(MC_MAX_STEPS_KEY);
-				if (!raw) return MC_MAX_STEPS_DEFAULT;
-				const v = parseInt(JSON.parse(raw), 10);
-				return Number.isFinite(v) && v >= 1 && v <= 1000000 ? v : MC_MAX_STEPS_DEFAULT;
-			} catch { return MC_MAX_STEPS_DEFAULT; }
-		}
-
-		function saveMaxMCSteps(v) {
-			try { localStorage.setItem(MC_MAX_STEPS_KEY, JSON.stringify(v)); } catch {}
-		}
-
 		function loadDistGraphEnabled() {
 			try {
 				const raw = localStorage.getItem(DIST_GRAPH_KEY);
@@ -4693,7 +4654,6 @@
 				const tightenStepsLevel = loadTightenStepsLevel();
 				const solverMode = loadSolverMode();
 				const mcTimeoutS = loadMcTimeoutS();
-				const maxMCSteps = loadMaxMCSteps();
 				const distGraphEnabled = loadDistGraphEnabled();
 				const distRollouts = loadDistRollouts();
 				if (!raw) {
@@ -4702,7 +4662,6 @@
 					s.tightenStepsLevel = tightenStepsLevel;
 					s.solverMode = solverMode;
 					s.mcTimeoutS = mcTimeoutS;
-					s.maxMCSteps = maxMCSteps;
 					s.distGraphEnabled = distGraphEnabled;
 					s.distRollouts = distRollouts;
 					return s;
@@ -4719,7 +4678,6 @@
 					tightenStepsLevel,
 					solverMode,
 					mcTimeoutS,
-					maxMCSteps,
 					distGraphEnabled,
 					distRollouts,
 				};

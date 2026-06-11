@@ -39,10 +39,9 @@ pub fn resolve_mc_budget(payload: &OptimizePayload) -> Option<MCBudget> {
         overrides?.get(key)?.as_u64().map(|v| v as usize)
     }
 
-    // Configurable MC step cap (defaults to the constant when unset / invalid).
-    let step_cap = get_override(overrides, "maxSteps")
-        .filter(|&v| v > 0)
-        .unwrap_or(MC_ROLLOUT_STEP_CAP);
+    // Per-rollout transition-count safety net (distinct from the cube-step
+    // budget payload.maxSteps / "MAX CUBE STEPS"). Fixed constant.
+    let step_cap = MC_ROLLOUT_STEP_CAP;
 
     match level {
         "light" => {

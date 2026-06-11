@@ -6405,10 +6405,10 @@ const MC_PROGRESS_EVERY = 20;
 function resolveMCBudgetV3(payload) {
   const level = payload.tightenStepsLevel;
   const overrides = payload.tightenStepsOverrides || {};
-  // Configurable per-rollout step cap (a rollout exceeding it is a failure).
-  const stepCap = (Number.isFinite(overrides.maxSteps) && overrides.maxSteps > 0)
-    ? Math.floor(overrides.maxSteps)
-    : MC_ROLLOUT_STEP_CAP;
+  // Per-rollout transition-count safety net (distinct from the cube-step budget
+  // payload.maxSteps, which is the user-facing "MAX CUBE STEPS" cap). Fixed; a
+  // rollout that somehow runs this many transitions without terminating fails.
+  const stepCap = MC_ROLLOUT_STEP_CAP;
   if (level === "light") {
     const target = overrides.lightRollouts != null ? overrides.lightRollouts : MC_LIGHT_ROLLOUTS;
     return { level, targetRollouts: target, maxRollouts: target, wallBudgetMs: Infinity, adaptive: false, stepCap };
@@ -6655,6 +6655,17 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
       state = expandFamilyOtherInStateV3(chosen.state, env, payload.target);
     }
 
+    // In the finite-budget model no rollout can spend more than the cube-step
+    // budget, so the recorded step count must never exceed maxSteps. Failure
+    // branches use the transition-cap sentinel (MC_ROLLOUT_STEP_CAP / stepCap,
+    // ~1000) as the penalty — left unclamped that inflates the mean/stdev and
+    // pushes "Expected Cube Steps" and the Simulation Graph far past MAX CUBE
+    // STEPS. Successful rollouts can also tick one transition past the budget via
+    // a zero-cost fresh enchant (transition count vs cube cost). Clamp every
+    // rollout's recorded steps to the budget so nothing displays beyond it.
+    if (Number.isFinite(maxSteps)) {
+      steps = Math.min(steps, maxSteps);
+    }
     stepCounts.push(steps);
     if (truncated) {
       truncatedRolloutCount++;
@@ -6689,6 +6700,13 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
     }
   }
 
+  // failureSteps are pushed mid-loop (actual transition count, which a zero-cost
+  // fresh enchant can tick one past the cube-step budget); bound them to the
+  // budget so the Simulation Graph never plots a bar beyond MAX CUBE STEPS.
+  const clampToBudget = (arr) => (Number.isFinite(maxSteps)
+    ? arr.map((s) => Math.min(s, maxSteps))
+    : arr);
+
   return {
     stepCounts,
     truncatedRolloutCount,
@@ -6698,8 +6716,8 @@ function runMCRolloutLoopV3(payload, env, policyFn, budget, options = {}) {
     successRolloutCount,
     successMean: successRolloutCount > 0 ? successStepSum / successRolloutCount : NaN,
     maxSteps,
-    successSteps,
-    failureSteps,
+    successSteps: clampToBudget(successSteps),
+    failureSteps: clampToBudget(failureSteps),
     aborted,
     earlyConverged,
     wallTimeMs: Date.now() - startTime,

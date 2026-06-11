@@ -158,6 +158,12 @@ This file tracks the staged transition from the v2 exact-SSP solver to the v3 hy
 - **Evaluation**: `scripts/compare-rules-vs-lao.js` gains `--max-steps=N` (default 200); the optimizer arm now measures through `runMCVerificationV3` (policy-table replay). At `--max-steps=30` on the user-reported Legendary+GA Ring scenario the budget DP reaches 54% success vs 21.5% for the budget-blind rules policy — budget-aware rules are deferred work.
 - Tests: exact truncated-geometric closed form (P and conditional steps to 1e-12), zero-cost layering (success within a 0.5-step budget via fresh enchant), budget-dependent policy flip (focused gamble at 1 step vs remove-first line with room), monotone curve + MC differential (4·SE), hybrid gate both ways, `normalizeMaxStepsV3` unit tests. Two obsolete LAO*-refinement tests removed (covered by a budget-DP determinism test).
 
+### Fix: budget-aware MC must not record steps past MAX CUBE STEPS (2026-06)
+
+- The budget-aware MC failed rollouts (budget exceeded / GA break / stuck) by recording the transition-cap sentinel (`MC_ROLLOUT_STEP_CAP` / `stepCap`, ~1000) as the penalty step count. With a small budget (e.g. 150) this inflated the displayed `mean` (~760) and `stdev` (~410), so "Expected Cube Steps" and the Simulation Graph showed values far beyond the budget (x-axis scaled by `mean + 4σ` ≈ 2100+).
+- `runMCRolloutLoopV3` now clamps every rollout's recorded `steps` to `maxSteps` (no rollout can spend more than the cube-step budget; a zero-cost fresh enchant could also tick one transition past it). The per-rollout `successSteps`/`failureSteps` graph arrays are clamped to the budget as well. `drawDistCanvas` caps the x-axis at `maxSteps + 1` instead of `mean + 4σ`. Result: mean, expected steps, and every graph bar stay ≤ MAX CUBE STEPS. `WORKER_VERSION` → `2026-06-11-v3-mc-budget-clamp`.
+- Removed the now-redundant Settings → Developer "Max MC Steps" input (and its `maxMCSteps` state, `d4opt-mc-max-steps` key, load/save, and `tightenStepsOverrides.maxSteps` plumbing): the primary "MAX CUBE STEPS" budget is the single user-facing step cap. The per-rollout transition-count safety net (`stepCap` in JS `resolveMCBudgetV3` / Rust `resolve_mc_budget`) is now a fixed `MC_ROLLOUT_STEP_CAP` constant, no longer overridable.
+
 ## Deferred Work
 
 - Sparse residual expansion beyond the current bounded abstract-graph approach if larger browser cases make that necessary.
